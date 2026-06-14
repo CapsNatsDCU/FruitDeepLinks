@@ -668,8 +668,12 @@ def main(argv=None):
     print("=" * 60)
     try:
         conn = sqlite3.connect(DB_PATH)
+        # SQLite defaults foreign_keys OFF per-connection, so the playables
+        # ON DELETE CASCADE never fires unless we enable it here. Without this
+        # every deleted event strands its playables rows (DB bloat).
+        conn.execute("PRAGMA foreign_keys = ON")
         cur = conn.cursor()
-        
+
         # Count events before cleanup (including NULL end_utc events with old start dates)
         cur.execute("""
             SELECT COUNT(*) FROM events 
@@ -697,7 +701,14 @@ def main(argv=None):
         print("[OK] Step 5c complete")
     except Exception as e:
         print(f"[WARN] Step 5c failed (non-fatal): {e}")
-    
+
+    # Step 5c-purge: Sweep up orphaned playables left by past non-cascading
+    # event deletes. Idempotent and non-fatal (only deletes/vacuums if needed).
+    run_step("5c-purge", total_steps, "Purging orphaned playables", [
+        "python3", "migrate_purge_orphan_playables.py",
+        "--db", str(DB_PATH),
+    ], allow_fail=True)
+
     # Step 5d: Ensure locale column exists and populate for ESPN playables
     if not run_step("5d", total_steps, "Ensuring locale column and populating ESPN locales", [
         "python3", "migrate_add_locale.py",
@@ -895,8 +906,11 @@ def main(argv=None):
         print("=" * 60)
         try:
             conn = sqlite3.connect(espn_db)
+            # Required for the "CASCADE automatically removes associated feeds"
+            # behavior below — SQLite ignores FKs unless enabled per-connection.
+            conn.execute("PRAGMA foreign_keys = ON")
             cur = conn.cursor()
-            
+
             # Count events before cleanup (using stop_utc for ESPN Graph)
             cur.execute("SELECT COUNT(*) FROM events WHERE stop_utc < datetime('now', '-2 days')")
             old_count = cur.fetchone()[0]
