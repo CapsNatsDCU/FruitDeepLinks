@@ -46,15 +46,6 @@ class _Config:
     PCAST_SERVER = os.getenv("PCAST_SERVER", "localhost")
     PCAST_PORT = int(os.getenv("PCAST_PORT", "5589"))
 
-    # CDVR detector
-    DETECTOR_ENABLED: bool = bool(CDVR_DVR_PATH and CDVR_DVR_PATH.strip())
-    STREAMLINK_DIR: Path = (
-        Path("/mnt/dvr") / "Imports" / "Videos" / "FruitDeepLinks"
-        if DETECTOR_ENABLED
-        else None
-    )
-    DETECT_DEBOUNCE_SECONDS = float(os.getenv("DETECT_DEBOUNCE_SECONDS", "3"))
-
     # Auto-refresh defaults (can be overridden by DB prefs)
     AUTO_REFRESH_ENABLED = os.getenv("AUTO_REFRESH_ENABLED", "1").lower() not in (
         "0",

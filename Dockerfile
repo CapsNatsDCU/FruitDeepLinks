@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PYTHONPATH=/app
 
-# --- System deps (incl. ffmpeg for dummy HLS segment) ---
+# --- System deps ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     curl \
@@ -20,7 +20,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-dejavu \
     fonts-noto-color-emoji \
     tzdata \
-    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Install Chromium + ChromeDriver for Selenium (native arm64 + amd64 support) ---

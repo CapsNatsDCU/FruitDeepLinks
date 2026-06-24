@@ -1,5 +1,7 @@
 # HTTP Deeplink Conversion for Android/Fire TV
 
+> **⚠️ v1 historical doc — not ported to v2.** This document describes the legacy CDVR Detector flow (`fruitdeeplinks_server.py`), which auto-detected the client platform when a lane was tuned and launched playback. That detector was **not ported** to the v2 server. In v2, deeplink format is selected explicitly via the `deeplink_format` query param / device profiles (ADB lanes + `/api/lane/<n>/launch`), not by runtime platform detection. The HTTP deeplink *conversion* logic itself (`deeplink_converter.py`) is still current; only the detector-driven parts below are obsolete.
+
 ## Overview
 
 Apple TV Sports API returns deeplinks in app scheme format (e.g., `aiv://`, `sportscenter://`), which work great on tvOS but often fail on Android and Fire TV. This feature converts those scheme-based deeplinks to HTTP URLs that work across all platforms.

@@ -1,5 +1,7 @@
 # Padding Window Deeplink Fallback - Implementation Summary
 
+> **⚠️ v1 historical doc — not ported to v2.** This describes the legacy CDVR Detector (`fruitdeeplinks_server.py`), whose detector thread tuned lanes and launched streams. That detector was **not ported** to the v2 server, so the detector-driven walkthrough and logs below do not reflect current behavior. The underlying padding-window fallback concept (resolving a recent real event's deeplink within `FRUIT_PADDING_MINUTES`) still applies to v2's `/whatson` + `/api/lane/<n>/launch` path.
+
 ## Overview
 Implemented automatic deeplink fallback during padding windows so users can continue watching even after an event officially ends but is still shown in the XMLTV guide.
 

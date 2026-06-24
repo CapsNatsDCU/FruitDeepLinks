@@ -16,7 +16,6 @@ Routes:
   GET /m3u/adb[?profile=fire|android|apple]
   GET /xmltv/direct
   GET /m3u/direct
-  GET /lanes/<lane_id>/stream.m3u8
 """
 
 from flask import Blueprint, jsonify, redirect, request, send_file
@@ -124,34 +123,6 @@ def serve_adb_m3u():
     if not fp.exists():
         return jsonify({"error": f"{filename} not found — run export first"}), 404
     return send_file(str(fp), mimetype="audio/x-mpegurl")
-
-
-@bp.route("/lanes/<int:lane_id>/stream.m3u8")
-def lane_stream(lane_id):
-    return jsonify({
-        "error": "Stream proxying not yet implemented",
-        "lane_id": lane_id,
-        "message": "Use direct deeplinks for now",
-    }), 501
-
-
-@bp.route("/lane/<int:lane_number>/stream.m3u8", methods=["GET", "HEAD"])
-def serve_lane_hls(lane_number):
-    """CDVR Detector HLS proxy — requires CDVR_DVR_PATH env var to be set."""
-    from server.config import cfg
-    if not cfg.DETECTOR_ENABLED:
-        return "CDVR Detector not enabled. Set CDVR_DVR_PATH to enable.", 503
-    # Full detector logic deferred; the env var gates this feature.
-    return "CDVR Detector not yet ported to v2 server.", 503
-
-
-@bp.route("/lane/<int:lane_number>/segment.ts")
-def serve_segment(lane_number):
-    """CDVR Detector dummy segment — requires CDVR_DVR_PATH env var to be set."""
-    from server.config import cfg
-    if not cfg.DETECTOR_ENABLED:
-        return "Segment not available", 404
-    return "CDVR Detector not yet ported to v2 server.", 503
 
 
 # ---- Private ----
