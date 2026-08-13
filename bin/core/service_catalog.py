@@ -50,7 +50,11 @@ DISPLAY_NAMES: dict[str, str] = {
     "aiv_willow": "Amazon - Willow TV",
     "aiv_free": "Amazon - Free with Ads",
     "aiv_squash": "Amazon - SquashTV",
+    "aiv_mlbtv": "Amazon - MLB.TV",
+    "aiv_bein": "Amazon - beIN Sports Connect",
+    "aiv_mlb_network": "Amazon - MLB Network",
     "aiv_aggregator": "Amazon - Unknown",
+    "aiv_unavailable_in_location": "Amazon - Unavailable (Regional Restriction)",
 
     # Max / Warner
     "max": "Max",
@@ -170,6 +174,8 @@ INTERNAL_PRIORITY: dict[str, int] = {
     "aiv_vix": 21,
     "aiv_tennis_channel": 22,
     "aiv_fanduel": 22,
+    "aiv_bein": 22,
+    "aiv_mlb_network": 22,
     "nflctv": 22,
     "watchtru": 23,
     "ncaa_march_madness": 24,
@@ -179,6 +185,7 @@ INTERNAL_PRIORITY: dict[str, int] = {
     # League passes
     "nba": 26,
     "aiv_nba_league_pass": 26,
+    "aiv_mlbtv": 26,
     "gametime": 26,
     "mlb": 26,
     "nhl": 26,
@@ -191,6 +198,9 @@ INTERNAL_PRIORITY: dict[str, int] = {
     # Generic web
     "https": 30,
     "http": 31,
+
+    # Confirmed currently unwatchable -- never auto-select over any real option
+    "aiv_unavailable_in_location": 32,
 }
 
 
@@ -261,10 +271,13 @@ DEFAULT_USER_PRIORITY: dict[str, int] = {
     "aiv_fox": 20,
     "aiv_nba_league_pass": 18,
     "aiv_dazn": 18,
+    "aiv_mlbtv": 18,
     "aiv_vix_premium": 16,
     "aiv_vix": 15,
     "aiv_tennis_channel": 14,
     "aiv_fanduel": 14,
+    "aiv_bein": 14,
+    "aiv_mlb_network": 14,
     "aiv_paramount_plus": 13,
     "aiv_willow": 12,
     "aiv_wnba_league_pass": 12,
@@ -275,6 +288,9 @@ DEFAULT_USER_PRIORITY: dict[str, int] = {
     # Tier 6: Generic / fallback (1-9)
     "https": 5,
     "http": 4,
+
+    # Confirmed currently unwatchable -- sorts to the very bottom of the Filters page
+    "aiv_unavailable_in_location": 1,
 }
 
 

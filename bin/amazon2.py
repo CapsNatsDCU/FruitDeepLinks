@@ -45,6 +45,15 @@ BENEFIT_RE_LIST = [
     re.compile(r'"benefitId"\s*:\s*"([A-Za-z0-9_.\-]+)"'),
 ]
 
+# Distinct, real logical_service for content confirmed (via the scoped buy-box-msg element,
+# not a page-wide text scan -- see _looks_unavailable_page) to be currently region-blocked.
+# This is deliberately its own filterable entry on the Filters page rather than either
+# silently retaining a stale prior classification or being hardcoded out of exports: the
+# user can just leave it disabled in enabled_services to exclude it via the existing filter
+# mechanism, and it stays visible/auditable if the region situation changes.
+UNAVAILABLE_IN_LOCATION_CHANNEL_ID = "aiv_unavailable_in_location"
+UNAVAILABLE_IN_LOCATION_CHANNEL_NAME = "Unavailable (Regional Restriction)"
+
 # BenefitId -> display name + canonical logical service id (matches your amazon_services style)
 BENEFIT_MAP: Dict[str, Tuple[str, str]] = {
     "prime_included": ("Prime Exclusive", "aiv_prime"),
@@ -61,20 +70,45 @@ BENEFIT_MAP: Dict[str, Tuple[str, str]] = {
     "amzn1.dv.spid.8cc2a36e-cd1b-d2cb-0e3b-b9ddce868f1d": ("FOX One", "aiv_fox_one"),
     # Channel UUIDs (when benefit_id returns the channel instead of short benefit ID)
     "amzn1.dv.channel.7a36cb2b-40e6-40c7-809f-a6cf9b9f0859": ("NBA League Pass", "aiv_nba_league_pass"),
+    # Confirmed live via UNKNOWN_BENEFIT_ID scrape logs on 2026-08-13. Mapping these directly
+    # means classification no longer depends on what the entitlement message happens to say
+    # (e.g. "Watch for free" instead of naming the service) for a benefit_id we already know.
+    "foxoneus": ("FOX One", "aiv_fox_one"),
+    "beinus": ("beIN Sports Connect", "aiv_bein"),
+    "mlbnetwork": ("MLB Network", "aiv_mlb_network"),
+    "cbsaacf": ("Paramount+", "aiv_paramount_plus"),
+    "cbsaapc": ("Paramount+", "aiv_paramount_plus"),
 }
 
-# Simple inference from entitlement/page text -> (display name, logical_service)
+# Simple inference from the narrow entitlement-message element (e.g. "Join Prime",
+# "Free trial of FOX One") -> (display name, logical_service).
+#
+# Deliberately NOT matched against full page body text. A 2026-08-13 live audit proved that
+# unreliable for every service, not just Prime: Amazon's page includes unrelated content
+# (recommendation widgets, other channel upsells) that these same patterns match against,
+# producing wrong labels -- e.g. an MLB Network page got labeled "Tennis Channel", a
+# Paramount+ trial got labeled "WNBA League Pass", purely from patterns matching elsewhere
+# on the page. Only the entitlement element (a short, purpose-built message) is trustworthy
+# enough to pattern-match; anything else falls through to BENEFIT_MAP or the generic fallback.
+#
+# NOTE: aiv_mlbtv's benefit_id is not yet confirmed (never observed in debug CSVs).
+# This pattern is a best-effort placeholder; once a real MLB.TV entitlement string or
+# benefit_id shows up in the scrape logs (see the UNKNOWN_BENEFIT_ID warnings below),
+# add the confirmed benefit_id to BENEFIT_MAP so this text-inference path isn't needed.
 TEXT_INFER: List[Tuple[re.Pattern, Tuple[str, str]]] = [
     (re.compile(r"\bNBA League Pass\b", re.I), ("NBA League Pass", "aiv_nba_league_pass")),
     (re.compile(r"\bWNBA League Pass\b", re.I), ("WNBA League Pass", "aiv_wnba_league_pass")),
     (re.compile(r"\bFOX One\b", re.I), ("FOX One", "aiv_fox_one")),
+    (re.compile(r"\bMLB\.TV\b", re.I), ("MLB.TV", "aiv_mlbtv")),
     (re.compile(r"\bPeacock\b", re.I), ("Peacock", "aiv_peacock")),
     (re.compile(r"\bMax\b", re.I), ("Max", "aiv_max")),
     (re.compile(r"\bDAZN\b", re.I), ("DAZN", "aiv_dazn")),
     (re.compile(r"\bFanDuel Sports Network\b", re.I), ("FanDuel Sports Network", "aiv_fanduel")),
     (re.compile(r"\bViX Premium\b", re.I), ("ViX Premium", "aiv_vix_premium")),
     (re.compile(r"\bViX\b", re.I), ("ViX", "aiv_vix")),
-    (re.compile(r"\bParamount\+\b", re.I), ("Paramount+", "aiv_paramount_plus")),
+    # No trailing \b: '+' is not a word character, so \b can never match immediately after it
+    # (confirmed: re.search(r"\bParamount\+\b", "Free trial of Paramount+") -> None).
+    (re.compile(r"\bParamount\+", re.I), ("Paramount+", "aiv_paramount_plus")),
     (re.compile(r"\bWillow\b", re.I), ("Willow TV", "aiv_willow")),
     (re.compile(r"\bSquashTV\b", re.I), ("SquashTV", "aiv_squash")),
     (re.compile(r"\bTennis Channel\b", re.I), ("Tennis Channel", "aiv_tennis_channel")),
@@ -392,7 +426,7 @@ async def _extract_benefit_id_from_links(page) -> str:
             return benefit_id
     return ""
 
-def _normalize(benefit_id: str, entitlement: str, page_text: str) -> Tuple[str, str, str]:
+def _normalize(benefit_id: str, entitlement: str) -> Tuple[str, str, str]:
     """
     Returns: (channel_name, channel_id, failure_reason_if_any_for_unknown)
     channel_id is your canonical service id (aiv_*) when possible.
@@ -401,13 +435,11 @@ def _normalize(benefit_id: str, entitlement: str, page_text: str) -> Tuple[str, 
         name, sid = BENEFIT_MAP[benefit_id]
         return name, sid, ""
 
-    # Infer from entitlement first, then page text
+    # Infer only from the narrow entitlement message -- see TEXT_INFER comment above for why
+    # full page-text scanning was removed.
     for rx, (name, sid) in TEXT_INFER:
         if entitlement and rx.search(entitlement):
             return name, sid, f"UNKNOWN_BENEFIT_ID benefit_id={benefit_id} inferred_from=entitlement"
-    for rx, (name, sid) in TEXT_INFER:
-        if page_text and rx.search(page_text):
-            return name, sid, f"UNKNOWN_BENEFIT_ID benefit_id={benefit_id} inferred_from=page_text"
 
     # Fallback: use entitlement text as name; make a stable-ish id
     safe_name = entitlement.strip() or "Amazon Error"
@@ -438,7 +470,25 @@ def _looks_blank_unusable_page(final_url: str, benefit_id: str, entitlement: str
     return False, ""
 
 
-def _looks_unavailable_page(page_text: str, title: str) -> Tuple[bool, str]:
+def _extract_buy_box_message_from_html(html: str) -> str:
+    """Extract Amazon's structured per-title availability message (data-testid="buy-box-msg").
+
+    This is the actual UI element shown next to the watchlist/share buttons on the detail
+    page (confirmed against a live screenshot 2026-08-13) -- NOT a page-wide text scan.
+    """
+    if not html:
+        return ""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        return ""
+    node = soup.select_one('[data-testid="buy-box-msg"]')
+    if node:
+        return node.get_text(" ", strip=True)
+    return ""
+
+
+def _looks_unavailable_page(page_text: str, title: str, buy_box_message: str = "") -> Tuple[bool, str]:
     visible = f"{title or ''}\n{page_text or ''}".lower()
     markers = (
         "currently unavailable to watch in your location",
@@ -448,6 +498,15 @@ def _looks_unavailable_page(page_text: str, title: str) -> Tuple[bool, str]:
         "this video is currently unavailable",
     )
     if any(marker in visible for marker in markers):
+        return True, "UNAVAILABLE_IN_LOCATION"
+    # "unavailable due to regional restrictions" is deliberately NOT in the page-wide
+    # marker list above: Amazon's live-sports FAQ widget quotes that exact phrase as a
+    # generic example on virtually every live-sports page, regardless of whether that
+    # title is actually restricted (confirmed live 2026-08-13 -- it appeared on a page
+    # with a confirmed working WNBA League Pass classification). A page-wide scan for it
+    # produces false positives on most pages. Only trust it when it comes from the
+    # structured buy-box-msg element, which is the actual per-title availability signal.
+    if buy_box_message and "unavailable due to regional restrictions" in buy_box_message.lower():
         return True, "UNAVAILABLE_IN_LOCATION"
     return False, ""
 
@@ -497,6 +556,23 @@ def _extract_entitlement_text_from_html(html: str) -> str:
     return ""
 
 
+def _log_unknown_reason(unknown_reason: str, benefit_id: str, entitlement: str, channel_id: str, unknown_seen: set) -> None:
+    """Log a fallback classification once per distinct (benefit_id, entitlement) pair.
+
+    Deliberately fires even when benefit_id is empty -- that's the exact case that let
+    non-Prime content (e.g. MLB.TV) get silently misclassified via the page-text fallback.
+    Watch these logs after a scrape run to capture the real identifier for any service
+    that's still missing from BENEFIT_MAP/TEXT_INFER.
+    """
+    if not unknown_reason:
+        return
+    dedupe_key = f"{benefit_id}|{entitlement.strip()[:80]}"
+    if dedupe_key in unknown_seen:
+        return
+    unknown_seen.add(dedupe_key)
+    LOG.warning("%s entitlement=%r resolved_channel_id=%s", unknown_reason, entitlement, channel_id)
+
+
 def _build_scrape_result(
     gti: str,
     url: str,
@@ -508,18 +584,22 @@ def _build_scrape_result(
     benefit_id: str,
     entitlement: str,
     start_time: float,
+    unknown_seen: Optional[set] = None,
 ) -> HttpProbeResult:
-    channel_name, channel_id, unknown_reason = _normalize(benefit_id, entitlement, page_text)
+    channel_name, channel_id, unknown_reason = _normalize(benefit_id, entitlement)
+    if unknown_seen is not None:
+        _log_unknown_reason(unknown_reason, benefit_id, entitlement, channel_id, unknown_seen)
 
-    is_unavailable, unavailable_reason = _looks_unavailable_page(page_text, title)
+    buy_box_message = _extract_buy_box_message_from_html(html)
+    is_unavailable, unavailable_reason = _looks_unavailable_page(page_text, title, buy_box_message)
     if is_unavailable:
         return HttpProbeResult(
             result=ScrapeResult(
                 gti=gti,
                 url=url,
                 status="ERROR",
-                channel_id="",
-                channel_name="",
+                channel_id=UNAVAILABLE_IN_LOCATION_CHANNEL_ID,
+                channel_name=UNAVAILABLE_IN_LOCATION_CHANNEL_NAME,
                 benefit_id=benefit_id,
                 entitlement_text=entitlement,
                 failure_reason=unavailable_reason,
@@ -595,7 +675,7 @@ def _build_scrape_result(
     )
 
 
-def _probe_http_once(gti: str, timeout_ms: int, start_time: float) -> HttpProbeResult:
+def _probe_http_once(gti: str, timeout_ms: int, start_time: float, unknown_seen: Optional[set] = None) -> HttpProbeResult:
     url = gti_to_url(gti)
     if curl_requests is None:
         return HttpProbeResult(result=None, needs_browser_fallback=True, fallback_reason="curl_cffi_unavailable")
@@ -642,6 +722,7 @@ def _probe_http_once(gti: str, timeout_ms: int, start_time: float) -> HttpProbeR
             benefit_id=benefit_id,
             entitlement=entitlement,
             start_time=start_time,
+            unknown_seen=unknown_seen,
         )
     except Exception as e:
         return HttpProbeResult(result=None, needs_browser_fallback=True, fallback_reason=f"http_error={type(e).__name__}: {e}")
@@ -698,6 +779,18 @@ async def _extract_entitlement_text(page) -> str:
                     return txt
         except Exception:
             continue
+    return ""
+
+
+async def _extract_buy_box_message(page) -> str:
+    """Playwright counterpart to _extract_buy_box_message_from_html -- same scoped
+    per-title availability element, not a page-wide text scan."""
+    try:
+        loc = page.locator('[data-testid="buy-box-msg"]')
+        if await loc.count() > 0:
+            return (await loc.first.inner_text()).strip()
+    except Exception:
+        pass
     return ""
 
 async def _scrape_one_playwright(browser, gti: str, timeout_ms: int, retries: int,
@@ -774,6 +867,7 @@ async def _scrape_one_playwright(browser, gti: str, timeout_ms: int, retries: in
                 benefit_id = _parse_benefit_id(html)
 
             entitlement = await _extract_entitlement_text(page)
+            buy_box_message = await _extract_buy_box_message(page)
 
             # page text for inference fallback (bounded)
             page_text = ""
@@ -782,10 +876,8 @@ async def _scrape_one_playwright(browser, gti: str, timeout_ms: int, retries: in
             except Exception:
                 page_text = ""
 
-            channel_name, channel_id, unknown_reason = _normalize(benefit_id, entitlement, page_text)
-            if unknown_reason and benefit_id and benefit_id not in unknown_seen:
-                unknown_seen.add(benefit_id)
-                LOG.warning("%s entitlement=%r", unknown_reason, entitlement)
+            channel_name, channel_id, unknown_reason = _normalize(benefit_id, entitlement)
+            _log_unknown_reason(unknown_reason, benefit_id, entitlement, channel_id, unknown_seen)
             # Improved stale/404 detection (avoid false positives from stray '404' strings in HTML)
             title = ""
             try:
@@ -793,6 +885,10 @@ async def _scrape_one_playwright(browser, gti: str, timeout_ms: int, retries: in
             except Exception:
                 title = ""
 
+            # Checked first, same priority as the HTTP-only path in _build_scrape_result:
+            # some pages only reveal their real content (including a geo-block banner) after
+            # JS render, which is exactly why they landed here in the Playwright fallback.
+            is_unavailable, unavailable_reason = _looks_unavailable_page(page_text, title, buy_box_message)
             is_stale_404, stale_detail = _looks_stale_404(
                 resp_status=resp_status,
                 title=title,
@@ -801,7 +897,13 @@ async def _scrape_one_playwright(browser, gti: str, timeout_ms: int, retries: in
                 entitlement=entitlement,
                 channel_id=channel_id,
             )
-            if is_stale_404:
+            if is_unavailable:
+                status = "ERROR"
+                failure_reason = unavailable_reason
+                channel_name = UNAVAILABLE_IN_LOCATION_CHANNEL_NAME
+                channel_id = UNAVAILABLE_IN_LOCATION_CHANNEL_ID
+                LOG.debug("[UNAVAILABLE] GTI=%s reason=%s final_url=%s title=%r", gti, unavailable_reason, page.url, title)
+            elif is_stale_404:
                 status = "STALE"
                 failure_reason = "STALE_GTI_404"
                 channel_name = ""
@@ -880,7 +982,7 @@ async def _scrape_one_playwright(browser, gti: str, timeout_ms: int, retries: in
 async def scrape_one(playwright, browser, gti: str, timeout_ms: int, retries: int,
                     unknown_seen: set, progress_idx: int, total: int) -> ScrapeResult:
     start = time.time()
-    http_probe = await asyncio.to_thread(_probe_http_once, gti, timeout_ms, start)
+    http_probe = await asyncio.to_thread(_probe_http_once, gti, timeout_ms, start, unknown_seen)
     if http_probe.result is not None:
         setattr(http_probe.result, "resolved_via", "http")
         return http_probe.result
@@ -943,6 +1045,49 @@ def write_debug_csv(path: str, results: Sequence[ScrapeResult]) -> None:
             })
 
 
+def _lookup_title_for_gti(conn: sqlite3.Connection, gti: str) -> str:
+    try:
+        row = conn.execute(
+            "SELECT e.title FROM playables p JOIN events e ON e.id = p.event_id "
+            "WHERE p.deeplink_play LIKE ? OR p.deeplink_open LIKE ? LIMIT 1",
+            (f"%{gti}%", f"%{gti}%"),
+        ).fetchone()
+        return row[0] if row else ""
+    except Exception:
+        return ""
+
+
+def log_unavailable_results(db_path: str, results: Sequence[ScrapeResult]) -> int:
+    """Append-only, spreadsheet-openable log of confirmed UNAVAILABLE_IN_LOCATION detections.
+
+    upsert_results() intentionally never writes ERROR-status rows to amazon_channels (so a
+    transient failure can't overwrite good cached data), which means these detections
+    otherwise leave zero persistent trace once the rotating debug CSVs get pruned. This is a
+    separate log purely for visibility over time -- never read back by the pipeline itself.
+    """
+    rows_to_log = [r for r in results if r.failure_reason == "UNAVAILABLE_IN_LOCATION"]
+    if not rows_to_log:
+        return 0
+
+    path = str(Path(db_path).resolve().parent / "amazon_unavailable_log.csv")
+    file_exists = Path(path).exists()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        with open(path, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if not file_exists:
+                w.writerow(["logged_utc", "gti", "title", "url", "resolved_via"])
+            now = _utcnow_iso()
+            for r in rows_to_log:
+                title = _lookup_title_for_gti(conn, r.gti)
+                w.writerow([now, r.gti, title, r.url, getattr(r, "resolved_via", "")])
+    finally:
+        conn.close()
+
+    return len(rows_to_log)
+
+
 def prune_old_debug_csvs(db_path: str, keep: int = 3) -> int:
     """Delete old amazon_scrape_*.csv files next to the DB, keeping newest N.
     Returns number of files deleted. keep<=0 means keep all.
@@ -970,8 +1115,14 @@ def upsert_results(db_path: str, results: Sequence[ScrapeResult]) -> int:
         n = 0
         now = _utcnow_iso()
         for r in results:
-            # Skip ERROR and TIMEOUT - only write SUCCESS and STALE
-            if r.status not in ("SUCCESS", "STALE"):
+            # Skip ERROR and TIMEOUT - only write SUCCESS, STALE, and confirmed
+            # UNAVAILABLE_IN_LOCATION (a deterministic per-title signal from the scoped
+            # buy-box-msg element, not a transient failure -- safe to persist, unlike a
+            # generic network/parsing ERROR which must not overwrite good cached data).
+            is_confirmed_unavailable = (
+                r.status == "ERROR" and r.failure_reason == "UNAVAILABLE_IN_LOCATION"
+            )
+            if r.status not in ("SUCCESS", "STALE") and not is_confirmed_unavailable:
                 continue
             
             # Build an UPSERT that matches whatever schema exists
@@ -1268,6 +1419,10 @@ async def run(
 
     upserts = upsert_results(db, results)
     LOG.info("Database updated (%d successful upserts).", upserts)
+
+    logged = log_unavailable_results(db, results)
+    if logged:
+        LOG.info("Logged %d confirmed UNAVAILABLE_IN_LOCATION detection(s) to amazon_unavailable_log.csv", logged)
 
     # Summary
     total = len(results)

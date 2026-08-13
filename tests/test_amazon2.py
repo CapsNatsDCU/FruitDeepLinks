@@ -206,7 +206,6 @@ class Amazon2HelpersTest(unittest.TestCase):
         name, channel_id, reason = amazon2._normalize(
             "peacockus",
             entitlement="Watch with Peacock",
-            page_text="Peacock",
         )
         self.assertEqual((name, channel_id, reason), ("Peacock", "aiv_peacock", ""))
 
@@ -214,7 +213,6 @@ class Amazon2HelpersTest(unittest.TestCase):
         name, channel_id, reason = amazon2._normalize(
             "unknown-benefit",
             entitlement="Subscribe to NBA League Pass to watch live",
-            page_text="",
         )
         self.assertEqual(name, "NBA League Pass")
         self.assertEqual(channel_id, "aiv_nba_league_pass")
@@ -224,11 +222,46 @@ class Amazon2HelpersTest(unittest.TestCase):
         name, channel_id, reason = amazon2._normalize(
             "",
             entitlement="Regional Sports Add-On!",
-            page_text="",
         )
         self.assertEqual(name, "Regional Sports Add-On!")
         self.assertEqual(channel_id, "aiv_regional_sports_add_on")
         self.assertIn("fallback_to_entitlement", reason)
+
+    def test_normalize_matches_paramount_plus_despite_trailing_symbol(self):
+        # Regression: \bParamount\+\b never matched because '+' isn't a word character,
+        # so \b can't form a boundary right after it (confirmed live 2026-08-13).
+        name, channel_id, reason = amazon2._normalize(
+            "",
+            entitlement="Free trial of Paramount+",
+        )
+        self.assertEqual(name, "Paramount+")
+        self.assertEqual(channel_id, "aiv_paramount_plus")
+
+    def test_normalize_does_not_scan_page_text(self):
+        # Regression: page-wide text scanning produced false positives across multiple
+        # services (Prime, MLB Network -> Tennis Channel, Paramount+ -> WNBA League Pass),
+        # confirmed live 2026-08-13, because Amazon's page includes unrelated content
+        # (recommendation widgets) that matched these same patterns. _normalize must only
+        # consider the narrow entitlement message, never page_text.
+        self.assertNotIn("page_text", amazon2._normalize.__code__.co_varnames)
+
+    def test_normalize_uses_confirmed_benefit_ids(self):
+        for benefit_id, expected_channel_id in (
+            ("foxoneus", "aiv_fox_one"),
+            ("beinus", "aiv_bein"),
+            ("mlbnetwork", "aiv_mlb_network"),
+            ("cbsaacf", "aiv_paramount_plus"),
+            ("cbsaapc", "aiv_paramount_plus"),
+        ):
+            with self.subTest(benefit_id=benefit_id):
+                # Entitlement deliberately doesn't mention the service, to prove the
+                # benefit_id -> BENEFIT_MAP lookup takes priority over any text inference.
+                name, channel_id, reason = amazon2._normalize(
+                    benefit_id,
+                    entitlement="Watch for free",
+                )
+                self.assertEqual(channel_id, expected_channel_id)
+                self.assertEqual(reason, "")
 
     def test_blank_unusable_page_detects_redirect_without_signals(self):
         is_blank, detail = amazon2._looks_blank_unusable_page(
@@ -307,6 +340,37 @@ class Amazon2HelpersTest(unittest.TestCase):
         )
         self.assertTrue(is_unavailable)
         self.assertEqual(reason, "UNAVAILABLE_IN_LOCATION")
+
+    def test_unavailable_page_detection_flags_regional_restrictions_from_buy_box(self):
+        # Regression: user spot-checked a live aiv_amazon_error URL on 2026-08-13 and it
+        # showed this exact banner in the structured buy-box-msg element (confirmed against
+        # a screenshot), which none of the existing markers matched.
+        is_unavailable, reason = amazon2._looks_unavailable_page(
+            page_text="some other page text",
+            title="",
+            buy_box_message="UNAVAILABLE DUE TO REGIONAL RESTRICTIONS",
+        )
+        self.assertTrue(is_unavailable)
+        self.assertEqual(reason, "UNAVAILABLE_IN_LOCATION")
+
+    def test_unavailable_page_detection_ignores_faq_boilerplate_in_page_text(self):
+        # Regression: an earlier version of this check scanned the whole page_text for
+        # "unavailable due to regional restrictions" and produced false positives on ~73%
+        # of a live scrape, because Amazon's live-sports FAQ widget quotes that exact phrase
+        # as a generic example on virtually every page (confirmed live 2026-08-13 by fetching
+        # a page with a known-good WNBA League Pass classification and finding the phrase
+        # twice in FAQ text). The phrase must NOT trigger a match via page_text/title --
+        # only via the scoped buy_box_message argument.
+        is_unavailable, reason = amazon2._looks_unavailable_page(
+            page_text=(
+                'If you see "this video is unavailable" or "unavailable due to regional '
+                'restrictions" that means the game isn\'t available in your area.'
+            ),
+            title="",
+            buy_box_message="",
+        )
+        self.assertFalse(is_unavailable)
+        self.assertEqual(reason, "")
 
 
 class Amazon2ScrapeOneTest(unittest.IsolatedAsyncioTestCase):
@@ -460,6 +524,209 @@ class Amazon2ScrapeOneTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.failure_reason, "STALE_GTI_404")
         self.assertEqual(result.channel_id, "")
         self.assertEqual(result.channel_name, "")
+
+
+class Amazon2UnavailableLogTest(unittest.TestCase):
+    def setUp(self):
+        import sqlite3
+        import tempfile
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self._tmpdir.name) / "fruit_events.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("CREATE TABLE events (id INTEGER PRIMARY KEY, title TEXT)")
+        conn.execute(
+            "CREATE TABLE playables (event_id INTEGER, deeplink_play TEXT, deeplink_open TEXT, provider TEXT)"
+        )
+        conn.execute("INSERT INTO events (id, title) VALUES (1, 'MLB: Boston Red Sox at Pittsburgh Pirates')")
+        conn.execute(
+            "INSERT INTO playables (event_id, deeplink_play, deeplink_open, provider) VALUES "
+            "(1, 'aiv://aiv/detail?gti=amzn1.dv.gti.aaaa&broadcast=amzn1.dv.gti.35668709-6474-44f9-9459-b83349a85c48', "
+            "'', 'aiv')"
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_logs_only_unavailable_rows_with_title_lookup(self):
+        results = [
+            amazon2.ScrapeResult(
+                gti="amzn1.dv.gti.35668709-6474-44f9-9459-b83349a85c48",
+                url="https://www.amazon.com/gp/video/detail/amzn1.dv.gti.35668709-6474-44f9-9459-b83349a85c48",
+                status="ERROR",
+                channel_id="",
+                channel_name="",
+                benefit_id="",
+                entitlement_text="",
+                failure_reason="UNAVAILABLE_IN_LOCATION",
+                elapsed_ms=100,
+            ),
+            amazon2.ScrapeResult(
+                gti="amzn1.dv.gti.bbbb",
+                url="https://www.amazon.com/gp/video/detail/amzn1.dv.gti.bbbb",
+                status="SUCCESS",
+                channel_id="aiv_dazn",
+                channel_name="DAZN",
+                benefit_id="daznus",
+                entitlement_text="",
+                failure_reason="",
+                elapsed_ms=100,
+            ),
+        ]
+
+        logged = amazon2.log_unavailable_results(self.db_path, results)
+        self.assertEqual(logged, 1)
+
+        log_path = Path(self._tmpdir.name) / "amazon_unavailable_log.csv"
+        self.assertTrue(log_path.exists())
+
+        import csv
+
+        with open(log_path) as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["gti"], "amzn1.dv.gti.35668709-6474-44f9-9459-b83349a85c48")
+        self.assertEqual(rows[0]["title"], "MLB: Boston Red Sox at Pittsburgh Pirates")
+
+    def test_no_unavailable_rows_means_no_file_created(self):
+        results = [
+            amazon2.ScrapeResult(
+                gti="amzn1.dv.gti.bbbb",
+                url="https://www.amazon.com/gp/video/detail/amzn1.dv.gti.bbbb",
+                status="SUCCESS",
+                channel_id="aiv_dazn",
+                channel_name="DAZN",
+                benefit_id="daznus",
+                entitlement_text="",
+                failure_reason="",
+                elapsed_ms=100,
+            ),
+        ]
+        logged = amazon2.log_unavailable_results(self.db_path, results)
+        self.assertEqual(logged, 0)
+        log_path = Path(self._tmpdir.name) / "amazon_unavailable_log.csv"
+        self.assertFalse(log_path.exists())
+
+    def test_appends_across_multiple_calls(self):
+        result = amazon2.ScrapeResult(
+            gti="amzn1.dv.gti.35668709-6474-44f9-9459-b83349a85c48",
+            url="https://www.amazon.com/gp/video/detail/amzn1.dv.gti.35668709-6474-44f9-9459-b83349a85c48",
+            status="ERROR",
+            channel_id="",
+            channel_name="",
+            benefit_id="",
+            entitlement_text="",
+            failure_reason="UNAVAILABLE_IN_LOCATION",
+            elapsed_ms=100,
+        )
+        amazon2.log_unavailable_results(self.db_path, [result])
+        amazon2.log_unavailable_results(self.db_path, [result])
+
+        import csv
+
+        log_path = Path(self._tmpdir.name) / "amazon_unavailable_log.csv"
+        with open(log_path) as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual(len(rows), 2)
+
+
+class Amazon2UpsertResultsTest(unittest.TestCase):
+    def setUp(self):
+        import sqlite3
+        import tempfile
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self._tmpdir.name) / "fruit_events.db")
+        conn = sqlite3.connect(self.db_path)
+        amazon2._ensure_tables(conn)
+        conn.close()
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _row(self, gti):
+        import sqlite3
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM amazon_channels WHERE gti=?", (gti,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def test_success_writes_normally(self):
+        result = amazon2.ScrapeResult(
+            gti="amzn1.dv.gti.aaaa", url="", status="SUCCESS",
+            channel_id="aiv_dazn", channel_name="DAZN",
+            benefit_id="daznus", entitlement_text="", failure_reason="", elapsed_ms=1,
+        )
+        n = amazon2.upsert_results(self.db_path, [result])
+        self.assertEqual(n, 1)
+        row = self._row("amzn1.dv.gti.aaaa")
+        self.assertEqual(row["channel_id"], "aiv_dazn")
+
+    def test_confirmed_unavailable_in_location_is_written(self):
+        # Regression: this ERROR-status result must NOT be silently dropped -- it's a
+        # deterministic per-title signal (scoped buy-box-msg element), not a transient
+        # failure, and should get its own distinct, filterable logical_service.
+        result = amazon2.ScrapeResult(
+            gti="amzn1.dv.gti.bbbb", url="", status="ERROR",
+            channel_id=amazon2.UNAVAILABLE_IN_LOCATION_CHANNEL_ID,
+            channel_name=amazon2.UNAVAILABLE_IN_LOCATION_CHANNEL_NAME,
+            benefit_id="daznus", entitlement_text="", failure_reason="UNAVAILABLE_IN_LOCATION",
+            elapsed_ms=1,
+        )
+        n = amazon2.upsert_results(self.db_path, [result])
+        self.assertEqual(n, 1)
+        row = self._row("amzn1.dv.gti.bbbb")
+        self.assertEqual(row["channel_id"], "aiv_unavailable_in_location")
+        self.assertEqual(row["is_stale"], 0)
+
+    def test_confirmed_unavailable_does_not_overwrite_with_stale_flag(self):
+        # A previously-good SUCCESS classification, later found region-blocked, should be
+        # overwritten with the unavailable state (not left stuck on the old service) --
+        # that's the whole point of writing it at all instead of skipping like other errors.
+        good = amazon2.ScrapeResult(
+            gti="amzn1.dv.gti.cccc", url="", status="SUCCESS",
+            channel_id="aiv_dazn", channel_name="DAZN",
+            benefit_id="daznus", entitlement_text="", failure_reason="", elapsed_ms=1,
+        )
+        amazon2.upsert_results(self.db_path, [good])
+
+        blocked = amazon2.ScrapeResult(
+            gti="amzn1.dv.gti.cccc", url="", status="ERROR",
+            channel_id=amazon2.UNAVAILABLE_IN_LOCATION_CHANNEL_ID,
+            channel_name=amazon2.UNAVAILABLE_IN_LOCATION_CHANNEL_NAME,
+            benefit_id="daznus", entitlement_text="", failure_reason="UNAVAILABLE_IN_LOCATION",
+            elapsed_ms=1,
+        )
+        amazon2.upsert_results(self.db_path, [blocked])
+
+        row = self._row("amzn1.dv.gti.cccc")
+        self.assertEqual(row["channel_id"], "aiv_unavailable_in_location")
+
+    def test_generic_error_is_still_skipped(self):
+        result = amazon2.ScrapeResult(
+            gti="amzn1.dv.gti.dddd", url="", status="ERROR",
+            channel_id="", channel_name="",
+            benefit_id="", entitlement_text="", failure_reason="http_error=ConnectionError",
+            elapsed_ms=1,
+        )
+        n = amazon2.upsert_results(self.db_path, [result])
+        self.assertEqual(n, 0)
+        self.assertIsNone(self._row("amzn1.dv.gti.dddd"))
+
+    def test_timeout_is_still_skipped(self):
+        result = amazon2.ScrapeResult(
+            gti="amzn1.dv.gti.eeee", url="", status="TIMEOUT",
+            channel_id="", channel_name="",
+            benefit_id="", entitlement_text="", failure_reason="TIMEOUT",
+            elapsed_ms=1,
+        )
+        n = amazon2.upsert_results(self.db_path, [result])
+        self.assertEqual(n, 0)
+        self.assertIsNone(self._row("amzn1.dv.gti.eeee"))
 
 
 if __name__ == "__main__":
