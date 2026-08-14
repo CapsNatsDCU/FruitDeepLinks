@@ -98,8 +98,12 @@ def populate_http_deeplinks(conn: sqlite3.Connection, log: logging.Logger) -> No
       - Source column is deeplink_play (primary), with fallbacks:
           deeplink_open, playable_url
       - playables PK is composite: (event_id, playable_id)
-      - Pass playable_id to converter (required for ESPN playChannel case)
-      - Safe/idempotent: only fills blank http_deeplink_url
+      - Pass playable_id (and espn_graph_id, when present) to converter — the
+        latter is required for ESPN playChannel case and for events where ESPN
+        Watch Graph enrichment (Step 7c) found a better ID than Apple's own
+      - Idempotent for non-ESPN rows (only fills blank http_deeplink_url); ESPN
+        rows are always re-checked so a later Watch Graph match can upgrade a
+        value that was already filled from Apple's ID at import time
     """
     cur = conn.cursor()
 
@@ -131,13 +135,24 @@ def populate_http_deeplinks(conn: sqlite3.Connection, log: logging.Logger) -> No
     primary_col = "deeplink_play" if "deeplink_play" in cols else src_cols[0]
     log.info(f"Prefilling http_deeplink_url from {primary_col} (fallbacks: {', '.join(src_cols)})")
 
-    # Pull rows needing HTTP; limit to keep migration snappy
+    has_espn_graph_id = "espn_graph_id" in cols
+    espn_select = "espn_graph_id" if has_espn_graph_id else "NULL AS espn_graph_id"
+
+    # Pull rows needing HTTP: any blank http_deeplink_url, plus ESPN rows that now
+    # have a Watch Graph ID so an already-filled (Apple-only) value gets upgraded.
+    espn_refresh_clause = (
+        " OR (provider IN ('sportscenter','espn','espn+')"
+        "      AND espn_graph_id IS NOT NULL AND espn_graph_id != '')"
+        if has_espn_graph_id else ""
+    )
     query = f"""
-        SELECT event_id, playable_id, provider,
+        SELECT event_id, playable_id, provider, {espn_select},
                {', '.join(src_cols)}
         FROM playables
-        WHERE (http_deeplink_url IS NULL OR http_deeplink_url = '')
-          AND ({primary_col} IS NOT NULL AND {primary_col} != '')
+        WHERE ({primary_col} IS NOT NULL AND {primary_col} != '')
+          AND (
+                (http_deeplink_url IS NULL OR http_deeplink_url = ''){espn_refresh_clause}
+              )
         LIMIT 20000
     """
     cur.execute(query)
@@ -151,7 +166,7 @@ def populate_http_deeplinks(conn: sqlite3.Connection, log: logging.Logger) -> No
     updated = 0
 
     for row in rows:
-        event_id, playable_id, provider, *candidates = row
+        event_id, playable_id, provider, espn_graph_id, *candidates = row
 
         # pick first non-empty candidate in our priority order
         deeplink = next((d for d in candidates if d), None)
@@ -159,7 +174,9 @@ def populate_http_deeplinks(conn: sqlite3.Connection, log: logging.Logger) -> No
             continue
 
         try:
-            http_url = generate_http_deeplink(deeplink, provider=provider, playable_id=playable_id)
+            http_url = generate_http_deeplink(
+                deeplink, provider=provider, playable_id=playable_id, espn_graph_id=espn_graph_id
+            )
         except TypeError:
             # Back-compat: generate_http_deeplink(url, provider)
             http_url = generate_http_deeplink(deeplink, provider)

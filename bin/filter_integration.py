@@ -7,8 +7,13 @@ Now uses logical service mapping to break down "Web" into distinct services.
 """
 
 import json
+import re
 import sqlite3
 from typing import Dict, List, Optional, Any
+
+# Pulls a UUID out of either the current bare-UUID espn_graph_id format or the
+# legacy "espn-watch:{playID}:{hash}" format written before 2026-01-23.
+_ESPN_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 try:
     from provider_utils import get_best_deeplink, filter_playables_by_services
@@ -505,12 +510,13 @@ def get_espn_watchgraph_deeplink(
         if not result or not result[0]:
             return None
         
-        # Extract playback ID from format: espn-watch:{playback_id}
+        # Extract playback ID (bare UUID, or legacy espn-watch:{playback_id}:{hash} format)
         espn_graph_id = result[0]
-        if not espn_graph_id.startswith('espn-watch:'):
+        m = _ESPN_UUID_RE.search(espn_graph_id)
+        if not m:
             return None
-        
-        playback_id = espn_graph_id.replace('espn-watch:', '', 1)
+
+        playback_id = m.group(0)
         
         # Build deeplink in same format as original
         if apple_deeplink.startswith('sportscenter://'):
@@ -588,9 +594,12 @@ def get_best_deeplink_for_event(
     
     if provider.lower() in ("sportscenter", "espn", "espn+", "espn-plus") and espn_graph_id and deeplink:
         try:
-            # Extract playback ID from espn-watch:PLAYBACK_ID format
-            playback_id = espn_graph_id.replace("espn-watch:", "", 1)
-            
+            # Extract playback ID (bare UUID, or legacy espn-watch:{id}:{hash} format)
+            m = _ESPN_UUID_RE.search(espn_graph_id)
+            if not m:
+                raise ValueError("espn_graph_id has no extractable UUID")
+            playback_id = m.group(0)
+
             # Build the correct deeplink format based on original
             if deeplink.startswith('sportscenter://'):
                 return f"sportscenter://x-callback-url/showWatchStream?playID={playback_id}"

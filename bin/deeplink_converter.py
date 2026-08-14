@@ -51,6 +51,9 @@ def _slugify(s: str) -> str:
     return s
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+# Unanchored variant: pulls a UUID out of either the current bare-UUID espn_graph_id
+# format or the legacy "espn-watch:{playID}:{hash}" format written before 2026-01-23.
+_UUID_SEARCH_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 
 # ----------------------------
@@ -82,12 +85,12 @@ def convert_espn(punchout_url: str, playable_id: Optional[str] = None, espn_grap
       3. playable_id extraction from tvs.sbd pattern
       4. Fallback to ESPN Watch landing page
 
-    espn_graph_id format: "espn-watch:{playID}:{hash}"
-    Example: "espn-watch:9eb9b68b-11c6-4da0-9492-df997dbbf897:bb816546..."
-    We extract the middle part (the actual playID).
+    espn_graph_id format: bare UUID (current), e.g. "9eb9b68b-11c6-4da0-9492-df997dbbf897"
+    Legacy format "espn-watch:{playID}:{hash}" (written before 2026-01-23) is also
+    accepted — we pull the first UUID out of the string regardless of format.
 
     Case A (ESPN Graph ID available - BEST):
-      espn_graph_id="espn-watch:9eb9b68b...:hash"
+      espn_graph_id="9eb9b68b-11c6-4da0-9492-df997dbbf897"
         -> https://www.espn.com/watch/player/_/id/9eb9b68b...
 
     Case B (event-level playID in URL):
@@ -104,13 +107,9 @@ def convert_espn(punchout_url: str, playable_id: Optional[str] = None, espn_grap
     """
     # Priority 1: Use ESPN Graph ID if available (from ESPN Watch Graph enrichment)
     if espn_graph_id:
-        # Format: espn-watch:{playID}:{hash}
-        # Extract the middle part
-        parts = espn_graph_id.split(':')
-        if len(parts) >= 2:
-            play_id = parts[1]
-            if _UUID_RE.match(play_id):
-                return f"https://www.espn.com/watch/player/_/id/{play_id}"
+        m = _UUID_SEARCH_RE.search(espn_graph_id)
+        if m:
+            return f"https://www.espn.com/watch/player/_/id/{m.group(0)}"
     
     if not punchout_url or not punchout_url.lower().startswith("sportscenter://"):
         return None
@@ -503,27 +502,26 @@ def generate_espn_scheme_deeplink(espn_graph_id: Optional[str] = None, fallback_
     and converts it to playID format (works with ADBTuner/ESPN4cc4c).
     
     Args:
-        espn_graph_id: ESPN Watch Graph ID from enrichment (espn-watch:{playID}:{hash})
+        espn_graph_id: ESPN Watch Graph ID from enrichment. Current format is a bare
+            UUID; the legacy "espn-watch:{playID}:{hash}" format (pre-2026-01-23) is
+            also accepted.
         fallback_url: Original Apple TV deeplink to use if espn_graph_id not available
-        
+
     Returns:
         sportscenter://x-callback-url/showWatchStream?playID={playID}
         or fallback_url if espn_graph_id is not available
-        
+
     Examples:
-        Input:  espn_graph_id = "espn-watch:9eb9b68b-11c6-4da0-9492-df997dbbf897:bb816546..."
+        Input:  espn_graph_id = "9eb9b68b-11c6-4da0-9492-df997dbbf897"
         Output: "sportscenter://x-callback-url/showWatchStream?playID=9eb9b68b-11c6-4da0-9492-df997dbbf897"
     """
     if not espn_graph_id:
         return fallback_url
-    
-    # Extract playID from ESPN Graph ID format: espn-watch:{playID}:{hash}
-    parts = espn_graph_id.split(':')
-    if len(parts) >= 2:
-        play_id = parts[1]
-        if _UUID_RE.match(play_id):
-            return f"sportscenter://x-callback-url/showWatchStream?playID={play_id}"
-    
+
+    m = _UUID_SEARCH_RE.search(espn_graph_id)
+    if m:
+        return f"sportscenter://x-callback-url/showWatchStream?playID={m.group(0)}"
+
     # ESPN Graph ID format unexpected, use fallback
     return fallback_url
 
@@ -589,9 +587,14 @@ if __name__ == "__main__":
          dict(provider="max"),
          "https://play.hbomax.com/video/watch-sport/10440061-0516-538b-a098-9f71e1edfc33"),
         
-        # ESPN with Graph ID (new enrichment feature)
+        # ESPN with Graph ID, legacy prefixed format (written before 2026-01-23)
         ("sportscenter://x-callback-url/showWatchStream?playChannel=espn1&x-source=AppleUMC",
          dict(provider="sportscenter", espn_graph_id="espn-watch:9eb9b68b-11c6-4da0-9492-df997dbbf897:bb816546ee4e3a967b98e9d775c9c6f3"),
+         "https://www.espn.com/watch/player/_/id/9eb9b68b-11c6-4da0-9492-df997dbbf897"),
+
+        # ESPN with Graph ID, current bare-UUID format
+        ("sportscenter://x-callback-url/showWatchStream?playChannel=espn1&x-source=AppleUMC",
+         dict(provider="sportscenter", espn_graph_id="9eb9b68b-11c6-4da0-9492-df997dbbf897"),
          "https://www.espn.com/watch/player/_/id/9eb9b68b-11c6-4da0-9492-df997dbbf897"),
     ]
 

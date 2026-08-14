@@ -7,12 +7,17 @@ Extracted from fruitdeeplinks_server.py to eliminate inline route handler code.
 
 import json
 import os
+import re
 import sqlite3
 import urllib.parse
 from datetime import datetime as _dt, timedelta, timezone
 from typing import Optional
 
 from server.logging_setup import log
+
+# Pulls a UUID out of either the current bare-UUID espn_graph_id format or the
+# legacy "espn-watch:{playID}:{hash}" format written before 2026-01-23.
+_ESPN_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 try:
     from core.service_catalog import get_display_name
@@ -446,7 +451,10 @@ def get_provider_playable_link(conn: sqlite3.Connection, event_id: str, provider
         espn_id = r.get(espn_col) if espn_col else None
         if is_espn and espn_id and deeplink:
             try:
-                playback_id = espn_id.replace("espn-watch:", "", 1)
+                m = _ESPN_UUID_RE.search(espn_id)
+                if not m:
+                    raise ValueError("espn_graph_id has no extractable UUID")
+                playback_id = m.group(0)
                 if deeplink.startswith("sportscenter://"):
                     deeplink = f"sportscenter://x-callback-url/showWatchStream?playID={playback_id}"
                 elif deeplink.startswith("http"):
