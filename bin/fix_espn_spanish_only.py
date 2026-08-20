@@ -34,7 +34,7 @@ def find_spanish_only_events(conn: sqlite3.Connection) -> List[Tuple]:
                 COUNT(CASE WHEN locale = 'es_MX' THEN 1 END) as spanish_count,
                 COUNT(CASE WHEN locale = 'en_US' OR locale IS NULL THEN 1 END) as english_count
             FROM playables
-            WHERE logical_service IN ('espn_plus', 'espn_linear', 'espn_unlimited')
+            WHERE logical_service IN ('espn_plus', 'espn_linear', 'espn_unlimited', 'espn_mlb_network')
             GROUP BY event_id
         )
         SELECT 
@@ -48,7 +48,7 @@ def find_spanish_only_events(conn: sqlite3.Connection) -> List[Tuple]:
         FROM playables p
         JOIN event_locales el ON p.event_id = el.event_id
         JOIN events e ON p.event_id = e.id
-        WHERE p.logical_service IN ('espn_plus', 'espn_linear', 'espn_unlimited')
+        WHERE p.logical_service IN ('espn_plus', 'espn_linear', 'espn_unlimited', 'espn_mlb_network')
           AND el.spanish_count > 0
           AND el.english_count = 0
           AND p.locale = 'es_MX'
@@ -181,7 +181,7 @@ def show_statistics(conn: sqlite3.Connection) -> None:
             locale,
             COUNT(*) as count
         FROM playables
-        WHERE logical_service IN ('espn_plus', 'espn_linear', 'espn_unlimited')
+        WHERE logical_service IN ('espn_plus', 'espn_linear', 'espn_unlimited', 'espn_mlb_network')
         GROUP BY locale
     """)
     
@@ -198,7 +198,7 @@ def show_statistics(conn: sqlite3.Connection) -> None:
                 COUNT(CASE WHEN locale = 'es_MX' THEN 1 END) as spanish_count,
                 COUNT(CASE WHEN locale = 'en_US' OR locale IS NULL THEN 1 END) as english_count
             FROM playables
-            WHERE logical_service IN ('espn_plus', 'espn_linear', 'espn_unlimited')
+            WHERE logical_service IN ('espn_plus', 'espn_linear', 'espn_unlimited', 'espn_mlb_network')
             GROUP BY event_id
         )
         SELECT COUNT(*)

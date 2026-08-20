@@ -15,14 +15,49 @@ Usage:
 """
 
 import argparse
+import os
 import sqlite3
 import sys
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+try:
+    _bin_dir = os.path.dirname(__file__)
+    if _bin_dir not in sys.path:
+        sys.path.insert(0, _bin_dir)
+    from core.service_catalog import get_internal_priority
+    _PRIORITY_AVAILABLE = True
+except ImportError:
+    _PRIORITY_AVAILABLE = False
+
+    def get_internal_priority(service_code: str) -> int:
+        return 25
 
 
 def _log(msg: str) -> None:
     print(msg, flush=True)
+
+
+def entitlement_logical_service(espn_event: Dict) -> Optional[str]:
+    """
+    Determine a more precise logical_service from ESPN Watch Graph's own
+    packages/network fields, when they reveal an entitlement Apple's catalog
+    doesn't expose (e.g. a feed that requires MLB.TV or MLB Network even
+    though Apple lists it identically to a plain ESPN+ feed).
+
+    Returns None when the Watch Graph data doesn't indicate anything more
+    specific than what Step 6's Apple-side classification already assigned.
+    """
+    packages = espn_event.get('packages') or ''
+    network = (espn_event.get('network') or '').strip()
+
+    if 'MLB_TV' in packages:
+        return 'mlb'
+    if 'MLB_NETWORK' in packages:
+        return 'espn_mlb_network'
+    if network == 'ESPN Unlimited':
+        return 'espn_unlimited'
+    return None
 
 
 def ensure_espn_graph_id_column(fruit_db: str) -> None:
@@ -119,7 +154,8 @@ def get_espn_graph_events(espn_db: str) -> Dict[str, Dict]:
         sys.exit(1)
     
     cursor.execute("""
-        SELECT e.id, e.program_id, e.airing_id, e.simulcast_airing_id, e.title, f.url
+        SELECT e.id, e.program_id, e.airing_id, e.simulcast_airing_id, e.title, f.url,
+               e.packages, e.network
         FROM events e
         JOIN feeds f ON e.id = f.event_id
         WHERE e.program_id IS NOT NULL
@@ -131,7 +167,7 @@ def get_espn_graph_events(espn_db: str) -> Dict[str, Dict]:
               GROUP BY e2.program_id
           )
     """)
-    
+
     results = {}
     for row in cursor.fetchall():
         program_id = row[1]
@@ -140,7 +176,9 @@ def get_espn_graph_events(espn_db: str) -> Dict[str, Dict]:
             'airing_id': row[2],
             'simulcast_airing_id': row[3],
             'title': row[4],
-            'feed_url': row[5]
+            'feed_url': row[5],
+            'packages': row[6],
+            'network': row[7],
         }
     
     conn.close()
@@ -194,8 +232,10 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
     start_time = time.time()
     matched = 0
     unmatched = 0
+    reclassified = 0
     unmatched_details = []
     updates_to_apply = []
+    reclass_updates_to_apply = []
     
     total = len(apple_playables)
     last_progress = 0
@@ -238,13 +278,27 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
                 espn_graph_id = espn_playback_id
                 updates_to_apply.append((espn_graph_id, playable['event_id'], playable['playable_id']))
                 matched += 1
-                
+
+                # ESPN's own packages/network data reveals entitlements Apple's catalog
+                # doesn't expose (e.g. a feed that actually requires MLB.TV). When it
+                # points somewhere more specific than what Step 6 already classified,
+                # reclassify the playable so existing service filters catch it.
+                new_ls = entitlement_logical_service(espn_event)
+                if new_ls:
+                    new_priority = get_internal_priority(new_ls)
+                    reclass_updates_to_apply.append(
+                        (new_ls, new_priority, playable['event_id'], playable['playable_id'])
+                    )
+                    reclassified += 1
+
                 # Log first 5 matches
                 if matched <= 3:
                     _log(f"Match #{matched}: {playable['title'][:60]}")
                     _log(f"   program.id:     {external_id}")
                     _log(f"   ESPN Graph ID:  {espn_graph_id}")
                     _log(f"   FireTV URL:     https://www.espn.com/watch/player/_/id/{espn_graph_id}")
+                    if new_ls:
+                        _log(f"   Reclassified:   -> {new_ls} (packages={espn_event.get('packages')}, network={espn_event.get('network')})")
             else:
                 _log(f"Match found but no usable ESPN ID: {playable['title'][:50]}")
                 unmatched += 1
@@ -275,19 +329,30 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
         cursor = conn.cursor()
         
         cursor.executemany("""
-            UPDATE playables 
+            UPDATE playables
             SET espn_graph_id = ?
             WHERE event_id = ? AND playable_id = ?
         """, updates_to_apply)
-        
+
         updated = cursor.rowcount
+
+        if reclass_updates_to_apply:
+            cursor.executemany("""
+                UPDATE playables
+                SET logical_service = ?, priority = ?
+                WHERE event_id = ? AND playable_id = ?
+            """, reclass_updates_to_apply)
+
         conn.commit()
         conn.close()
-        
+
         update_time = time.time() - start_time
         _log(f"Batch update complete in {update_time:.2f} seconds - {updated} playables updated")
+        if reclass_updates_to_apply:
+            _log(f"   {len(reclass_updates_to_apply)} reclassified by ESPN entitlement data (MLB.TV / MLB Network / ESPN Unlimited)")
     elif dry_run:
         updated = len(updates_to_apply)
+        reclassified = len(reclass_updates_to_apply)
     
     # Summary
     _log("\n" + "="*80)
@@ -298,6 +363,7 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
     _log(f"")
     _log(f"Matched:   {matched} ({matched/len(apple_playables)*100:.1f}%)")
     _log(f"Unmatched: {unmatched} ({unmatched/len(apple_playables)*100:.1f}%)")
+    _log(f"Reclassified by entitlement data: {reclassified}")
     
     if dry_run:
         _log("\nDry run only - no changes were made")

@@ -21,6 +21,7 @@ DISPLAY_NAMES: dict[str, str] = {
     "espn_linear": "ESPN (Linear)",
     "espn_plus": "ESPN+",
     "espn_unlimited": "ESPN Unlimited",
+    "espn_mlb_network": "ESPN (MLB Network feed)",
 
     # Peacock / NBC
     "peacock": "Peacock",
@@ -122,6 +123,7 @@ INTERNAL_PRIORITY: dict[str, int] = {
     "sportsonespn": 1,
     "espn_plus": 1,
     "espn_unlimited": 1,
+    "espn_mlb_network": 22,
     "sportscenter": 1,
 
     # Peacock / NBC
@@ -221,6 +223,7 @@ DEFAULT_USER_PRIORITY: dict[str, int] = {
     "sportsonespn": 100,
     "espn_plus": 100,
     "espn_unlimited": 100,
+    "espn_mlb_network": 14,
     "espn_linear": 99,
     "peacock": 98,
     "peacock_web": 98,

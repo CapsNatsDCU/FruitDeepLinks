@@ -16,6 +16,7 @@ ADB_PROVIDER_MAP = {
     'espn_linear': 'sportscenter',
     'espn_plus': 'sportscenter',
     'espn_unlimited': 'sportscenter',
+    'espn_mlb_network': 'sportscenter',
     'sportscenter': 'sportscenter',  # Keep original mapping
     'sportsonespn': 'sportscenter',  # Legacy ESPN+ code
     

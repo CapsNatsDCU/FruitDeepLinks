@@ -893,7 +893,7 @@ def main(argv=None):
     espn_days = os.getenv("ESPN_DAYS", "7")
     espn_db = DATA_DIR / "espn_graph.db"
     espn_scrape_enabled = _scraper_enabled(
-        "ESPN_ENABLED", ["espn_plus", "espn_linear", "espn_unlimited"], enabled_services
+        "ESPN_ENABLED", ["espn_plus", "espn_linear", "espn_unlimited", "espn_mlb_network"], enabled_services
     )
 
     if skip_scrape or not espn_scrape_enabled:
