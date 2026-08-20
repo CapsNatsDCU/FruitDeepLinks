@@ -99,12 +99,14 @@ def get_apple_espn_playables(fruit_db: str) -> List[Dict]:
     # CORRECTED: Use json_each to iterate through playables object
     # This handles the colon-separated keys properly
     cursor.execute("""
-        SELECT 
+        SELECT
             p.playable_id,
             json_extract(pe.value, '$.externalId') as external_id,
             e.title,
             e.start_utc,
-            e.id as event_id
+            e.id as event_id,
+            p.service_name,
+            p.logical_service
         FROM playables p
         JOIN events e ON p.event_id = e.id,
         json_each(json_extract(e.raw_attributes_json, '$.playables')) pe
@@ -112,7 +114,7 @@ def get_apple_espn_playables(fruit_db: str) -> List[Dict]:
           AND pe.key = p.playable_id
           AND json_extract(pe.value, '$.externalId') IS NOT NULL
     """)
-    
+
     results = []
     for row in cursor.fetchall():
         results.append({
@@ -120,7 +122,9 @@ def get_apple_espn_playables(fruit_db: str) -> List[Dict]:
             'external_id': row[1],
             'title': row[2],
             'start_utc': row[3],
-            'event_id': row[4]
+            'event_id': row[4],
+            'service_name': row[5],
+            'logical_service': row[6],
         })
     
     conn.close()
@@ -129,11 +133,21 @@ def get_apple_espn_playables(fruit_db: str) -> List[Dict]:
     return results
 
 
-def get_espn_graph_events(espn_db: str) -> Dict[str, Dict]:
+def get_espn_graph_events(espn_db: str) -> Dict[str, List[Dict]]:
     """
     Get ESPN Watch Graph events indexed by program_id.
-    
-    Returns dict where key is program_id and value contains ESPN event details.
+
+    A single program_id commonly has multiple feed rows with *different*
+    entitlements (e.g. a plain linear ESPN airing and a separate ESPN+/Hulu
+    airing of the same broadcast — confirmed live: 163 program_ids in a
+    single day's scrape have conflicting packages/network among their
+    duplicates). Apple's catalog can likewise expose multiple playables
+    (one linear-labeled, one streaming-labeled) that all resolve to that
+    same program_id. Collapsing to one arbitrary row here (previously
+    MIN(feed id)) meant every matching Apple playable got the same
+    espn_graph_id regardless of which one it actually corresponded to —
+    so returns a list of all candidates per program_id and lets the caller
+    pick the one matching each specific Apple playable's own classification.
     """
     try:
         conn = sqlite3.connect(espn_db)
@@ -155,23 +169,17 @@ def get_espn_graph_events(espn_db: str) -> Dict[str, Dict]:
     
     cursor.execute("""
         SELECT e.id, e.program_id, e.airing_id, e.simulcast_airing_id, e.title, f.url,
-               e.packages, e.network
+               e.packages, e.network, f.id as feed_id
         FROM events e
         JOIN feeds f ON e.id = f.event_id
         WHERE e.program_id IS NOT NULL
-          AND (e.program_id, f.id) IN (
-              SELECT e2.program_id, MIN(f2.id)
-              FROM events e2
-              JOIN feeds f2 ON e2.id = f2.event_id
-              WHERE e2.program_id IS NOT NULL
-              GROUP BY e2.program_id
-          )
+        ORDER BY e.program_id, f.id
     """)
 
-    results = {}
+    results: Dict[str, List[Dict]] = {}
     for row in cursor.fetchall():
         program_id = row[1]
-        results[program_id] = {
+        results.setdefault(program_id, []).append({
             'id': row[0],
             'airing_id': row[2],
             'simulcast_airing_id': row[3],
@@ -179,12 +187,39 @@ def get_espn_graph_events(espn_db: str) -> Dict[str, Dict]:
             'feed_url': row[5],
             'packages': row[6],
             'network': row[7],
-        }
-    
+            'feed_id': row[8],
+        })
+
     conn.close()
-    
-    _log(f"Found {len(results)} ESPN Watch Graph events with program_id")
+
+    _log(f"Found {len(results)} ESPN Watch Graph program_ids ({sum(len(v) for v in results.values())} feed rows)")
     return results
+
+
+def pick_espn_candidate(candidates: List[Dict], apple_logical_service: Optional[str]) -> Dict:
+    """
+    Pick the ESPN Watch Graph candidate (of possibly several sharing one
+    program_id) that best matches a specific Apple playable.
+
+    Apple's own service_name-based classification (from Step 6) tells us
+    whether this playable looks linear or streaming; prefer a Watch Graph
+    row whose packages field agrees (empty for linear, non-empty for
+    streaming). Falls back to the lowest feed_id — the prior behavior —
+    when there's no such row or the classification is ambiguous, so a
+    single-candidate program_id (the common case) is unaffected.
+    """
+    if len(candidates) == 1:
+        return candidates[0]
+
+    wants_linear = apple_logical_service == 'espn_linear'
+    for c in candidates:
+        has_packages = bool(c.get('packages'))
+        if wants_linear and not has_packages:
+            return c
+        if not wants_linear and has_packages:
+            return c
+
+    return candidates[0]  # candidates are pre-sorted by feed_id ASC
 
 
 def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_enrich: bool = False) -> None:
@@ -250,8 +285,8 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
             last_progress = progress
         
         if external_id in espn_events:
-            espn_event = espn_events[external_id]
-            
+            espn_event = pick_espn_candidate(espn_events[external_id], playable.get('logical_service'))
+
             # Extract playback ID from feed URL
             espn_playback_id = None
             
