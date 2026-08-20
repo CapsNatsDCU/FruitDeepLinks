@@ -67,7 +67,7 @@ def populate_locale_for_espn(conn: sqlite3.Connection) -> int:
         query = """
             SELECT event_id, playable_id, service_name, title
             FROM playables
-            WHERE logical_service IN ('espn_plus', 'espn_linear', 'espn_unlimited', 'espn_mlb_network')
+            WHERE logical_service IN ('espn_plus', 'espn_linear', 'espn_unlimited', 'espn_mlb_network', 'espn_mlb_tv')
               AND (locale IS NULL OR locale = '')
         """
     else:
@@ -75,7 +75,7 @@ def populate_locale_for_espn(conn: sqlite3.Connection) -> int:
         query = """
             SELECT event_id, playable_id, title
             FROM playables
-            WHERE logical_service IN ('espn_plus', 'espn_linear', 'espn_unlimited', 'espn_mlb_network')
+            WHERE logical_service IN ('espn_plus', 'espn_linear', 'espn_unlimited', 'espn_mlb_network', 'espn_mlb_tv')
               AND (locale IS NULL OR locale = '')
         """
     

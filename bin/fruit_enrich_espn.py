@@ -52,7 +52,7 @@ def entitlement_logical_service(espn_event: Dict) -> Optional[str]:
     network = (espn_event.get('network') or '').strip()
 
     if 'MLB_TV' in packages:
-        return 'mlb'
+        return 'espn_mlb_tv'
     if 'MLB_NETWORK' in packages:
         return 'espn_mlb_network'
     if network == 'ESPN Unlimited':
