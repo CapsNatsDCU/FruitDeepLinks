@@ -758,17 +758,36 @@ def upsert_playables(conn: sqlite3.Connection, playables: List[Tuple], dry: bool
     global _SCHEMA_ENSURED
     if not _SCHEMA_ENSURED:
         ensure_events_schema(conn)
-    # Delete existing playables for this event (refresh)
+    # Drop playables no longer present in this import (e.g. a service dropped the event).
+    # Existing rows are upserted below rather than deleted, so enrichment columns
+    # (espn_graph_id, locale) populated by later pipeline steps survive re-import.
     if playables:
         event_id = playables[0][0]
-        cur.execute("DELETE FROM playables WHERE event_id = ?", (event_id,))
-    
-    # Insert new playables
+        new_playable_ids = [p[1] for p in playables]
+        placeholders = ",".join("?" * len(new_playable_ids))
+        cur.execute(
+            f"DELETE FROM playables WHERE event_id = ? AND playable_id NOT IN ({placeholders})",
+            (event_id, *new_playable_ids),
+        )
+
+    # Insert new playables / refresh existing ones, preserving espn_graph_id + locale
     cur.executemany("""
         INSERT INTO playables (
             event_id, playable_id, provider, service_name, logical_service,
             deeplink_play, deeplink_open, playable_url, title, content_id, priority, http_deeplink_url, created_utc
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(event_id, playable_id) DO UPDATE SET
+            provider = excluded.provider,
+            service_name = excluded.service_name,
+            logical_service = excluded.logical_service,
+            deeplink_play = excluded.deeplink_play,
+            deeplink_open = excluded.deeplink_open,
+            playable_url = excluded.playable_url,
+            title = excluded.title,
+            content_id = excluded.content_id,
+            priority = excluded.priority,
+            http_deeplink_url = excluded.http_deeplink_url,
+            created_utc = excluded.created_utc
     """, playables)
 
 def main():
