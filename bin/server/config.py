@@ -32,13 +32,13 @@ class _Config:
     PLACEHOLDER_BLOCK_MINUTES = int(os.getenv("FRUIT_PLACEHOLDER_BLOCK_MINUTES", "60"))
 
     # Channels DVR integration
-    CDVR_SERVER_IP = os.getenv("CHANNELS_DVR_IP", "192.168.86.72")
+    CDVR_SERVER_IP = os.getenv("CHANNELS_DVR_IP", "")
     CDVR_SERVER_PORT = int(os.getenv("CDVR_SERVER_PORT", "8089"))
     CDVR_API_PORT = int(os.getenv("CDVR_API_PORT", "57000"))
     CDVR_DVR_PATH = os.getenv("CDVR_DVR_PATH", "")
 
     # Integration servers
-    SERVER_URL = os.getenv("SERVER_URL", "http://192.168.86.80:6655")
+    SERVER_URL = os.getenv("SERVER_URL", "http://localhost:6655")
     CC_SERVER = os.getenv("CC_SERVER", "localhost")
     CC_PORT = int(os.getenv("CC_PORT", "8080"))
     CH4C_SERVER = os.getenv("CH4C_SERVER", "localhost")

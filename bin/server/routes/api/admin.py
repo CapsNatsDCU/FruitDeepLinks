@@ -288,5 +288,12 @@ def api_settings():
 
         if save_settings(conn, updates):
             log(f"Settings updated: {list(updates.keys())}", "INFO")
+            if "timezone" in updates and updates["timezone"]:
+                try:
+                    os.environ["TZ"] = updates["timezone"]
+                    time.tzset()
+                    log(f"Timezone applied immediately: {updates['timezone']}", "INFO")
+                except Exception as e:
+                    log(f"Failed to apply timezone immediately: {e}", "WARNING")
             return jsonify({"status": "success", "updated": list(updates.keys())})
         return jsonify({"status": "error", "message": "Failed to save settings"}), 500

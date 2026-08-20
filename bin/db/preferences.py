@@ -177,14 +177,20 @@ def load_auto_refresh(conn: sqlite3.Connection) -> Dict[str, Any]:
 
 SETTINGS_DEFS: Dict[str, tuple] = {
     "server_url": (
-        "SERVER_URL", "str", "http://192.168.86.80:6655",
+        "SERVER_URL", "str", "http://localhost:6655",
         "Server URL",
         "Base URL that ADBTuner and Channels DVR use to reach this server (M3U/XMLTV links).",
     ),
     "channels_dvr_ip": (
-        "CHANNELS_DVR_IP", "str", "192.168.86.72",
+        "CHANNELS_DVR_IP", "str", "",
         "Channels DVR IP",
         "IP address of your Channels DVR server.",
+    ),
+    "timezone": (
+        "TZ", "str", "America/New_York",
+        "Timezone",
+        "IANA timezone name (e.g. America/New_York, Europe/London, Australia/Sydney). "
+        "Applied immediately on save — affects the auto-refresh schedule and local-time guide display.",
     ),
     "channels_source_name": (
         "CHANNELS_SOURCE_NAME", "str", "FruitDeepLinks",

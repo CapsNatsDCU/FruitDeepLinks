@@ -120,6 +120,30 @@ docker compose up -d
 
 ---
 
+## ➕ Alternative: Plain `docker run` (no Compose, no Portainer)
+
+If you're just pulling and running the published image directly, mount `./data`, `./out`, and `./logs` yourself — without these, your database and settings are lost on every `docker pull` / container recreation:
+
+```bash
+mkdir -p data out logs
+
+docker run -d \
+  --name fruitdeeplinks \
+  -p 6655:6655 \
+  -v "$(pwd)/data:/app/data" \
+  -v "$(pwd)/out:/app/out" \
+  -v "$(pwd)/logs:/app/logs" \
+  -e TZ=America/New_York \
+  --restart unless-stopped \
+  ghcr.io/kineticman/fruitdeeplinks:latest
+
+# Web UI: http://localhost:6655
+```
+
+`SERVER_URL` and `CHANNELS_DVR_IP` default to `localhost` / unset — set them via `-e` or on the [Settings page](#️-settings-page) if this server isn't reachable at `localhost` from your other devices (e.g. Fire TV, Channels DVR).
+
+---
+
 ## ⚙️ Settings Page
 
 Visit `/settings` to configure the server without editing environment variables:

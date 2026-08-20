@@ -437,7 +437,7 @@ def get_filtered_playables(
         def espn_channel_priority(playable):
             """Return priority score for ESPN channels (lower = better)"""
             service_name = (playable.get("service_name") or "").lower()
-            
+
             # Main ESPN channel gets highest priority
             if service_name == "espn":
                 return 0

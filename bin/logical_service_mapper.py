@@ -61,7 +61,7 @@ LOGICAL_SERVICE_MAP = {
 if not _CATALOG_AVAILABLE:
     SERVICE_DISPLAY_NAMES = {
         'sportsonespn': 'ESPN+', 'sportscenter': 'ESPN+', 'espn_linear': 'ESPN (Linear)',
-        'espn_plus': 'ESPN+', 'peacock': 'Peacock', 'peacocktv': 'Peacock',
+        'espn_plus': 'ESPN+', 'espn_unlimited': 'ESPN Unlimited', 'peacock': 'Peacock', 'peacocktv': 'Peacock',
         'peacock_web': 'Peacock (Web)', 'pplus': 'Paramount+', 'aiv': 'Prime Video',
         'gametime': 'NBA', 'cbssportsapp': 'CBS Sports', 'cbstve': 'CBS',
         'nbcsportstve': 'NBC Sports', 'foxone': 'FOX Sports (App)', 'fsapp': 'FOX Sports (Alt)',
@@ -242,9 +242,17 @@ def get_logical_service_for_playable(
     # ESPN: differentiate linear TV channels from streaming services
     if provider == 'sportscenter':
         if service_name:
-            # Streaming services: ESPN+, ESPN Unlimited, and digital overflow content
+            # ESPN Unlimited is a distinct entitlement bundle from the ESPN+ add-on — Apple's
+            # catalog exposes both under identical-looking generic labels for the same event
+            # (e.g. one feed requiring ESPN+ and another requiring an add-on like MLB.TV), so
+            # split it into its own filterable logical service rather than lumping it into
+            # espn_plus. See forum report: MLB games defaulting to a feed needing MLB.TV even
+            # though the user only has (and enabled) ESPN Unlimited.
+            if 'Unlimited' in service_name:
+                return 'espn_unlimited'
+            # Streaming services: ESPN+, and digital overflow content
             # ACC Extra, SEC Plus are digital-only content requiring ESPN+ or ESPN Unlimited
-            if any(x in service_name for x in ['ESPN+', 'Unlimited', 'Extra', 'Plus V2']):
+            if any(x in service_name for x in ['ESPN+', 'Extra', 'Plus V2']):
                 return 'espn_plus'
             # Linear channels: ESPN, ESPN2, ESPN Deportes, ESPNU, ESPNews, ACC Network, SEC Network
             else:
@@ -412,7 +420,7 @@ if not _CATALOG_AVAILABLE:
 
     def get_logical_service_priority(service_code: str) -> int:
         _FALLBACK = {
-            'espn_linear': 0, 'sportsonespn': 1, 'espn_plus': 1, 'sportscenter': 1,
+            'espn_linear': 0, 'sportsonespn': 1, 'espn_plus': 1, 'espn_unlimited': 1, 'sportscenter': 1,
             'peacock': 2, 'peacock_web': 3, 'pplus': 4, 'max': 5,
             'aiv_free': 1, 'aiv_prime': 4, 'aiv_peacock': 5, 'aiv_max': 5,
             'cbssportsapp': 6, 'cbstve': 7, 'nbcsportstve': 8,

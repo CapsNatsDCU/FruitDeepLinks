@@ -428,7 +428,7 @@ def main():
     ap.add_argument("--chrome-m3u", default=default_chrome_m3u, help="Output Chrome Capture M3U")
     ap.add_argument("--ch4c-m3u", default=default_ch4c_m3u, help="Output Channels4Chrome M3U")
     ap.add_argument("--pcast-m3u", default=default_pcast_m3u, help="Output PrismCast M3U")
-    ap.add_argument("--server-url", default=os.getenv("SERVER_URL", "http://192.168.86.72:6655"), help="Base URL for lane streams")
+    ap.add_argument("--server-url", default=os.getenv("SERVER_URL", "http://localhost:6655"), help="Base URL for lane streams")
     ap.add_argument("--epg-prefix", default="lane.", help="Prefix for channel IDs")
     args = ap.parse_args()
     

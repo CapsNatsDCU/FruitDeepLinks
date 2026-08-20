@@ -249,8 +249,10 @@ def reset_lanes(conn: sqlite3.Connection):
 
 def create_lanes(conn: sqlite3.Connection, lane_count: int):
     cur = conn.cursor()
+    # DB setting wins, then env var, then default (get_setting handles the fallback chain)
+    lane_start_ch = get_setting(conn, "lane_start_ch") or LANE_START_CH_DEFAULT
     for lane_id in range(1, lane_count + 1):
-        logical_number = LANE_START_CH_DEFAULT + (lane_id - 1)
+        logical_number = lane_start_ch + (lane_id - 1)
         cur.execute(
             "INSERT INTO lanes VALUES (?, ?, ?)",
             (lane_id, f"Fruit Lane {lane_id}", logical_number),

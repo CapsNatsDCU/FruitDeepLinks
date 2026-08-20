@@ -370,6 +370,21 @@ def _get_enabled_services_from_db(db_path: Path) -> list:
         return []
 
 
+def _get_db_setting(key: str):
+    """Return the DB-stored value for a settings-page key (raw JSON-decoded), or None if not set."""
+    try:
+        conn = sqlite3.connect(str(DB_PATH), timeout=5)
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM user_preferences WHERE key = ?", (f"setting:{key}",))
+        row = cur.fetchone()
+        conn.close()
+        if row and row[0] is not None:
+            return json.loads(row[0])
+    except Exception:
+        pass
+    return None
+
+
 def _get_scraper_setting_from_db(env_var: str):
     """Return the DB-stored bool for a scraper toggle, or None if not set."""
     key = f"setting:{env_var.lower()}"
@@ -878,7 +893,7 @@ def main(argv=None):
     espn_days = os.getenv("ESPN_DAYS", "7")
     espn_db = DATA_DIR / "espn_graph.db"
     espn_scrape_enabled = _scraper_enabled(
-        "ESPN_ENABLED", ["espn_plus", "espn_linear"], enabled_services
+        "ESPN_ENABLED", ["espn_plus", "espn_linear", "espn_unlimited"], enabled_services
     )
 
     if skip_scrape or not espn_scrape_enabled:
@@ -1054,7 +1069,8 @@ def main(argv=None):
         return 1
 
 # Step 9: Build virtual lanes (Channels-style direct lanes)
-    lanes = os.getenv("FRUIT_LANES", os.getenv("PEACOCK_LANES", "40"))
+    lanes = _get_db_setting("num_lanes") or os.getenv("FRUIT_LANES", os.getenv("PEACOCK_LANES", "40"))
+    lanes = str(lanes)
     if not run_step(9, total_steps, f"Building {lanes} virtual lanes", [
         "python3", "fruit_build_lanes.py",
         "--db", str(DB_PATH),
@@ -1070,7 +1086,7 @@ def main(argv=None):
         return 1
 
     # Step 11: Export virtual lanes (existing hybrid lane view)
-    server_url = os.getenv("SERVER_URL", "http://192.168.86.80:6655")
+    server_url = _get_db_setting("server_url") or os.getenv("SERVER_URL", "http://localhost:6655")
     if not run_step(11, total_steps, "Exporting Virtual Lanes", [
         "python3", "fruit_export_lanes.py",
         "--db", str(DB_PATH),
@@ -1086,7 +1102,7 @@ def main(argv=None):
         return 1
 
     # Step 13: Export ADB XMLTV + M3U playlists
-    server_url = os.getenv("SERVER_URL", "http://192.168.86.80:6655")
+    server_url = _get_db_setting("server_url") or os.getenv("SERVER_URL", "http://localhost:6655")
     if not run_step(13, total_steps, "Exporting ADB lanes XMLTV and M3U", [
         "python3", "fruit_export_adb_lanes.py",
         "--db", str(DB_PATH),

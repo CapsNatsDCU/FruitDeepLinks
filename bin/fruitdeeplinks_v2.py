@@ -16,6 +16,29 @@ _BIN_DIR = str(Path(__file__).parent)
 if _BIN_DIR not in sys.path:
     sys.path.insert(0, _BIN_DIR)
 
+def _apply_db_timezone() -> None:
+    """Apply a DB-stored timezone setting to the process before the scheduler starts.
+
+    Runs before create_app() so server.scheduler picks up the right TZ env var
+    on its first (and only) BackgroundScheduler(timezone=...) call.
+    """
+    try:
+        from db.connection import db_exists, get_conn
+        from db.preferences import get_setting
+        import time as _time
+
+        if db_exists():
+            with get_conn() as conn:
+                tz = get_setting(conn, "timezone")
+                if tz:
+                    os.environ["TZ"] = tz
+                    _time.tzset()
+    except Exception:
+        pass
+
+
+_apply_db_timezone()
+
 from server.app import create_app
 from server.config import cfg
 from server.logging_setup import log
