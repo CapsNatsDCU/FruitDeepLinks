@@ -56,6 +56,13 @@ except ImportError:
         return enabled_services
 
 
+try:
+    from db.preferences import get_setting
+except ImportError:
+    def get_setting(conn, key, fallback=None):
+        return fallback
+
+
 # Import shared XMLTV helpers
 try:
     from xmltv_helpers import build_enhanced_description, build_enhanced_title
@@ -391,6 +398,7 @@ def build_direct_xmltv(
     priority_map = preferences.get("service_priorities", {})
     amazon_penalty = preferences.get("amazon_penalty", True)
     language_preference = preferences.get("language_preference", "en")
+    max_event_minutes = int(get_setting(conn, "max_event_minutes", 0) or 0)
 
     now = datetime.now(timezone.utc)
     tv = ET.Element("tv")
@@ -499,6 +507,13 @@ def build_direct_xmltv(
         event_end = parse_iso(event["end_utc"])
         if event_end <= event_start:
             event_end = event_start + timedelta(hours=3)
+
+        # Cap runaway event lengths (e.g. bad upstream end_utc showing an
+        # MLB game as 8+ hours) to the user's configured maximum.
+        if max_event_minutes > 0:
+            max_end = event_start + timedelta(minutes=max_event_minutes)
+            if event_end > max_end:
+                event_end = max_end
 
         # Pre-event placeholders (from now-1h snapped to :00/:30)
         pre_start = snap_to_half_hour(now - timedelta(hours=1))

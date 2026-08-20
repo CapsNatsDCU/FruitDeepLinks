@@ -216,6 +216,12 @@ SETTINGS_DEFS: Dict[str, tuple] = {
         "Days Ahead",
         "How far into the future to fetch events.",
     ),
+    "max_event_minutes": (
+        "FRUIT_MAX_EVENT_MINUTES", "int", 0,
+        "Maximum Event Length (minutes)",
+        "Cap how long any single event can occupy the guide — protects against bad upstream end times "
+        "(e.g. an MLB game showing 8+ hours). 0 = no limit.",
+    ),
     "headless": (
         "HEADLESS", "bool", True,
         "Headless Browser",

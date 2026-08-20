@@ -36,6 +36,13 @@ except ImportError:
     def get_logical_services_for_adb_provider(provider: str) -> List[str]:
         return [provider]
 
+# Settings (distinct from filter preferences) — Settings page "Pipeline" section
+try:
+    from db.preferences import get_setting
+except ImportError:
+    def get_setting(conn, key, fallback=None):
+        return fallback
+
 
 UTC = dt.timezone.utc
 
@@ -330,6 +337,7 @@ def load_events_for_provider(
 def assign_to_lanes(
     events: Sequence[Dict[str, Any]],
     lane_count: int,
+    max_event_minutes: int = 0,
 ) -> List[Tuple[int, Dict[str, Any], dt.datetime, dt.datetime]]:
     lane_ends: List[dt.datetime] = [dt.datetime.min.replace(tzinfo=UTC) for _ in range(lane_count)]
     assignments: List[Tuple[int, Dict[str, Any], dt.datetime, dt.datetime]] = []
@@ -343,6 +351,13 @@ def assign_to_lanes(
         en = parse_iso_utc(ev.get("end_utc", "")) or ms_to_dt(ev.get("end_ms"))
         if not st or not en or en <= st:
             continue
+
+        # Cap runaway event lengths (e.g. bad upstream end_utc showing an
+        # MLB game as 8+ hours) to the user's configured maximum.
+        if max_event_minutes > 0:
+            max_en = st + dt.timedelta(minutes=max_event_minutes)
+            if en > max_en:
+                en = max_en
 
         best_lane = None
         best_end = None
@@ -398,6 +413,7 @@ def build_adb_lanes(db_path: str, provider_filter: Optional[str] = None) -> None
     enabled_services: List[str] = prefs.get("enabled_services") or []
     disabled_sports: List[str] = prefs.get("disabled_sports") or []
     disabled_leagues: List[str] = prefs.get("disabled_leagues") or []
+    max_event_minutes: int = int(get_setting(conn, "max_event_minutes", 0) or 0)
 
     providers = load_adb_enabled_providers(conn)
     if provider_filter:
@@ -481,7 +497,7 @@ def build_adb_lanes(db_path: str, provider_filter: Optional[str] = None) -> None
             log.info("Provider %s: no events after filtering; nothing to insert.", provider_code)
             continue
 
-        assignments = assign_to_lanes(filtered, lane_count)
+        assignments = assign_to_lanes(filtered, lane_count, max_event_minutes)
         inserted = insert_adb_rows(conn, provider_code, assignments)
         total_inserted += inserted
         log.info("Provider %s: inserted %d adb_lanes rows", provider_code, inserted)

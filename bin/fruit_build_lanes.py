@@ -15,6 +15,12 @@ try:
 except ImportError:
     FILTERING_AVAILABLE = False
 
+try:
+    from db.preferences import get_setting
+except ImportError:
+    def get_setting(conn, key, fallback=None):
+        return fallback
+
 
 def _get_int_env(names, default):
     """Try a list of env var names and return the first int value found."""
@@ -101,7 +107,7 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int) -> List[Event]
     prefs = {}
     disabled_sports = []
     disabled_leagues = []
-    
+
     if FILTERING_AVAILABLE:
         try:
             prefs = load_user_preferences(conn)
@@ -109,6 +115,8 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int) -> List[Event]
             disabled_leagues = prefs.get("disabled_leagues", [])
         except Exception:
             pass
+
+    max_event_minutes = int(get_setting(conn, "max_event_minutes", 0) or 0)
     
     cur = conn.cursor()
     
@@ -175,6 +183,13 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int) -> List[Event]
                 end_dt = start_dt + timedelta(
                     seconds=runtime_secs if runtime_secs else 7200
                 )
+
+        # Cap runaway event lengths (e.g. bad upstream end_utc showing an
+        # MLB game as 8+ hours) to the user's configured maximum.
+        if max_event_minutes > 0:
+            max_end_by_user = start_dt + timedelta(minutes=max_event_minutes)
+            if end_dt > max_end_by_user:
+                end_dt = max_end_by_user
 
         # Filter by time window - include events that are currently playing
         if end_dt < now or start_dt > cutoff:
