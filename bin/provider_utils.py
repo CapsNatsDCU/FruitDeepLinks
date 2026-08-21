@@ -37,7 +37,7 @@ except ImportError:
 # Legacy list form of priorities, used by filter_playables_by_services sort key.
 # Order matches INTERNAL_PRIORITY from service_catalog (lower index = higher priority).
 DEFAULT_PROVIDER_PRIORITY = [
-    'espn_linear', 'sportsonespn', 'espn_plus', 'sportscenter',
+    'espn_linear', 'sportsonespn', 'espn_plus', 'espn_unlimited', 'sportscenter',
     'peacock', 'peacock_web', 'pplus', 'max',
     'aiv_free', 'aiv_prime', 'aiv_peacock', 'aiv_max',
     'cbssportsapp', 'cbstve', 'nbcsportstve',
@@ -46,9 +46,9 @@ DEFAULT_PROVIDER_PRIORITY = [
     'dazn', 'aiv_dazn', 'open.dazn.com', 'f1tv',
     'kayo_web', 'bein', 'victory', 'nesn', 'nesn_web', 'fanatiz_web',
     'gotham', 'marquee', 'vixapp', 'aiv_vix_premium', 'aiv_vix',
-    'aiv_tennis_channel', 'aiv_fanduel', 'nflctv',
+    'aiv_tennis_channel', 'aiv_fanduel', 'espn_mlb_network', 'nflctv',
     'watchtru', 'ncaa_march_madness', 'watchtnt', 'watchtbs',
-    'nba', 'aiv_nba_league_pass', 'gametime', 'mlb', 'nhl', 'nflmobile',
+    'nba', 'aiv_nba_league_pass', 'espn_mlb_tv', 'gametime', 'mlb', 'nhl', 'nflmobile',
     'aiv', 'aiv_aggregator', 'https', 'http',
 ]
 

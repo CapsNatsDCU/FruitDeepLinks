@@ -25,13 +25,20 @@ try:
     _bin_dir = os.path.dirname(__file__)
     if _bin_dir not in sys.path:
         sys.path.insert(0, _bin_dir)
-    from core.service_catalog import get_internal_priority
+    from core.service_catalog import (
+        get_internal_priority,
+        ESPN_PACKAGE_ENTITLEMENTS,
+        ESPN_NETWORK_ENTITLEMENTS,
+    )
     _PRIORITY_AVAILABLE = True
 except ImportError:
     _PRIORITY_AVAILABLE = False
 
     def get_internal_priority(service_code: str) -> int:
         return 25
+
+    ESPN_PACKAGE_ENTITLEMENTS = {"MLB_TV": "espn_mlb_tv", "MLB_NETWORK": "espn_mlb_network"}
+    ESPN_NETWORK_ENTITLEMENTS = {"ESPN Unlimited": "espn_unlimited"}
 
 
 def _log(msg: str) -> None:
@@ -51,13 +58,10 @@ def entitlement_logical_service(espn_event: Dict) -> Optional[str]:
     packages = espn_event.get('packages') or ''
     network = (espn_event.get('network') or '').strip()
 
-    if 'MLB_TV' in packages:
-        return 'espn_mlb_tv'
-    if 'MLB_NETWORK' in packages:
-        return 'espn_mlb_network'
-    if network == 'ESPN Unlimited':
-        return 'espn_unlimited'
-    return None
+    for pkg_substr, code in ESPN_PACKAGE_ENTITLEMENTS.items():
+        if pkg_substr in packages:
+            return code
+    return ESPN_NETWORK_ENTITLEMENTS.get(network)
 
 
 def ensure_espn_graph_id_column(fruit_db: str) -> None:
@@ -196,7 +200,11 @@ def get_espn_graph_events(espn_db: str) -> Dict[str, List[Dict]]:
     return results
 
 
-def pick_espn_candidate(candidates: List[Dict], apple_logical_service: Optional[str]) -> Dict:
+def pick_espn_candidate(
+    candidates: List[Dict],
+    apple_logical_service: Optional[str],
+    used_feed_ids: Optional[set] = None,
+) -> Dict:
     """
     Pick the ESPN Watch Graph candidate (of possibly several sharing one
     program_id) that best matches a specific Apple playable.
@@ -207,19 +215,39 @@ def pick_espn_candidate(candidates: List[Dict], apple_logical_service: Optional[
     streaming). Falls back to the lowest feed_id — the prior behavior —
     when there's no such row or the classification is ambiguous, so a
     single-candidate program_id (the common case) is unaffected.
+
+    Apple's catalog often exposes multiple non-linear playables for the same
+    program_id under identical generic labels, with no field indicating which
+    entitlement each one actually needs — so which specific playable maps to
+    which Watch Graph candidate can't be determined with certainty. To avoid
+    silently collapsing distinct feeds (e.g. one MLB.TV, one MLB Network) onto
+    the same candidate every time, `used_feed_ids` lets the caller mark
+    candidates already assigned to an earlier playable for this program_id so
+    each subsequent playable prefers a still-unassigned one instead.
     """
     if len(candidates) == 1:
         return candidates[0]
 
+    used_feed_ids = used_feed_ids or set()
     wants_linear = apple_logical_service == 'espn_linear'
-    for c in candidates:
+
+    def matches(c: Dict) -> bool:
         has_packages = bool(c.get('packages'))
-        if wants_linear and not has_packages:
-            return c
-        if not wants_linear and has_packages:
+        return (not has_packages) if wants_linear else has_packages
+
+    # Prefer an unused candidate that matches Apple's linear/non-linear classification.
+    for c in candidates:
+        if matches(c) and c['feed_id'] not in used_feed_ids:
             return c
 
-    return candidates[0]  # candidates are pre-sorted by feed_id ASC
+    # No unused matching candidate — fall back to any unused candidate at all,
+    # so multiple Apple playables sharing a program_id get distinct ESPN feeds
+    # instead of collapsing onto the same one.
+    for c in candidates:
+        if c['feed_id'] not in used_feed_ids:
+            return c
+
+    return candidates[0]  # every candidate already used — fall back to the first
 
 
 def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_enrich: bool = False) -> None:
@@ -271,7 +299,8 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
     unmatched_details = []
     updates_to_apply = []
     reclass_updates_to_apply = []
-    
+    used_feed_ids_by_program: Dict[str, set] = {}
+
     total = len(apple_playables)
     last_progress = 0
     
@@ -285,7 +314,11 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
             last_progress = progress
         
         if external_id in espn_events:
-            espn_event = pick_espn_candidate(espn_events[external_id], playable.get('logical_service'))
+            used_feed_ids = used_feed_ids_by_program.setdefault(external_id, set())
+            espn_event = pick_espn_candidate(
+                espn_events[external_id], playable.get('logical_service'), used_feed_ids
+            )
+            used_feed_ids.add(espn_event['feed_id'])
 
             # Extract playback ID from feed URL
             espn_playback_id = None

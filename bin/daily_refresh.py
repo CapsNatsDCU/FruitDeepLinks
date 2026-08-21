@@ -370,19 +370,28 @@ def _get_enabled_services_from_db(db_path: Path) -> list:
         return []
 
 
-def _get_db_setting(key: str):
-    """Return the DB-stored value for a settings-page key (raw JSON-decoded), or None if not set."""
+try:
+    from db.preferences import get_setting as _pref_get_setting
+except ImportError:
+    _pref_get_setting = None
+
+
+def _get_db_setting(key: str, fallback=None):
+    """Return the resolved settings-page value for `key` (DB, then env var, then
+    SETTINGS_DEFS default). Delegates to db.preferences.get_setting so this stays
+    in sync with the Settings page's own casting/default rules instead of
+    re-implementing them here.
+    """
+    if _pref_get_setting is None:
+        return fallback
     try:
         conn = sqlite3.connect(str(DB_PATH), timeout=5)
-        cur = conn.cursor()
-        cur.execute("SELECT value FROM user_preferences WHERE key = ?", (f"setting:{key}",))
-        row = cur.fetchone()
-        conn.close()
-        if row and row[0] is not None:
-            return json.loads(row[0])
+        try:
+            return _pref_get_setting(conn, key, fallback)
+        finally:
+            conn.close()
     except Exception:
-        pass
-    return None
+        return fallback
 
 
 def _get_scraper_setting_from_db(env_var: str):
@@ -1069,8 +1078,8 @@ def main(argv=None):
         return 1
 
 # Step 9: Build virtual lanes (Channels-style direct lanes)
-    lanes = _get_db_setting("num_lanes") or os.getenv("FRUIT_LANES", os.getenv("PEACOCK_LANES", "40"))
-    lanes = str(lanes)
+    # num_lanes is a known settings key, so this resolves DB -> FRUIT_LANES env -> default (50).
+    lanes = str(_get_db_setting("num_lanes"))
     if not run_step(9, total_steps, f"Building {lanes} virtual lanes", [
         "python3", "fruit_build_lanes.py",
         "--db", str(DB_PATH),
@@ -1086,7 +1095,7 @@ def main(argv=None):
         return 1
 
     # Step 11: Export virtual lanes (existing hybrid lane view)
-    server_url = _get_db_setting("server_url") or os.getenv("SERVER_URL", "http://localhost:6655")
+    server_url = _get_db_setting("server_url")
     if not run_step(11, total_steps, "Exporting Virtual Lanes", [
         "python3", "fruit_export_lanes.py",
         "--db", str(DB_PATH),
@@ -1102,7 +1111,7 @@ def main(argv=None):
         return 1
 
     # Step 13: Export ADB XMLTV + M3U playlists
-    server_url = _get_db_setting("server_url") or os.getenv("SERVER_URL", "http://localhost:6655")
+    server_url = _get_db_setting("server_url")
     if not run_step(13, total_steps, "Exporting ADB lanes XMLTV and M3U", [
         "python3", "fruit_export_adb_lanes.py",
         "--db", str(DB_PATH),
@@ -1112,8 +1121,8 @@ def main(argv=None):
         return 1
 
     # Force Channels DVR refresh (if configured)
-    channels_ip = os.getenv("CHANNELS_DVR_IP")
-    channels_source_name = os.getenv("CHANNELS_SOURCE_NAME")
+    channels_ip = _get_db_setting("channels_dvr_ip")
+    channels_source_name = _get_db_setting("channels_source_name")
 
     if channels_ip and channels_source_name:
         print("\n" + "=" * 60)

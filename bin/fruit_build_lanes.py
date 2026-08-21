@@ -184,16 +184,18 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int) -> List[Event]
                     seconds=runtime_secs if runtime_secs else 7200
                 )
 
+        # Filter by time window - include events that are currently playing
+        if end_dt < now or start_dt > cutoff:
+            continue
+
         # Cap runaway event lengths (e.g. bad upstream end_utc showing an
-        # MLB game as 8+ hours) to the user's configured maximum.
+        # MLB game as 8+ hours) to the user's configured maximum. Applied
+        # after the liveness filter above so capping a still-live event's
+        # end into the past truncates it rather than dropping it entirely.
         if max_event_minutes > 0:
             max_end_by_user = start_dt + timedelta(minutes=max_event_minutes)
             if end_dt > max_end_by_user:
                 end_dt = max_end_by_user
-
-        # Filter by time window - include events that are currently playing
-        if end_dt < now or start_dt > cutoff:
-            continue
 
         # Cap end_dt to cutoff + 1 day to prevent events with bad/far-future
         # end_utc from causing a massive placeholder loop across many lanes
@@ -249,8 +251,11 @@ def reset_lanes(conn: sqlite3.Connection):
 
 def create_lanes(conn: sqlite3.Connection, lane_count: int):
     cur = conn.cursor()
-    # DB setting wins, then env var, then default (get_setting handles the fallback chain)
-    lane_start_ch = get_setting(conn, "lane_start_ch") or LANE_START_CH_DEFAULT
+    # DB setting wins, then env var, then default (get_setting handles the fallback chain).
+    # `is None` (not truthy-`or`) so an explicit setting of 0 isn't discarded.
+    lane_start_ch = get_setting(conn, "lane_start_ch")
+    if lane_start_ch is None:
+        lane_start_ch = LANE_START_CH_DEFAULT
     for lane_id in range(1, lane_count + 1):
         logical_number = lane_start_ch + (lane_id - 1)
         cur.execute(

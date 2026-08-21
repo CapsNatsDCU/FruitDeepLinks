@@ -11,6 +11,28 @@ Priority scales:
 """
 
 # ---------------------------------------------------------------------------
+# ESPN Watch Graph entitlement signals -> logical_service code
+#
+# ESPN Watch Graph's own packages/network fields reveal entitlements Apple's
+# catalog doesn't expose (e.g. a feed that actually requires MLB.TV even
+# though Apple lists it identically to a plain ESPN+ feed). Keyed by a
+# substring found in the Watch Graph "packages" field; network-exact matches
+# use ESPN_NETWORK_ENTITLEMENTS instead. Add new entitlements here only --
+# fruit_enrich_espn.py's reclassification and fruit_import_appletv.py's
+# re-import preservation logic both key off this same table.
+# ---------------------------------------------------------------------------
+ESPN_PACKAGE_ENTITLEMENTS: dict[str, str] = {
+    "MLB_TV": "espn_mlb_tv",
+    "MLB_NETWORK": "espn_mlb_network",
+}
+ESPN_NETWORK_ENTITLEMENTS: dict[str, str] = {
+    "ESPN Unlimited": "espn_unlimited",
+}
+ESPN_GRANULAR_ENTITLEMENTS: frozenset = frozenset(
+    set(ESPN_PACKAGE_ENTITLEMENTS.values()) | set(ESPN_NETWORK_ENTITLEMENTS.values())
+)
+
+# ---------------------------------------------------------------------------
 # Service Display Names
 # Maps logical service codes -> human-readable names
 # ---------------------------------------------------------------------------

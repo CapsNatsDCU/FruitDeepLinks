@@ -632,8 +632,11 @@ def build_direct_m3u(
 
     with open(m3u_path, "w", encoding="utf-8") as f:
         f.write("#EXTM3U\n\n")
-        # Starting channel number: DB setting wins, then env var, then default (get_setting handles the fallback chain)
-        direct_start_ch = get_setting(conn, "direct_start_ch") or int(os.getenv("FRUIT_DIRECT_START_CH", "5000"))
+        # Starting channel number: DB setting wins, then env var, then default (get_setting handles the fallback chain).
+        # `is None` (not truthy-`or`) so an explicit setting of 0 isn't discarded.
+        direct_start_ch = get_setting(conn, "direct_start_ch")
+        if direct_start_ch is None:
+            direct_start_ch = int(os.getenv("FRUIT_DIRECT_START_CH", "5000"))
         for idx, event in enumerate(events, start=direct_start_ch):
             pvid = event.get("pvid")
             if not pvid:

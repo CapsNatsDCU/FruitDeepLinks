@@ -9,11 +9,21 @@ Usage:
 """
 import argparse
 import json
+import os
 import sqlite3
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    _bin_dir = os.path.dirname(__file__)
+    if _bin_dir not in sys.path:
+        sys.path.insert(0, _bin_dir)
+    from core.service_catalog import ESPN_GRANULAR_ENTITLEMENTS
+except ImportError:
+    ESPN_GRANULAR_ENTITLEMENTS = frozenset({"espn_mlb_tv", "espn_mlb_network", "espn_unlimited"})
 
 # Provider channel number "namespaces" (kept for potential future use)
 PROVIDER_CHANNEL_RANGES = {
@@ -744,34 +754,45 @@ def extract_playables(
 
     return result
 
-def upsert_playables(conn: sqlite3.Connection, playables: List[Tuple], dry: bool = False):
-    """Insert or update playables for an event"""
-    if not playables:
-        return
-    
+def upsert_playables(conn: sqlite3.Connection, event_id: str, playables: List[Tuple], dry: bool = False):
+    """Insert or update playables for an event, dropping any no longer offered."""
     if dry:
-        _log(f"[DRY] playables x{len(playables)}")
+        if playables:
+            _log(f"[DRY] playables x{len(playables)}")
         return
-    
+
     cur = conn.cursor()
     # Ensure playables table exists (idempotent)
     global _SCHEMA_ENSURED
     if not _SCHEMA_ENSURED:
         ensure_events_schema(conn)
-    # Drop playables no longer present in this import (e.g. a service dropped the event).
-    # Existing rows are upserted below rather than deleted, so enrichment columns
+
+    # Drop playables no longer present in this import (e.g. a service dropped the
+    # event, or every service dropped it so `playables` is now empty). Existing
+    # rows are upserted below rather than deleted, so enrichment columns
     # (espn_graph_id, locale) populated by later pipeline steps survive re-import.
-    if playables:
-        event_id = playables[0][0]
-        new_playable_ids = [p[1] for p in playables]
+    new_playable_ids = [p[1] for p in playables]
+    if new_playable_ids:
         placeholders = ",".join("?" * len(new_playable_ids))
         cur.execute(
             f"DELETE FROM playables WHERE event_id = ? AND playable_id NOT IN ({placeholders})",
             (event_id, *new_playable_ids),
         )
+    else:
+        cur.execute("DELETE FROM playables WHERE event_id = ?", (event_id,))
 
-    # Insert new playables / refresh existing ones, preserving espn_graph_id + locale
-    cur.executemany("""
+    if not playables:
+        return
+
+    # Insert new playables / refresh existing ones, preserving espn_graph_id + locale.
+    # logical_service/priority are only overwritten when the existing row isn't one
+    # of the granular ESPN entitlement codes (espn_mlb_tv/espn_mlb_network/
+    # espn_unlimited) applied by Step 7c enrichment — otherwise this re-import
+    # would silently revert that reclassification back to Apple's generic
+    # espn_plus/espn_linear classification every time Step 6 runs.
+    granular = tuple(ESPN_GRANULAR_ENTITLEMENTS)
+    granular_placeholders = ",".join("?" * len(granular))
+    cur.executemany(f"""
         INSERT INTO playables (
             event_id, playable_id, provider, service_name, logical_service,
             deeplink_play, deeplink_open, playable_url, title, content_id, priority, http_deeplink_url, created_utc
@@ -779,16 +800,22 @@ def upsert_playables(conn: sqlite3.Connection, playables: List[Tuple], dry: bool
         ON CONFLICT(event_id, playable_id) DO UPDATE SET
             provider = excluded.provider,
             service_name = excluded.service_name,
-            logical_service = excluded.logical_service,
+            logical_service = CASE
+                WHEN playables.logical_service IN ({granular_placeholders})
+                THEN playables.logical_service ELSE excluded.logical_service
+            END,
             deeplink_play = excluded.deeplink_play,
             deeplink_open = excluded.deeplink_open,
             playable_url = excluded.playable_url,
             title = excluded.title,
             content_id = excluded.content_id,
-            priority = excluded.priority,
+            priority = CASE
+                WHEN playables.logical_service IN ({granular_placeholders})
+                THEN playables.priority ELSE excluded.priority
+            END,
             http_deeplink_url = excluded.http_deeplink_url,
             created_utc = excluded.created_utc
-    """, playables)
+    """, [(*row, *granular, *granular) for row in playables])
 
 def main():
     ap = argparse.ArgumentParser()
@@ -872,7 +899,7 @@ def main():
         playables = extract_playables(normalized, mapped["id"], conn=conn)
         if playables:
             playables_extracted += len(playables)
-        upsert_playables(conn, playables, dry=args.dry_run)
+        upsert_playables(conn, mapped["id"], playables, dry=args.dry_run)
         
         inserted += 1
 
