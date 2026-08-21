@@ -408,6 +408,7 @@ def get_provider_playable_link(conn: sqlite3.Connection, event_id: str, provider
             if extra:
                 select_cols.append(extra)
 
+        mapped = None
         params = [event_id]
         if logical_col:
             try:
@@ -424,7 +425,49 @@ def get_provider_playable_link(conn: sqlite3.Connection, event_id: str, provider
             params.append(provider_code)
 
         is_espn = provider_code.lower() in ("sportscenter", "espn", "espn+")
-        if is_espn and espn_col:
+
+        # Amazon ADB lanes combine every aiv_* sub-service under provider_code
+        # "aiv". Reuse the same filtered ordering shown as Computed Best rather
+        # than selecting an arbitrary sibling when database priorities tie.
+        preferred_playable_id = None
+        amazon_filter_applied = False
+        if provider_code.lower() == "aiv" and logical_col and playable_id_col and mapped:
+            try:
+                from filter_integration import (
+                    expand_enabled_services_for_amazon,
+                    get_filtered_playables,
+                    load_user_preferences,
+                )
+
+                prefs = load_user_preferences(conn)
+                enabled = expand_enabled_services_for_amazon(
+                    conn, prefs.get("enabled_services", [])
+                )
+                filtered = get_filtered_playables(
+                    conn,
+                    event_id,
+                    enabled,
+                    amazon_master_enabled=prefs.get("amazon_master_enabled", True),
+                )
+                mapped_services = set(mapped)
+                preferred = next(
+                    (p for p in filtered if p.get("logical_service") in mapped_services),
+                    None,
+                )
+                preferred_playable_id = preferred.get("playable_id") if preferred else None
+                amazon_filter_applied = True
+            except Exception as e:
+                log(f"Amazon ADB playable filtering failed for {event_id}: {e}", "WARNING")
+
+        if amazon_filter_applied and not preferred_playable_id:
+            return empty
+
+        if preferred_playable_id:
+            order = f"ORDER BY CASE WHEN {playable_id_col} = ? THEN 0 ELSE 1 END"
+            params.append(preferred_playable_id)
+            if priority_col:
+                order += f", {priority_col} ASC"
+        elif is_espn and espn_col:
             order = f"ORDER BY CASE WHEN {espn_col} IS NOT NULL AND {espn_col} != '' THEN 0 ELSE 1 END"
             if svc_name_col:
                 order += (

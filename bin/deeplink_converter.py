@@ -62,16 +62,23 @@ _UUID_SEARCH_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[
 
 def convert_amazon_prime(punchout_url: str) -> Optional[str]:
     """
-    aiv://aiv/detail?gti=<GTI>&action=watch&type=live...
-      -> https://app.primevideo.com/detail?gti=<GTI>
+    aiv://aiv/detail?gti=<CONTENT_GTI>&broadcast=<BROADCAST_GTI>...
+      -> https://app.primevideo.com/detail?gti=<BROADCAST_GTI>
+
+    Amazon's web resolver ignores a separate broadcast query parameter. To
+    preserve the specific feed/sub-service, the broadcast GTI must be supplied
+    as the web URL's primary gti. Fall back to the content GTI for URLs that do
+    not include a broadcast identifier.
     """
     if not punchout_url or not punchout_url.lower().startswith("aiv://"):
         return None
     pr = urlparse(punchout_url)
     qs = parse_qs(pr.query)
+    broadcast_gti = (qs.get("broadcast") or [None])[0]
     gti = (qs.get("gti") or [None])[0]
-    if gti:
-        return f"https://app.primevideo.com/detail?gti={gti}"
+    web_gti = broadcast_gti or gti
+    if web_gti:
+        return f"https://app.primevideo.com/detail?gti={web_gti}"
     return None
 
 
@@ -529,6 +536,10 @@ def generate_espn_scheme_deeplink(espn_graph_id: Optional[str] = None, fallback_
 if __name__ == "__main__":
     # Minimal smoke tests
     tests = [
+        ("aiv://aiv/detail?gti=amzn1.dv.gti.content&action=watch&type=live&broadcast=amzn1.dv.gti.broadcast",
+         dict(provider="aiv"),
+         "https://app.primevideo.com/detail?gti=amzn1.dv.gti.broadcast"),
+
         ("aiv://aiv/detail?gti=amzn1.dv.gti.10fd272d-309e-427a-87b6-6289003e2ccb&action=watch&type=live",
          dict(provider="aiv"),
          "https://app.primevideo.com/detail?gti=amzn1.dv.gti.10fd272d-309e-427a-87b6-6289003e2ccb"),

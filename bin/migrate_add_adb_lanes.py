@@ -101,9 +101,10 @@ def populate_http_deeplinks(conn: sqlite3.Connection, log: logging.Logger) -> No
       - Pass playable_id (and espn_graph_id, when present) to converter — the
         latter is required for ESPN playChannel case and for events where ESPN
         Watch Graph enrichment (Step 7c) found a better ID than Apple's own
-      - Idempotent for non-ESPN rows (only fills blank http_deeplink_url); ESPN
-        rows are always re-checked so a later Watch Graph match can upgrade a
+      - ESPN rows are re-checked so a later Watch Graph match can upgrade a
         value that was already filled from Apple's ID at import time
+      - Amazon rows are re-checked so legacy content-level links are upgraded
+        to feed-specific links generated from their broadcast GTI
     """
     cur = conn.cursor()
 
@@ -138,12 +139,17 @@ def populate_http_deeplinks(conn: sqlite3.Connection, log: logging.Logger) -> No
     has_espn_graph_id = "espn_graph_id" in cols
     espn_select = "espn_graph_id" if has_espn_graph_id else "NULL AS espn_graph_id"
 
-    # Pull rows needing HTTP: any blank http_deeplink_url, plus ESPN rows that now
-    # have a Watch Graph ID so an already-filled (Apple-only) value gets upgraded.
+    # Pull rows needing HTTP: any blank http_deeplink_url, ESPN rows that now
+    # have a Watch Graph ID, and Amazon rows whose existing content-level URL
+    # may need upgrading to a feed-specific broadcast-GTI URL.
     espn_refresh_clause = (
         " OR (provider IN ('sportscenter','espn','espn+')"
         "      AND espn_graph_id IS NOT NULL AND espn_graph_id != '')"
         if has_espn_graph_id else ""
+    )
+    amazon_refresh_clause = (
+        " OR (LOWER(provider) IN ('aiv','amazon prime video','prime video')"
+        f"      AND INSTR({primary_col}, 'broadcast=') > 0)"
     )
     query = f"""
         SELECT event_id, playable_id, provider, {espn_select},
@@ -151,7 +157,8 @@ def populate_http_deeplinks(conn: sqlite3.Connection, log: logging.Logger) -> No
         FROM playables
         WHERE ({primary_col} IS NOT NULL AND {primary_col} != '')
           AND (
-                (http_deeplink_url IS NULL OR http_deeplink_url = ''){espn_refresh_clause}
+                (http_deeplink_url IS NULL OR http_deeplink_url = '')
+                {espn_refresh_clause}{amazon_refresh_clause}
               )
         LIMIT 20000
     """
