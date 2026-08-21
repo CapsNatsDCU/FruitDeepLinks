@@ -102,7 +102,14 @@ async function loadDetail() {
   if (data.is_live_now) badges.push('<span class="badge good">LIVE NOW</span>');
   if ((e.is_premium??0)==1) badges.push('<span class="badge warn">PREMIUM</span>');
   if ((e.is_free??0)==1)    badges.push('<span class="badge good">FREE</span>');
-  const providers = (data.providers||[]).map(x=>`<span class="chip">${escH(x)}</span>`).join("");
+  const displayNameByCode = {};
+  for (const p of playables) {
+    const code = p.logical_service || p.provider || "";
+    if (code && !displayNameByCode[code]) displayNameByCode[code] = p.display_name || code;
+  }
+  const providers = (data.providers||[])
+    .map(x=>`<span class="chip" title="${escH(x)}">${escH(displayNameByCode[x]||x)}</span>`)
+    .join("");
 
   document.getElementById("summary").innerHTML = `
     <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
@@ -162,8 +169,12 @@ async function loadDetail() {
          </div>`
       : '<span class="small">—</span>';
 
+    const serviceHtml = p.logical_service
+      ? `<div>${escH(p.display_name||p.logical_service)}</div><div class="mono small">${escH(p.logical_service)}</div>`
+      : '<span class="small">—</span>';
+
     tr.innerHTML = `
-      <td class="mono">${escH(p.logical_service||"")}</td>
+      <td>${serviceHtml}</td>
       <td class="mono">${escH(p.provider||"")}</td>
       <td class="mono">${escH(p.priority)}</td>
       <td>${appleHtml}</td>
@@ -183,7 +194,8 @@ async function loadDetail() {
     document.getElementById("bestBox").innerHTML = `
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
         <span class="badge good">Selected</span>
-        <b>${escH(best.logical_service||best.provider||"")}</b>
+        <b>${escH(best.display_name||best.logical_service||best.provider||"")}</b>
+        ${best.logical_service ? `<span class="mono small">${escH(best.logical_service)}</span>` : ""}
         ${srcBadge}
       </div>
       <div class="small" style="margin-top:8px">Reason: ${escH(best.reason||"—")}</div>

@@ -29,6 +29,12 @@ try:
 except ImportError:
     _FILTER_AVAILABLE = False
 
+try:
+    from core.service_catalog import get_display_name
+except ImportError:
+    def get_display_name(code):
+        return code
+
 
 @bp.route("/api/events")
 def api_events():
@@ -190,6 +196,9 @@ def api_event_detail(event_id):
                 (event_id,),
             )
             playables = [row_to_dict(r) for r in cur.fetchall()]
+            for p in playables:
+                code = p.get("logical_service") or p.get("provider") or ""
+                p["display_name"] = get_display_name(code) if code else ""
 
             # Providers list
             if playables and "logical_service" in playables[0]:
@@ -324,9 +333,11 @@ def _compute_best(conn, event_id, playables) -> dict | None:
         if top:
             actual = deeplink or top.get("deeplink_play") or top.get("deeplink_open")
             src = "ESPN Watch Graph" if (deeplink and top.get("espn_graph_id")) else "Apple TV"
+            code = top.get("logical_service") or top.get("provider") or ""
             return {
                 "provider": top.get("provider"),
                 "logical_service": top.get("logical_service"),
+                "display_name": get_display_name(code) if code else "",
                 "deeplink": actual,
                 "http_deeplink_url": top.get("http_deeplink_url"),
                 "espn_graph_id": top.get("espn_graph_id"),
