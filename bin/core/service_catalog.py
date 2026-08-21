@@ -204,6 +204,9 @@ INTERNAL_PRIORITY: dict[str, int] = {
     "aiv_fanduel": 22,
     "aiv_bein": 22,
     "aiv_mlb_network": 22,
+    "aiv_paramount_plus": 22,
+    "aiv_willow": 22,
+    "aiv_squash": 22,
     "nflctv": 22,
     "watchtru": 23,
     "ncaa_march_madness": 24,
@@ -213,6 +216,7 @@ INTERNAL_PRIORITY: dict[str, int] = {
     # League passes
     "nba": 26,
     "aiv_nba_league_pass": 26,
+    "aiv_wnba_league_pass": 26,
     "aiv_mlbtv": 26,
     "gametime": 26,
     "mlb": 26,

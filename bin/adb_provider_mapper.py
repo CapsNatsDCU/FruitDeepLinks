@@ -38,9 +38,17 @@ ADB_PROVIDER_MAP = {
     'aiv_wnba_league_pass': 'aiv',
     'aiv_squash': 'aiv',
     'aiv_free': 'aiv',
+    'aiv_bein': 'aiv',
+    'aiv_mlb_network': 'aiv',
+    'aiv_mlbtv': 'aiv',
     'aiv_aggregator': 'aiv',
     'aiv': 'aiv',  # Keep original mapping
-    
+
+    # aiv_unavailable_in_location is deliberately NOT mapped here: it's the
+    # confirmed-unwatchable bucket (core/service_catalog.py), and identity-
+    # mapping it means it's excluded from the 'aiv' ADB lane rather than
+    # showing up as selectable regionally-blocked content.
+
     # Everything else maps to itself
     # (We only need to specify exceptions to the identity mapping)
 }
