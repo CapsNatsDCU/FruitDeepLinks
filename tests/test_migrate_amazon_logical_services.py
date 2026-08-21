@@ -236,7 +236,8 @@ class DownstreamFilteringTest(unittest.TestCase):
             CREATE TABLE playables (
                 playable_id TEXT, event_id TEXT, provider TEXT, logical_service TEXT,
                 deeplink_play TEXT, deeplink_open TEXT, playable_url TEXT, title TEXT,
-                content_id TEXT, priority INTEGER, service_name TEXT, espn_graph_id TEXT
+                content_id TEXT, priority INTEGER, service_name TEXT, espn_graph_id TEXT,
+                locale TEXT
             )
             """
         )

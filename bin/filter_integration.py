@@ -281,7 +281,7 @@ def get_filtered_playables(
             """
             SELECT playable_id, provider, deeplink_play, deeplink_open,
                    playable_url, title, content_id, priority, service_name, espn_graph_id,
-                   logical_service
+                   logical_service, locale
             FROM playables
             WHERE event_id = ?
             ORDER BY priority ASC, playable_id ASC
@@ -303,16 +303,26 @@ def get_filtered_playables(
                 "service_name": row[8],
                 "espn_graph_id": row[9],
                 "logical_service": row[10],  # Read from database
+                "locale": row[11],
                 "event_id": event_id,
             }
 
-            # Language filtering for ESPN feeds
-            # ESPN uses service_name like "ESPN", "ESPN2", "ESPN Deportes"
-            # Filter based on language preference
+            # Language filtering for ESPN feeds.
+            # Prefer the locale column (populated by migrate_add_locale.py from
+            # title as well as service_name -- e.g. "En Español" in the title)
+            # since ESPN Unlimited playables often share one generic service_name
+            # ("ESPN Unlimited") across English/Spanish entitlements with nothing
+            # else to distinguish them. Fall back to the service_name/title text
+            # heuristic for playables that predate the locale migration.
             if language_preference != "both":
-                service_name = (playable.get("service_name") or "").lower()
-                is_spanish = "deportes" in service_name or "español" in service_name
-                
+                locale = (playable.get("locale") or "").lower()
+                if locale:
+                    is_spanish = locale.startswith("es")
+                else:
+                    service_name = (playable.get("service_name") or "").lower()
+                    title = (playable.get("title") or "").lower()
+                    is_spanish = "deportes" in service_name or "español" in service_name or "español" in title
+
                 if language_preference == "en" and is_spanish:
                     continue  # Skip Spanish feeds if user wants English only
                 elif language_preference == "es" and not is_spanish:
@@ -387,17 +397,25 @@ def get_filtered_playables(
         def espn_channel_priority(playable):
             """Return priority score for ESPN channels (lower = better)"""
             service_name = (playable.get("service_name") or "").lower()
+            title = (playable.get("title") or "").lower()
+            locale = (playable.get("locale") or "").lower()
+            is_spanish = (
+                locale.startswith("es") if locale
+                else ("deportes" in service_name or "español" in service_name or "español" in title)
+            )
 
             # Main ESPN channel gets highest priority
             if service_name == "espn":
                 return 0
-            # ESPN Deportes (Spanish) - second priority for Spanish speakers
-            elif "deportes" in service_name or "español" in service_name:
-                return 1
             # Alternate English feeds
             elif service_name in ("espn2", "espnu", "espnews", "sec network"):
+                return 1
+            # Unknown/other English feeds (e.g. generic "ESPN Unlimited" labels)
+            elif not is_spanish:
                 return 2
-            # Unknown/other
+            # Spanish feeds (locale-detected) rank last -- only reached in
+            # language_preference="both" mode, since "en" mode filters these
+            # out entirely above.
             else:
                 return 3
 
