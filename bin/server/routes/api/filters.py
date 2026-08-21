@@ -96,18 +96,31 @@ def api_selection_examples():
             conn.row_factory = _sq.Row
             cur = conn.cursor()
 
-            cur.execute("""
+            enabled_filter_sql = ""
+            params = []
+            if enabled_expanded:
+                placeholders = ",".join(["?"] * len(enabled_expanded))
+                enabled_filter_sql = f"""
+                  AND e.id IN (
+                      SELECT event_id FROM playables
+                      WHERE logical_service IN ({placeholders})
+                  )
+                """
+                params.extend(enabled_expanded)
+
+            cur.execute(f"""
                 SELECT e.id, e.title, e.channel_name, e.start_utc,
                        COUNT(DISTINCT p.logical_service) AS service_count
                 FROM events e
                 JOIN playables p ON e.id = p.event_id
                 WHERE datetime(e.end_utc) > datetime('now')
                   AND p.logical_service IS NOT NULL
+                  {enabled_filter_sql}
                 GROUP BY e.id
                 HAVING service_count > 1
-                ORDER BY service_count DESC, e.start_utc ASC
-                LIMIT 10
-            """)
+                ORDER BY RANDOM()
+                LIMIT 6
+            """, params)
             multi_rows = cur.fetchall()
 
             for row in multi_rows:
@@ -123,7 +136,11 @@ def api_selection_examples():
                 """, (event_id,))
                 playable_rows = cur.fetchall()
 
-                available_services = [r["logical_service"] for r in playable_rows]
+                # A single logical service (e.g. espn_plus) can have several
+                # underlying playables with distinct deeplinks — collapse to
+                # one entry per logical service so examples don't show the
+                # same service twice.
+                available_services = list(dict.fromkeys(r["logical_service"] for r in playable_rows))
 
                 # Determine winner under current prefs
                 winner = None
@@ -136,15 +153,15 @@ def api_selection_examples():
                     candidates = [s for s in candidates if s != "aiv" and not s.startswith("aiv_")]
 
                 if candidates:
-                    from core.service_catalog import get_internal_priority, get_display_name
+                    from core.service_catalog import get_default_user_priority, get_display_name
                     def _score(svc):
                         user_p = priority_map.get(svc)
-                        if user_p is not None:
-                            return -int(user_p)   # higher user priority = lower score = wins
-                        base = get_internal_priority(svc)
+                        if user_p is None:
+                            user_p = get_default_user_priority(svc)
+                        score = -int(user_p)   # higher priority = lower score = wins
                         if amazon_penalty and (svc == "aiv" or svc.startswith("aiv_")):
-                            base += 10
-                        return base
+                            score += 10
+                        return score
                     winner = min(candidates, key=_score)
 
                 from core.service_catalog import get_display_name

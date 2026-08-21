@@ -29,7 +29,10 @@
 .stat-box { background: var(--bg-inset); padding: 10px 16px; border-radius: var(--radius); border: 1px solid var(--border); }
 .stat-box .stat-label { font-size: 11px; color: var(--text-muted); margin-bottom: 2px; }
 .stat-box .stat-value { font-size: 22px; font-weight: 700; color: #60a5fa; }
-.priority-list { display: flex; flex-direction: column; gap: 6px; max-width: 580px; }
+.priority-examples-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; margin-bottom: 16px; }
+.priority-examples-row .card { margin-bottom: 0; }
+@media (max-width: 960px) { .priority-examples-row { grid-template-columns: 1fr; } }
+.priority-list { display: flex; flex-direction: column; gap: 6px; }
 .priority-item {
   background: var(--bg-inset); border: 2px solid var(--border); border-radius: var(--radius);
   padding: 10px 14px; display: flex; align-items: center; gap: 10px;
@@ -106,7 +109,8 @@
   </div>
 </div>
 
-<div class="card" style="margin-bottom:16px">
+<div class="priority-examples-row">
+<div class="card">
   <h2>Service Priority Order</h2>
   <p class="priority-help"><strong>When multiple services carry the same event, which wins?</strong><br>Drag to reorder — top = highest priority.</p>
   <div id="priority-loading" class="status-muted" style="padding:16px">Loading priorities...</div>
@@ -122,11 +126,12 @@
   </div>
 </div>
 
-<div class="card" style="margin-bottom:16px">
+<div class="card">
   <h2>Selection Examples</h2>
   <p class="section-desc">Multi-service events showing which service will be selected under your current settings. Updates as you change priorities.</p>
   <div id="examples-loading" class="status-muted" style="padding:16px;text-align:center">Loading examples...</div>
   <div id="examples-grid" class="examples-grid" style="display:none"></div>
+</div>
 </div>
 
 <div class="card" style="margin-bottom:16px">

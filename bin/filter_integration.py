@@ -46,79 +46,21 @@ except ImportError:
         return 25
 
 
+try:
+    from core.service_catalog import DEFAULT_USER_PRIORITY
+except ImportError:
+    DEFAULT_USER_PRIORITY = {}
+
+
 def get_default_service_priorities() -> Dict[str, int]:
     """
-    Get smart default priorities for streaming services.
-    
-    Priority Tiers (1-100 scale):
-    - 90-100: Premium direct services (ESPN+, Peacock, Paramount+, etc.)
-    - 70-89: Cable/network services (TNT, TBS, NBC, Fox, etc.)
-    - 50-69: League-specific services (NBA League Pass, MLB.TV, etc.)
-    - 30-49: Free/broadcast services (ABC, NBC broadcast, etc.)
-    - 10-29: Aggregators with redirects (Amazon Prime Video)
-    - 1-9: Fallback/generic web services
-    
-    Returns:
-        Dict mapping service codes to priority values (higher = preferred)
+    Get smart default priorities for streaming services (higher = preferred).
+
+    Sourced from core/service_catalog.py — the single source of truth for
+    service priorities (see CLAUDE.md) — so exports/lanes and the Filters UI
+    agree on which service wins by default.
     """
-    return {
-        # Tier 1: Premium Sports Services (90-100)
-        "sportsonespn": 100,      # ESPN+ - comprehensive sports
-        "peacock": 98,             # Peacock - NBC Sports, Premier League
-        "peacock_web": 98,         # Peacock web version
-        "pplus": 96,               # Paramount+ - CBS Sports, Champions League
-        "paramount_web": 96,       # Paramount+ web version
-        "cbs_web": 95,             # CBS Sports
-        "max": 94,                 # Max (HBO Max) - Sports coverage
-        "apple_mls": 92,           # Apple MLS Season Pass
-        "apple_mlb": 92,           # Apple MLB Friday Night Baseball
-        "apple_f1": 92,            # Formula 1 (Apple TV)
-        
-        # Tier 2: Cable/Network Sports (70-89)
-        "watchtnt": 88,            # TNT - NBA, NHL, MLB
-        "watchtru": 87,            # TruTV - March Madness
-        "watchtbs": 86,            # TBS - MLB, NBA
-        "fox_web": 85,             # Fox Sports
-        "fs1": 84,                 # Fox Sports 1
-        "fs2": 83,                 # Fox Sports 2
-        "nbcsports": 82,           # NBC Sports
-        "usanetwork": 81,          # USA Network
-        "golf": 80,                # Golf Channel
-        "espn": 79,                # ESPN cable
-        "espn2": 78,               # ESPN2
-        "espnu": 77,               # ESPNU
-        "btn": 76,                 # Big Ten Network
-        "accnetwork": 75,          # ACC Network
-        "secnetwork": 74,          # SEC Network
-        
-        # Tier 3: League-Specific Services (50-69)
-        "nba": 68,                 # NBA League Pass
-        "nhl": 67,                 # NHL.TV
-        "mlb": 66,                 # MLB.TV
-        "f1tv": 65,                # F1 TV Pro
-        "dazn": 64,                # DAZN
-        "kayo_web": 63,            # Kayo Sports (Australia)
-        "bein": 63,                # beIN Sports (international/regional)
-        "fanatiz_web": 62,         # Fanatiz Soccer (Latin America)
-        "victory": 62,             # Victory+ (WHL, LOVB)
-        "gotham": 62,              # Gotham Sports (MSG/YES Network)
-        "fubo": 61,                # FuboTV
-        "sling": 60,               # Sling TV
-        
-        # Tier 4: Free/Broadcast (30-49)
-        "abc": 48,                 # ABC (free broadcast)
-        "nbc": 47,                 # NBC (free broadcast)
-        "cbs": 46,                 # CBS (free broadcast)
-        "fox": 45,                 # Fox (free broadcast)
-        
-        # Tier 5: Aggregators (10-29)
-        "aiv": 15,                 # Amazon Prime Video - often redirects to other services
-        
-        # Tier 6: Generic/Fallback (1-9)
-        "https": 5,                # Generic web link
-        "http": 4,                 # Generic web link
-        "web": 3,                  # Generic web service
-    }
+    return dict(DEFAULT_USER_PRIORITY)
 
 
 def load_user_preferences(conn: sqlite3.Connection) -> Dict[str, Any]:
