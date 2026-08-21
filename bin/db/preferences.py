@@ -15,6 +15,9 @@ from typing import Any, Dict
 # Aliases: legacy service codes that get normalised on save
 _SAVE_ALIASES = {
     "aiv_fox": "aiv_fox_one",
+    # amazon2.py had no TEXT_INFER pattern for free/ad-supported content before
+    # the aiv_free fix, so a stale saved filter selection can still say this.
+    "aiv_watch_for_free": "aiv_free",
 }
 
 _DEFAULTS: Dict[str, Any] = {

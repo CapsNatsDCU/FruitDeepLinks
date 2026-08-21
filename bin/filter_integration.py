@@ -344,6 +344,14 @@ def get_filtered_playables(
             # e.g. old playables may have 'aiv_fox' while the filter UI saves 'aiv_fox_one'.
             _LS_ALIASES: Dict[str, str] = {
                 "aiv_fox": "aiv_fox_one",
+                # Pre-fix amazon2.py had no TEXT_INFER pattern for free/ad-supported
+                # content, so it fell through to a raw-entitlement-text slug that
+                # happened to read "aiv_watch_for_free" for the "Watch for free"
+                # wording. amazon_channels rows scraped before the fix (and not yet
+                # rescraped -- up to 48h stale by default) still carry that old
+                # channel_id verbatim; alias it to the stable aiv_free code so
+                # already-cached data doesn't need a rescrape to match user filters.
+                "aiv_watch_for_free": "aiv_free",
             }
             raw_ls = playable["logical_service"]
             canonical_ls = _LS_ALIASES.get(raw_ls, raw_ls)
