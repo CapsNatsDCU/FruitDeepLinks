@@ -227,6 +227,34 @@ class Amazon2HelpersTest(unittest.TestCase):
         self.assertEqual(channel_id, "aiv_regional_sports_add_on")
         self.assertIn("fallback_to_entitlement", reason)
 
+    def test_normalize_maps_free_entitlement_to_stable_code(self):
+        # Regression: before this pattern existed, ad-supported free content fell
+        # through to the raw-entitlement-text slug fallback, producing unstable,
+        # uncataloged codes like "aiv_watch_for_free" (seen live) that have no
+        # display name / default priority in core/service_catalog.py and can drift
+        # if Amazon's wording changes. It must resolve to the stable aiv_free code.
+        for entitlement in ("Watch for free", "Watch it for FREE right now", "Free with ads"):
+            with self.subTest(entitlement=entitlement):
+                name, channel_id, reason = amazon2._normalize("", entitlement=entitlement)
+                self.assertEqual(channel_id, "aiv_free")
+                self.assertIn("inferred_from=entitlement", reason)
+
+    def test_normalize_free_pattern_does_not_shadow_named_services(self):
+        # A "Free trial of X" entitlement must still resolve to X, not aiv_free --
+        # the named-service patterns are checked first in TEXT_INFER, and the
+        # generic free/ads pattern only applies when nothing more specific matched.
+        name, channel_id, reason = amazon2._normalize(
+            "", entitlement="Free trial of FOX One"
+        )
+        self.assertEqual(channel_id, "aiv_fox_one")
+
+    def test_normalize_free_pattern_requires_word_boundary(self):
+        # "freedom" or similar should not spuriously match "for free"/"free with ads".
+        name, channel_id, reason = amazon2._normalize(
+            "", entitlement="Freedom Cup: subscribe to watch"
+        )
+        self.assertNotEqual(channel_id, "aiv_free")
+
     def test_normalize_matches_paramount_plus_despite_trailing_symbol(self):
         # Regression: \bParamount\+\b never matched because '+' isn't a word character,
         # so \b can't form a boundary right after it (confirmed live 2026-08-13).

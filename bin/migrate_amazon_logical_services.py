@@ -301,7 +301,8 @@ def migrate(db_path: str) -> int:
 
     for r in plays:
         rowid = r["rowid"]
-        current_ls = (r["logical_service"] or "").strip() or "aiv_aggregator"
+        raw_ls = (r["logical_service"] or "").strip()
+        current_ls = raw_ls or "aiv_aggregator"
 
         broadcast_gti, content_gti = extract_gtis(r["deeplink_play"], r["deeplink_open"])
 
@@ -310,8 +311,6 @@ def migrate(db_path: str) -> int:
             continue
 
         content_is_ambiguous = bool(content_gti) and content_gti in ambiguous_content_gtis
-        if content_is_ambiguous and (not broadcast_gti or broadcast_gti not in by_gti):
-            ambiguous_blocked += 1
 
         ac = resolve_channel(by_gti, broadcast_gti, content_gti, content_is_ambiguous)
 
@@ -325,6 +324,26 @@ def migrate(db_path: str) -> int:
                 unmapped += 1
             else:
                 no_match += 1
+
+            # If the ONLY reason we couldn't resolve is that content-GTI fallback
+            # was blocked for ambiguity -- and that content GTI actually has
+            # matchable channel data -- leaving logical_service blank is not
+            # safe on its own. The live get_amazon_service_for_playable()
+            # fallback in logical_service_mapper.py (used by exports whenever
+            # logical_service is falsy) has no ambiguity awareness and would
+            # re-derive that same sibling classification on the next export,
+            # silently undoing this guard. Persist aiv_aggregator explicitly so
+            # that live recompute is short-circuited (it only fires when the
+            # stored value is falsy). Never overwrite an existing classification.
+            content_has_data = (
+                bool(content_gti) and content_gti in by_gti and _has_channel_data(by_gti[content_gti])
+            )
+            if content_is_ambiguous and content_has_data and not raw_ls:
+                conn.execute(
+                    "UPDATE playables SET logical_service='aiv_aggregator' WHERE rowid=?",
+                    (rowid,),
+                )
+                ambiguous_blocked += 1
             continue
 
         # Track when we had to fall back to content GTI
@@ -355,7 +374,7 @@ def migrate(db_path: str) -> int:
     print(f"Broadcast GTI not in amazon_channels: {no_match}")
     print(f"Unmapped channel metadata: {unmapped}")
     print(f"Content GTI fallbacks used: {content_gti_fallbacks}")
-    print(f"Ambiguous multi-feed fallbacks blocked (left unclassified): {ambiguous_blocked}")
+    print(f"Ambiguous multi-feed fallbacks blocked (set to aiv_aggregator): {ambiguous_blocked}")
     print()
 
     # Breakdown after migration
