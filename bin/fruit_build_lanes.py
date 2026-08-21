@@ -276,6 +276,8 @@ def build_lanes_with_placeholders(
     # Load enabled services (if filter integration is available)
     enabled_services: List[str] = []
     language_preference: str = 'en'
+    priority_map: Dict[str, int] = {}
+    amazon_penalty: bool = True
     if FILTERING_AVAILABLE:
         try:
             prefs = load_user_preferences(conn)
@@ -283,9 +285,17 @@ def build_lanes_with_placeholders(
             if isinstance(raw_enabled, list):
                 enabled_services = raw_enabled
             language_preference = prefs.get("language_preference", "en")
+            # service_priorities/amazon_penalty were previously not threaded through
+            # here, so the Filters page's drag-to-reorder priority list had no
+            # effect on multisource lanes -- only on the direct export, which
+            # already passes these (see fruit_export_hybrid.py).
+            priority_map = prefs.get("service_priorities", {})
+            amazon_penalty = prefs.get("amazon_penalty", True)
         except Exception:
             enabled_services = []
             language_preference = 'en'
+            priority_map = {}
+            amazon_penalty = True
 
     # Precompute best playables per event (when filter integration is available)
     playable_cache: Dict[str, Optional[Dict[str, Any]]] = {}
@@ -296,6 +306,8 @@ def build_lanes_with_placeholders(
                 try:
                     best = get_best_playable_for_event(
                         conn, ev.event_id, enabled_services,
+                        priority_map=priority_map,
+                        amazon_penalty=amazon_penalty,
                         language_preference=language_preference
                     )
                 except Exception:

@@ -315,16 +315,24 @@ def _compute_best(conn, event_id, playables) -> dict | None:
         prefs = load_user_preferences(conn)
         enabled = expand_amazon(prefs.get("enabled_services", []))
         amazon_master = prefs.get("amazon_master_enabled", True)
+        priority_map = prefs.get("service_priorities", {})
+        amazon_penalty = prefs.get("amazon_penalty", True)
 
         deeplink = None
         try:
-            deeplink = get_best_deeplink_for_event(conn, event_id, enabled)
+            deeplink = get_best_deeplink_for_event(
+                conn, event_id, enabled, priority_map=priority_map, amazon_penalty=amazon_penalty
+            )
         except Exception:
             pass
 
         top = None
         try:
-            filtered = get_filtered_playables(conn, event_id, enabled, amazon_master_enabled=amazon_master)
+            filtered = get_filtered_playables(
+                conn, event_id, enabled,
+                priority_map=priority_map, amazon_penalty=amazon_penalty,
+                amazon_master_enabled=amazon_master,
+            )
             if filtered:
                 top = filtered[0]
         except Exception:

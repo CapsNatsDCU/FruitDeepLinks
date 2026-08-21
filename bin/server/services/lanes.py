@@ -447,6 +447,8 @@ def get_provider_playable_link(conn: sqlite3.Connection, event_id: str, provider
                     conn,
                     event_id,
                     enabled,
+                    priority_map=prefs.get("service_priorities", {}),
+                    amazon_penalty=prefs.get("amazon_penalty", True),
                     amazon_master_enabled=prefs.get("amazon_master_enabled", True),
                 )
                 mapped_services = set(mapped)
