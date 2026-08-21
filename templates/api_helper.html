@@ -5,24 +5,26 @@
 
 {% block extra_style %}
 .card h2 { color: #f97316; }
+:root[data-theme="light"] .card h2 { color: #c2410d; }
 .section-header { color:var(--warning); font-size:18px; margin:28px 0 14px; padding-bottom:8px; border-bottom:2px solid #1f2937; }
 .endpoint-line { margin:6px 0; padding-left:8px; }
 .description { color:var(--text-dim); font-size:13px; line-height:1.5; margin-bottom:10px; }
-code { font-family:var(--mono); font-size:12px; background:var(--bg-inset); padding:2px 5px; border-radius:4px; border:1px solid var(--border-dim); }
+code { font-family:var(--mono); font-size:12px; background:var(--bg-inset); color:var(--text-dim); padding:2px 5px; border-radius:4px; border:1px solid var(--border-dim); }
 .tag { display:inline-block; font-size:11px; padding:3px 7px; border-radius:4px; margin-right:6px; margin-bottom:4px; font-weight:600; border:1px solid; }
 .tag-get    { background:#14532d; border-color:#22c55e; color:#86efac; }
 .tag-post   { background:#1e3a8a; border-color:#3b82f6; color:#93c5fd; }
 .tag-danger { background:#7f1d1d; border-color:#dc2626; color:#fca5a5; }
-.params { background:#0a0e1a; padding:10px 12px; border-radius:6px; margin:8px 0; font-size:13px; border-left:3px solid var(--border); }
+.params { background:var(--bg-inset); padding:10px 12px; border-radius:6px; margin:8px 0; font-size:13px; border-left:3px solid var(--border); }
 .param-name { color:var(--warning); font-weight:600; }
-.note { background:#1e1b4b; border-left:3px solid #6366f1; padding:10px 14px; margin:12px 0; border-radius:4px; font-size:13px; }
+.note { background:#1e1b4b; border-left:3px solid #6366f1; padding:10px 14px; margin:12px 0; border-radius:4px; font-size:13px; color:#c7d2fe; }
 .note-title { color:#a5b4fc; font-weight:600; margin-bottom:4px; }
 .toc { background:var(--bg-inset); border:1px solid var(--border-dim); border-radius:var(--radius); padding:16px 20px; margin-bottom:20px; }
-.toc h3 { color:#60a5fa; font-size:15px; margin-bottom:10px; }
+.toc h3 { color:var(--heading); font-size:15px; margin-bottom:10px; }
 .toc a { display:block; padding:3px 0; color:var(--text-muted); font-size:13px; }
-.toc a:hover { color:#38bdf8; }
+.toc a:hover { color:var(--accent); }
 .danger-card { border:2px solid #7f1d1d !important; background:#0f0a0a; }
 .danger-card h2 { color:#ef4444; }
+.danger-card .description { color:#cbd5e1; }
 .tip-box { margin-top:36px; padding:18px; background:var(--bg-inset); border-radius:var(--radius); border:1px solid var(--border-dim); font-size:13px; color:var(--text-muted); }
 {% endblock %}
 
@@ -559,7 +561,7 @@ curl -X POST "$BASE/api/wipe-event-data" -H "Content-Type: application/json"
 </div>
 
 <div class="tip-box">
-  <strong style="color:#60a5fa">Quick Start Tip:</strong>
+  <strong style="color:var(--heading)">Quick Start Tip:</strong>
   Set <code>BASE=http://YOUR_SERVER:6655</code> as an environment variable to use these curl examples directly.
   For ADBTuner integration, use the per-provider M3U files (<code>/out/adb_lanes_&lt;provider&gt;.m3u</code>)
   and the deeplink endpoint will handle "what's on now" automatically.

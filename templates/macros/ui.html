@@ -20,7 +20,7 @@
 
 {% macro section_header(title, subtitle='') %}
 <div style="margin-bottom:16px">
-  <h2 style="color:#60a5fa;font-size:18px">{{ title }}</h2>
-  {% if subtitle %}<p style="color:#94a3b8;font-size:13px;margin-top:4px">{{ subtitle }}</p>{% endif %}
+  <h2 style="color:var(--heading);font-size:18px">{{ title }}</h2>
+  {% if subtitle %}<p style="color:var(--text-muted);font-size:13px;margin-top:4px">{{ subtitle }}</p>{% endif %}
 </div>
 {% endmacro %}

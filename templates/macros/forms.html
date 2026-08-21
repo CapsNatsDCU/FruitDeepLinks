@@ -1,6 +1,6 @@
 {% macro labeled_input(label, name, value='', type='text', hint='', placeholder='', required=false) %}
 <div style="margin-bottom:14px">
-  <label for="{{ name }}">{{ label }}{% if required %} <span style="color:#f87171">*</span>{% endif %}</label>
+  <label for="{{ name }}">{{ label }}{% if required %} <span style="color:var(--danger)">*</span>{% endif %}</label>
   <input type="{{ type }}" id="{{ name }}" name="{{ name }}" value="{{ value }}"
     {% if placeholder %}placeholder="{{ placeholder }}"{% endif %}
     {% if required %}required{% endif %}
