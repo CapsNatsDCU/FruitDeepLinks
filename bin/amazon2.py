@@ -113,6 +113,12 @@ TEXT_INFER: List[Tuple[re.Pattern, Tuple[str, str]]] = [
     (re.compile(r"\bSquashTV\b", re.I), ("SquashTV", "aiv_squash")),
     (re.compile(r"\bTennis Channel\b", re.I), ("Tennis Channel", "aiv_tennis_channel")),
     (re.compile(r"\bPrime\b", re.I), ("Prime Exclusive", "aiv_prime")),
+    # Ad-supported free content (e.g. "Watch for free", "Free with ads"). Maps to the
+    # stable aiv_free code (defined in core/service_catalog.py) instead of falling through
+    # to _normalize()'s raw-entitlement-text slug, which produced unstable, uncataloged
+    # codes like "aiv_watch_for_free" that drift whenever Amazon's wording changes and
+    # have no display name / default priority anywhere.
+    (re.compile(r"\b(?:for free|free with ads)\b", re.I), ("Amazon - Free with Ads", "aiv_free")),
 ]
 
 REALISTIC_USER_AGENT = (

@@ -84,6 +84,7 @@ def resolve_channel(
     by_gti: Dict[str, sqlite3.Row],
     broadcast_gti: Optional[str],
     content_gti: Optional[str],
+    content_is_ambiguous: bool = False,
 ) -> Optional[sqlite3.Row]:
     """
     Resolve the best amazon_channels row for a playable.
@@ -94,12 +95,21 @@ def resolve_channel(
       3. Stale broadcast GTI with channel data (last resort)
       4. Stale content GTI with channel data (last resort)
 
-    Returns None if no usable channel data found in either GTI.
+    content_is_ambiguous: True when this event's content GTI is shared by more than
+    one distinct broadcast GTI, i.e. the event has multiple feeds that may each need
+    a different entitlement (same class of issue as ESPN's shared program_id). In
+    that case the content GTI's classification could belong to any of the sibling
+    feeds, so it is not trustworthy for this one -- only this playable's own
+    broadcast GTI can classify it; skip the content-GTI fallback entirely.
+
+    Returns None if no usable channel data found.
     """
     candidates: List[Tuple[int, int, sqlite3.Row]] = []  # (is_stale, is_content, row)
 
     for gti, is_content in ((broadcast_gti, 0), (content_gti, 1)):
         if not gti:
+            continue
+        if is_content and content_is_ambiguous:
             continue
         row = by_gti.get(gti)
         if row and _has_channel_data(row):
@@ -264,12 +274,27 @@ def migrate(db_path: str) -> int:
     plays = cur.fetchall()
     print(f"Found {len(plays)} Amazon playables")
 
+    # Multi-feed events: group playables by content GTI to find which content GTIs
+    # are shared by more than one distinct broadcast GTI. For those, a single
+    # broadcast page's classification (e.g. Willow) does not necessarily apply to
+    # a sibling feed of the same event (e.g. one that's actually Prime/free) -- see
+    # resolve_channel() docstring.
+    content_to_broadcasts: Dict[str, set] = {}
+    for r in plays:
+        bgti, cgti = extract_gtis(r["deeplink_play"], r["deeplink_open"])
+        if cgti and bgti:
+            content_to_broadcasts.setdefault(cgti, set()).add(bgti)
+    ambiguous_content_gtis = {c for c, bs in content_to_broadcasts.items() if len(bs) > 1}
+    if ambiguous_content_gtis:
+        print(f"Multi-feed events (content-GTI fallback disabled): {len(ambiguous_content_gtis)}")
+
     updated = 0
     already = 0
     no_broadcast = 0
     no_match = 0
     unmapped = 0
     content_gti_fallbacks = 0
+    ambiguous_blocked = 0
 
     # Update in a transaction
     conn.execute("BEGIN")
@@ -284,7 +309,11 @@ def migrate(db_path: str) -> int:
             no_broadcast += 1
             continue
 
-        ac = resolve_channel(by_gti, broadcast_gti, content_gti)
+        content_is_ambiguous = bool(content_gti) and content_gti in ambiguous_content_gtis
+        if content_is_ambiguous and (not broadcast_gti or broadcast_gti not in by_gti):
+            ambiguous_blocked += 1
+
+        ac = resolve_channel(by_gti, broadcast_gti, content_gti, content_is_ambiguous)
 
         if ac is None:
             # Check if we at least found the GTI but it had no channel data
@@ -326,6 +355,7 @@ def migrate(db_path: str) -> int:
     print(f"Broadcast GTI not in amazon_channels: {no_match}")
     print(f"Unmapped channel metadata: {unmapped}")
     print(f"Content GTI fallbacks used: {content_gti_fallbacks}")
+    print(f"Ambiguous multi-feed fallbacks blocked (left unclassified): {ambiguous_blocked}")
     print()
 
     # Breakdown after migration
