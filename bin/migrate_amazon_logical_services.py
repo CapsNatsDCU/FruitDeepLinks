@@ -280,8 +280,10 @@ def migrate(db_path: str) -> int:
     # a sibling feed of the same event (e.g. one that's actually Prime/free) -- see
     # resolve_channel() docstring.
     content_to_broadcasts: Dict[str, set] = {}
+    gtis_by_rowid: Dict[int, Tuple[Optional[str], Optional[str]]] = {}
     for r in plays:
         bgti, cgti = extract_gtis(r["deeplink_play"], r["deeplink_open"])
+        gtis_by_rowid[r["rowid"]] = (bgti, cgti)
         if cgti and bgti:
             content_to_broadcasts.setdefault(cgti, set()).add(bgti)
     ambiguous_content_gtis = {c for c, bs in content_to_broadcasts.items() if len(bs) > 1}
@@ -304,7 +306,7 @@ def migrate(db_path: str) -> int:
         raw_ls = (r["logical_service"] or "").strip()
         current_ls = raw_ls or "aiv_aggregator"
 
-        broadcast_gti, content_gti = extract_gtis(r["deeplink_play"], r["deeplink_open"])
+        broadcast_gti, content_gti = gtis_by_rowid[rowid]
 
         if not broadcast_gti and not content_gti:
             no_broadcast += 1

@@ -335,6 +335,37 @@ def get_default_user_priority(service_code: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Legacy service code aliases
+#
+# Old logical_service/enabled_services values that must still map to their
+# current code so already-scraped playables and previously-saved user
+# preferences keep matching filters after a rename. Single source of truth --
+# every place that resolves a stored service code against a current one
+# (playable classification, saved-preference normalization on load/save,
+# Amazon-preference expansion) must go through get_canonical_service_code()
+# rather than keeping its own copy, or an alias added in one place and missed
+# in another silently breaks filtering for anyone with the old code still
+# on disk (this happened with aiv_watch_for_free -> aiv_free).
+# ---------------------------------------------------------------------------
+LEGACY_SERVICE_ALIASES: dict[str, str] = {
+    "aiv_fox": "aiv_fox_one",
+    # Pre-fix amazon2.py had no TEXT_INFER pattern for free/ad-supported
+    # content, so it fell through to a raw-entitlement-text slug that
+    # happened to read "aiv_watch_for_free" for the "Watch for free"
+    # wording. amazon_channels rows scraped before the fix (and not yet
+    # rescraped -- up to 48h stale by default) still carry that old
+    # channel_id verbatim; alias it to the stable aiv_free code so
+    # already-cached data doesn't need a rescrape to match user filters.
+    "aiv_watch_for_free": "aiv_free",
+}
+
+
+def get_canonical_service_code(service_code: str) -> str:
+    """Resolve a possibly-legacy service code to its current canonical form."""
+    return LEGACY_SERVICE_ALIASES.get(service_code, service_code)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

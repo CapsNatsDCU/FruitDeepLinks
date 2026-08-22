@@ -168,14 +168,27 @@ def get_amazon_service_for_playable(
     deeplink_open: Optional[str]
 ) -> Optional[str]:
     """Get Amazon service from amazon_channels table
-    
+
     Args:
         conn: Database connection
         deeplink_play: Play deeplink URL
         deeplink_open: Open deeplink URL
-    
+
     Returns:
         Logical service code (e.g., 'aiv_nba_league_pass') or None if not found
+
+    NOT ambiguity-aware: this does a single-GTI lookup with no notion that a
+    content GTI can be shared by multiple distinct broadcast feeds of the
+    same event (see migrate_amazon_logical_services.py's resolve_channel()
+    docstring). It is only safe to call this as a live fallback for playables
+    whose stored logical_service is still falsy/unset -- get_logical_service_
+    for_playable() below relies on that. migrate_amazon_logical_services.py
+    deliberately persists the sentinel 'aiv_aggregator' (rather than leaving
+    logical_service blank) on ambiguous multi-feed rows specifically to keep
+    them out of this fallback path. Do not add logic here that re-derives a
+    service for rows that already have a non-empty logical_service -- that
+    would silently reintroduce the sibling-misclassification bug the
+    migration exists to prevent.
     """
     # Extract GTI from deeplink
     gti = extract_gti_from_deeplink(deeplink_play or deeplink_open or '')

@@ -151,15 +151,22 @@ def populate_http_deeplinks(conn: sqlite3.Connection, log: logging.Logger) -> No
         " OR (LOWER(provider) IN ('aiv','amazon prime video','prime video')"
         f"      AND INSTR({primary_col}, 'broadcast=') > 0)"
     )
+    # The Amazon/ESPN "refresh" clauses can't tell in SQL whether a row was
+    # already upgraded on a prior run (deeplink_play keeps 'broadcast=' /
+    # espn_graph_id forever, so they'd match every run regardless). Rank
+    # genuinely-blank rows first so they always win the LIMIT, and let the
+    # per-row no-op check below skip rows that are already correct instead of
+    # rewriting them every pipeline run.
     query = f"""
         SELECT event_id, playable_id, provider, {espn_select},
-               {', '.join(src_cols)}
+               http_deeplink_url, {', '.join(src_cols)}
         FROM playables
         WHERE ({primary_col} IS NOT NULL AND {primary_col} != '')
           AND (
                 (http_deeplink_url IS NULL OR http_deeplink_url = '')
                 {espn_refresh_clause}{amazon_refresh_clause}
               )
+        ORDER BY CASE WHEN (http_deeplink_url IS NULL OR http_deeplink_url = '') THEN 0 ELSE 1 END
         LIMIT 20000
     """
     cur.execute(query)
@@ -171,9 +178,10 @@ def populate_http_deeplinks(conn: sqlite3.Connection, log: logging.Logger) -> No
 
     log.info(f"Generating HTTP deeplinks for {len(rows)} playables...")
     updated = 0
+    unchanged = 0
 
     for row in rows:
-        event_id, playable_id, provider, espn_graph_id, *candidates = row
+        event_id, playable_id, provider, espn_graph_id, existing_url, *candidates = row
 
         # pick first non-empty candidate in our priority order
         deeplink = next((d for d in candidates if d), None)
@@ -191,6 +199,12 @@ def populate_http_deeplinks(conn: sqlite3.Connection, log: logging.Logger) -> No
         if not http_url:
             continue
 
+        # A prior run's Amazon/ESPN "refresh" already produced this exact
+        # value -- skip the write so re-matching rows don't churn every run.
+        if http_url == existing_url:
+            unchanged += 1
+            continue
+
         cur.execute(
             "UPDATE playables SET http_deeplink_url = ? WHERE event_id = ? AND playable_id = ?",
             (http_url, event_id, playable_id),
@@ -199,7 +213,10 @@ def populate_http_deeplinks(conn: sqlite3.Connection, log: logging.Logger) -> No
 
     if updated:
         conn.commit()
-    log.info(f"HTTP deeplink generation complete. Updated {updated} rows.")
+    log.info(
+        f"HTTP deeplink generation complete. Updated {updated} rows "
+        f"({unchanged} already correct, skipped)."
+    )
 
 
 def migrate(db_path: Path) -> None:

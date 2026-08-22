@@ -12,13 +12,11 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-# Aliases: legacy service codes that get normalised on save
-_SAVE_ALIASES = {
-    "aiv_fox": "aiv_fox_one",
-    # amazon2.py had no TEXT_INFER pattern for free/ad-supported content before
-    # the aiv_free fix, so a stale saved filter selection can still say this.
-    "aiv_watch_for_free": "aiv_free",
-}
+try:
+    from core.service_catalog import get_canonical_service_code
+except ImportError:
+    def get_canonical_service_code(service_code):
+        return service_code
 
 _DEFAULTS: Dict[str, Any] = {
     "enabled_services": [],
@@ -101,7 +99,7 @@ def save(conn: sqlite3.Connection, prefs: Dict[str, Any]) -> bool:
     if prefs.get("enabled_services"):
         prefs = dict(prefs)
         prefs["enabled_services"] = [
-            _SAVE_ALIASES.get(s, s) for s in prefs["enabled_services"]
+            get_canonical_service_code(s) for s in prefs["enabled_services"]
         ]
 
     try:
