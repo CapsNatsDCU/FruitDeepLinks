@@ -60,13 +60,18 @@ let _current = {};
 async function loadSettings() {
   try {
     const data = await fetch('/api/settings').then(r => r.json());
-    if (data.status !== 'success') { showToast('Failed to load settings', 'error'); return; }
+    if (data.status !== 'success') {
+      showToast('Failed to load settings', 'error');
+      document.getElementById('settings-body').innerHTML = '<span class="status-failed">Failed to load settings. ' + (data.message || '') + '</span>';
+      return;
+    }
     _current = data.settings || {};
     const schemaList = data.schema || [];
     schemaList.forEach(s => { _schema[s.key] = s; });
     renderSettings();
   } catch (err) {
     showToast('Error loading settings: ' + err.message, 'error');
+    document.getElementById('settings-body').innerHTML = '<span class="status-failed">Error loading settings: ' + err.message + '</span>';
   }
 }
 

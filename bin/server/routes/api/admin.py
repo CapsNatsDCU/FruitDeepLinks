@@ -26,7 +26,7 @@ from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
-from db.connection import db_exists, get_conn, resolve_db_path
+from db.connection import db_exists, get_conn, get_conn_or_none, resolve_db_path
 from db.preferences import get_settings_schema, load_all_settings, save_settings
 from db.stats import get_db_stats
 from server import scheduler as sched
@@ -273,15 +273,21 @@ def api_wipe_event_data():
 
 @bp.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
-    if not db_exists():
-        return jsonify({"status": "error", "message": "Database not found"}), 500
-
-    with get_conn() as conn:
-        if request.method == "GET":
+    if request.method == "GET":
+        # Settings are a static schema (env-var/default backed), independent of
+        # whether the events DB has been created yet by a first refresh — so
+        # this must work pre-refresh (e.g. to disable scrapers before the
+        # first, potentially expensive, full scrape).
+        with get_conn_or_none() as conn:
             current = load_all_settings(conn)
             schema = get_settings_schema()
             return jsonify({"status": "success", "settings": current, "schema": schema})
 
+    if not db_exists():
+        resolve_db_path().parent.mkdir(parents=True, exist_ok=True)
+        sqlite3.connect(str(resolve_db_path())).close()
+
+    with get_conn() as conn:
         updates = request.json or {}
         if not isinstance(updates, dict):
             return jsonify({"status": "error", "message": "Expected JSON object"}), 400
