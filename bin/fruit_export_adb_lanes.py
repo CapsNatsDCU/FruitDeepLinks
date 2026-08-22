@@ -38,21 +38,21 @@ except ImportError:
     # Fallback if not in path
     def get_provider_display_name(provider_id: str) -> str:
         return provider_id.title() if provider_id else None
-    
+
     def add_categories_and_tags(prog_el, event, provider_name=None, is_placeholder=False):
         pass
-    
+
     def build_enhanced_title(event):
         import re
         title = event.get("title") or "Sports Event"
         feed_pattern = r'\s*-\s*(Home Feed|Away Feed|National Feed|Local Feed|Main Feed|Alternate Feed)$'
         title = re.sub(feed_pattern, '', title, flags=re.IGNORECASE)
         return title.strip().rstrip('-').strip()
-    
+
     def build_enhanced_description(event, provider_name=None):
         import re
         synopsis = event.get("synopsis") or event.get("synopsis_brief") or event.get("title") or "Sports Event"
-        
+
         # Clean polluted synopsis
         if synopsis:
             synopsis = re.sub(r'^\([^)]+\)\s*-\s*[^-]+\s*-\s*\([^)]+\)\s*-\s*', '', synopsis)
@@ -60,10 +60,18 @@ except ImportError:
             synopsis = re.sub(r'^[^-]+-\s*\([^)]+\)\s*-\s*', '', synopsis)
             synopsis = re.sub(r'\s*-\s*Available on [^-]+$', '', synopsis)
             synopsis = synopsis.strip()
-        
+
         if provider_name:
             return f"{synopsis} - Available on {provider_name}"
         return synopsis
+
+def _pb_service_label(row: sqlite3.Row) -> Optional[str]:
+    """Disambiguated service label for a row's specific expand-all-playables
+    sibling (computed once at lane-build time across all of the event's
+    siblings for this provider -- see fruit_build_adb_lanes.py), or None for
+    pre-expand-mode rows (adb_lanes.playable_label is NULL)."""
+    return row["playable_label"] if "playable_label" in row.keys() else None
+
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "data" / "fruit_events.db"
 DEFAULT_OUT_DIR = Path(__file__).resolve().parents[1] / "out"
@@ -308,6 +316,13 @@ def export_adb_lanes(db_path: Path, out_dir: Path, server_url: str) -> Path:
 
         # Build programmes: join adb_lanes -> events for titles / synopses
         # We assume events.id, events.start_utc, events.end_utc, events.title, events.synopsis
+        #
+        # "expand all playables" mode sets adb_lanes.playable_id/playable_label
+        # to a specific sibling (label computed once at lane-build time across
+        # all of that event's siblings for this provider -- see
+        # fruit_build_adb_lanes.py) so this lane's programme title can say
+        # which feed it is. Both are NULL for pre-expand-mode rows, where the
+        # lane just tracks "this event has a playable here".
         cur.execute(
             """
             SELECT
@@ -316,6 +331,8 @@ def export_adb_lanes(db_path: Path, out_dir: Path, server_url: str) -> Path:
                    a.start_utc,
                    a.stop_utc,
                    a.event_id,
+                   a.playable_id AS adb_playable_id,
+                   a.playable_label,
                    e.*
               FROM adb_lanes a
               JOIN events e
@@ -427,6 +444,13 @@ def export_adb_lanes(db_path: Path, out_dir: Path, server_url: str) -> Path:
 
                 # Title - use enhanced builder for ESPN-style formatting
                 title = build_enhanced_title(dict(row))
+                # "Expand all playables" mode: this lane is pinned to one specific
+                # sibling (adb_lanes.playable_id set) rather than "best of provider",
+                # so say which feed it is -- a sibling lane for the same event/time
+                # would otherwise show an identical title with no way to tell them apart.
+                pb_label = _pb_service_label(row)
+                if pb_label:
+                    title = f"{title} ({pb_label})"
 
                 prog_el = ET.SubElement(
                     tv,

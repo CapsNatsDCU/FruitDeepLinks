@@ -7,6 +7,7 @@ all FruitDeepLinks exporters (lanes, adb_lanes, direct).
 """
 
 import json
+import re
 from typing import Dict, Optional, List
 import xml.etree.ElementTree as ET
 
@@ -58,6 +59,160 @@ def get_provider_display_name(provider_id: str) -> Optional[str]:
     }
     
     return provider_map.get(provider_lower, provider_id.title())
+
+
+# -------------------- "Expand all playables" mode helpers --------------------
+# Shared by fruit_export_hybrid.py (direct export) and fruit_build_adb_lanes.py /
+# fruit_export_adb_lanes.py (ADB lanes) so an event's siblings get identically
+# labeled/disambiguated regardless of which exporter is showing them.
+
+_GENERIC_FEED_WORDS = {"live", "coverage", "sports event"}
+_STOPWORDS = {"vs", "vs.", "at", "the", "a", "an", "of", "and"}
+
+
+def _content_words(s: str) -> set:
+    """Lowercased alphanumeric words with stopwords/single-letters dropped,
+    used to compare a candidate feed qualifier against the event's own title
+    without being fooled by wording differences (e.g. "X vs Y" vs "X at Y")."""
+    words = re.findall(r"[a-z0-9]+", s.lower())
+    return {w for w in words if w not in _STOPWORDS and len(w) > 1}
+
+
+def extract_feed_qualifier(playable_title: Optional[str], event_title: Optional[str]) -> Optional[str]:
+    """Best-effort extraction of the distinguishing feed name from a playable's
+    own scraped title, independent of provider.
+
+    Multi-feed sports (golf especially: PGA TOUR + ESPN+ commonly offer a
+    Main Feed plus several named alternates) often have several playables
+    sharing one identical logical_service/service_name, but Apple's own
+    scraped title for each one usually already names the specific feed, e.g.:
+      "BMW Championship: Knapp Marquee Group (Second Round)" -> "Knapp Marquee Group"
+      "PGA TOUR LIVE BetCast Presented by DraftKings (Final Round)" -> "PGA TOUR LIVE BetCast Presented by DraftKings"
+      "BMW Championship: Main Feed (Second Round)" -> "Main Feed" (still distinguishing
+        from "Marquee Group" etc, even though it's the plain broadcast)
+      "Toronto Blue Jays vs. New York Yankees" (event: "... at New York Yankees")
+        -> None (same matchup, just reworded -- rejected via word-overlap, not
+        exact substring match, since "vs"/"at" phrasing differs)
+
+    Checked against ESPN Watch Graph's own feed_name/feed_type columns during
+    development: feed_name is only populated for named ALTERNATE feeds (NULL
+    for Main/National feeds), so it can't fully replace this on its own --
+    title-parsing covers the Main Feed case too and works for every provider,
+    not just ESPN.
+    """
+    if not playable_title:
+        return None
+    title = playable_title.strip()
+    # Drop a trailing "(...)" -- usually round/session context duplicated from
+    # the event itself (e.g. "(Second Round)"), not feed-distinguishing.
+    title = re.sub(r'\s*\([^)]*\)\s*$', '', title).strip()
+    # If there's a colon, the feed name is usually everything after the LAST
+    # one (e.g. "BMW Championship: Knapp Marquee Group" -> "Knapp Marquee Group").
+    if ':' in title:
+        title = title.rsplit(':', 1)[1].strip()
+    if not title or title.lower() in _GENERIC_FEED_WORDS:
+        return None
+
+    # Reject if it's just describing the same matchup/event as event_title,
+    # reworded (e.g. "vs." instead of "at") -- most of the qualifier's own
+    # content words already appear in the event title, so it adds no info.
+    q_words = _content_words(title)
+    et_words = _content_words(event_title or "")
+    if q_words and et_words:
+        overlap = len(q_words & et_words) / len(q_words)
+        if overlap > 0.5:
+            return None
+
+    return title
+
+
+def get_base_service_label(playable: Dict, fallback: str = "Sports") -> str:
+    """Coarse service-family label ("ESPN+", "ESPN (Linear)", "Prime Video"),
+    with no per-feed qualifier or disambiguation applied. Used for M3U
+    group-title / XMLTV category so all of one service's expanded siblings
+    still fold into one group in a player's channel list, even though their
+    individual titles differ (see label_playables_for_expand)."""
+    try:
+        from logical_service_mapper import get_service_display_name
+        logical_service = playable.get("logical_service")
+        if logical_service:
+            name = get_service_display_name(logical_service)
+            if name and name != logical_service:
+                return name
+    except Exception:
+        pass
+    return playable.get("service_name") or fallback
+
+
+def get_service_label_for_playable(
+    playable: Dict, fallback: str = "Sports", event_title: Optional[str] = None
+) -> str:
+    """Human-readable source label for a playable, used to distinguish
+    multiple channels for the same event in "expand all playables" mode.
+
+    When the playable's own title reveals a specific feed name (see
+    extract_feed_qualifier), that's appended in parens -- e.g. "ESPN+ (Marquee
+    Group)" -- since same-service duplicates otherwise have no distinguishing
+    label at all beyond an arbitrary "#2"/"#3" counter.
+    """
+    base = get_base_service_label(playable, fallback)
+    qualifier = extract_feed_qualifier(playable.get("title"), event_title)
+    return f"{base} ({qualifier})" if qualifier else base
+
+
+def _tally(labeled: List) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for _, label in labeled:
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def label_playables_for_expand(all_playables: List[Dict], fallback: str, event_title: Optional[str] = None) -> List:
+    """Pair each playable with (full_label, group_label) for "expand all
+    playables" mode:
+
+    - full_label: the fully disambiguated per-channel name, for the channel's
+      own title/display-name, computed in three tiers --
+        1. Per-playable feed name from its own title (get_service_label_for_playable).
+        2. Still-tied siblings fall back to their raw service_name -- several
+           distinct raw channels (e.g. "ESPN", "ESPN2", "ESPN on ABC") often
+           collapse into one coarser logical_service bucket ("espn_linear")
+           whose display name alone can't tell them apart, but service_name still can.
+        3. Whatever's STILL tied after that (e.g. two truly identical camera
+           feeds with no distinguishing title or service_name at all) gets a
+           plain " #2", " #3", ... counter as the last resort.
+    - group_label: the coarse service-family label (get_base_service_label),
+      constant across all of one event's siblings for a given service -- use
+      this for M3U group-title / XMLTV category so a player still folds
+      "ESPN+ (Marquee Group)", "ESPN+ (Main Feed)", etc. into one "ESPN+"
+      group instead of each becoming its own singleton group.
+
+    Returns a list of (playable, full_label, group_label) tuples.
+    """
+    labeled = [
+        (p, get_service_label_for_playable(p, fallback=fallback, event_title=event_title), get_base_service_label(p, fallback))
+        for p in all_playables
+    ]
+
+    counts = _tally([(p, label) for p, label, _ in labeled])
+    substituted = []
+    for p, label, group_label in labeled:
+        if counts[label] > 1:
+            svc = (p.get("service_name") or "").strip()
+            if svc and svc.lower() != label.lower():
+                label = svc
+        substituted.append((p, label, group_label))
+
+    counts2 = _tally([(p, label) for p, label, _ in substituted])
+    seen: Dict[str, int] = {}
+    out = []
+    for p, label, group_label in substituted:
+        if counts2[label] > 1:
+            seen[label] = seen.get(label, 0) + 1
+            out.append((p, f"{label} #{seen[label]}", group_label))
+        else:
+            out.append((p, label, group_label))
+    return out
 
 
 def get_provider_from_channel(channel_name: str) -> str:

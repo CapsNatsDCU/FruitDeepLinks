@@ -82,6 +82,7 @@ def load_user_preferences(conn: sqlite3.Connection, log: logging.Logger) -> Dict
         "enabled_services": [],
         "disabled_sports": [],
         "disabled_leagues": [],
+        "language_preference": "en",
     }
 
     if not table_exists(conn, "user_preferences"):
@@ -128,6 +129,12 @@ def load_user_preferences(conn: sqlite3.Connection, log: logging.Logger) -> Dict
     prefs["enabled_services"] = get_list("enabled_services")
     prefs["disabled_sports"] = get_list("disabled_sports")
     prefs["disabled_leagues"] = get_list("disabled_leagues")
+
+    lang_raw = raw.get("language_preference")
+    if lang_raw:
+        lang = safe_json_loads(lang_raw) if isinstance(lang_raw, str) else lang_raw
+        if isinstance(lang, str) and lang in ("en", "es", "both"):
+            prefs["language_preference"] = lang
 
     log.info(
         "ADB filters loaded: enabled_services=%s disabled_sports=%d disabled_leagues=%d",
@@ -238,6 +245,8 @@ def load_events_for_provider(
     conn: sqlite3.Connection,
     provider_code: str,
     enabled_services: List[str],
+    expand_all_playables: bool = False,
+    language_preference: str = "en",
 ) -> List[Dict[str, Any]]:
     """
     Load events for an ADB provider code.
@@ -252,8 +261,22 @@ def load_events_for_provider(
           * enabled_services empty  -> include ALL amazon logical_service LIKE 'aiv%%'
           * 'aiv' in enabled_services -> include ALL amazon logical_service LIKE 'aiv%%'
           * otherwise -> include only amazon logical_services explicitly enabled (aiv_*)
+
+    When expand_all_playables is True, one row per matching PLAYABLE is returned
+    instead of one row per event (GROUP BY e.id collapsed to a single row) --
+    each carries its own "playable_id" so assign_to_lanes() schedules every
+    sibling into its own lane instead of just tracking "this event has a
+    playable for this provider". Playables that would be excluded by the
+    language filter (Spanish feeds under language_preference="en", etc.) are
+    still dropped here so lanes aren't burned on feeds that could never be
+    selected -- see filter_integration._classify_espn_locale for the same
+    check used by direct export and by tune-time selection.
     """
     cur = conn.cursor()
+
+    select_cols = "e.id, e.title, e.start_utc, e.end_utc, e.start_ms, e.end_ms, e.classification_json"
+    if expand_all_playables:
+        select_cols += ", p.playable_id, p.service_name, p.locale, p.title AS p_title, p.priority, p.logical_service"
 
     # --- Amazon special case: collapse all aiv_* services into provider_code "aiv" for ADB ---
     if provider_code == "aiv":
@@ -269,19 +292,13 @@ def load_events_for_provider(
             where = f"p.logical_service IN ({placeholders})"
             params = allowed
 
+        group_or_order = "GROUP BY e.id" if not expand_all_playables else "ORDER BY e.start_utc ASC, p.priority ASC"
         query = f"""
-            SELECT
-                e.id,
-                e.title,
-                e.start_utc,
-                e.end_utc,
-                e.start_ms,
-                e.end_ms,
-                e.classification_json
+            SELECT {select_cols}
             FROM events e
             JOIN playables p ON p.event_id = e.id
             WHERE {where}
-            GROUP BY e.id
+            {group_or_order}
         """
         cur.execute(query, params)
 
@@ -301,23 +318,70 @@ def load_events_for_provider(
             return []
 
         placeholders = ",".join("?" * len(logical_services))
+        group_or_order = "GROUP BY e.id" if not expand_all_playables else "ORDER BY e.start_utc ASC, p.priority ASC"
         query = f"""
-            SELECT
-                e.id,
-                e.title,
-                e.start_utc,
-                e.end_utc,
-                e.start_ms,
-                e.end_ms,
-                e.classification_json
+            SELECT {select_cols}
             FROM events e
             JOIN playables p ON p.event_id = e.id
             WHERE p.logical_service IN ({placeholders})
-            GROUP BY e.id
+            {group_or_order}
         """
         cur.execute(query, logical_services)
 
     out: List[Dict[str, Any]] = []
+    if expand_all_playables:
+        try:
+            from filter_integration import _classify_espn_locale
+        except ImportError:
+            def _classify_espn_locale(playable):
+                return False, False
+
+        try:
+            from xmltv_helpers import label_playables_for_expand
+        except ImportError:
+            def label_playables_for_expand(playables, fallback, event_title=None):
+                return [(p, p.get("service_name") or fallback, fallback) for p in playables]
+
+        # First pass: apply the language filter and stash the base event fields
+        # + this row's playable dict (for labeling) keyed by event id, so
+        # siblings of the same event can be labeled/disambiguated together
+        # below rather than one at a time.
+        by_event: Dict[str, Dict[str, Any]] = {}
+        playables_by_event: Dict[str, List[Dict[str, Any]]] = {}
+        for row in cur.fetchall():
+            eid, title, start_utc, end_utc, start_ms, end_ms, classification_json, playable_id, service_name, locale, p_title, priority, logical_service = row
+            if language_preference != "both":
+                is_spanish, _ = _classify_espn_locale(
+                    {"service_name": service_name, "locale": locale, "title": p_title}
+                )
+                if language_preference == "en" and is_spanish:
+                    continue
+                if language_preference == "es" and not is_spanish:
+                    continue
+            by_event[eid] = {
+                "id": eid,
+                "title": title or "",
+                "start_utc": start_utc or "",
+                "end_utc": end_utc or "",
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "classification_json": classification_json or "",
+            }
+            playables_by_event.setdefault(eid, []).append(
+                {"playable_id": playable_id, "service_name": service_name, "logical_service": logical_service, "title": p_title}
+            )
+
+        try:
+            from logical_service_mapper import get_service_display_name as _gsdn
+            fallback_label = _gsdn(provider_code) or provider_code.upper()
+        except Exception:
+            fallback_label = provider_code.upper()
+        for eid, siblings in playables_by_event.items():
+            event_title = by_event[eid]["title"]
+            for playable, label, _group_label in label_playables_for_expand(siblings, fallback=fallback_label, event_title=event_title):
+                out.append({**by_event[eid], "playable_id": playable["playable_id"], "playable_label": label})
+        return out
+
     for (eid, title, start_utc, end_utc, start_ms, end_ms, classification_json) in cur.fetchall():
         out.append(
             {
@@ -387,10 +451,10 @@ def insert_adb_rows(
         channel_id = f"{provider_code}{lane_number:02d}"
         cur.execute(
             """
-            INSERT INTO adb_lanes (provider_code, lane_number, channel_id, event_id, start_utc, stop_utc)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO adb_lanes (provider_code, lane_number, channel_id, event_id, start_utc, stop_utc, playable_id, playable_label)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (provider_code, lane_number, channel_id, ev["id"], dt_to_iso(st), dt_to_iso(en)),
+            (provider_code, lane_number, channel_id, ev["id"], dt_to_iso(st), dt_to_iso(en), ev.get("playable_id"), ev.get("playable_label")),
         )
         n += 1
     conn.commit()
@@ -413,7 +477,11 @@ def build_adb_lanes(db_path: str, provider_filter: Optional[str] = None) -> None
     enabled_services: List[str] = prefs.get("enabled_services") or []
     disabled_sports: List[str] = prefs.get("disabled_sports") or []
     disabled_leagues: List[str] = prefs.get("disabled_leagues") or []
+    expand_all_playables: bool = bool(get_setting(conn, "expand_all_playables", False))
+    language_preference: str = prefs.get("language_preference", "en")
     max_event_minutes: int = int(get_setting(conn, "max_event_minutes", 0) or 0)
+    if expand_all_playables:
+        log.info("Expand-all-playables mode ON: one ADB lane per sibling playable instead of one per event.")
 
     providers = load_adb_enabled_providers(conn)
     if provider_filter:
@@ -471,7 +539,11 @@ def build_adb_lanes(db_path: str, provider_filter: Optional[str] = None) -> None
                     )
                     continue
 
-        evs = load_events_for_provider(conn, provider_code, enabled_services)
+        evs = load_events_for_provider(
+            conn, provider_code, enabled_services,
+            expand_all_playables=expand_all_playables,
+            language_preference=language_preference,
+        )
 
         filtered: List[Dict[str, Any]] = []
         null_ts = 0

@@ -51,6 +51,12 @@ try:
 except ImportError:
     DEFAULT_USER_PRIORITY = {}
 
+try:
+    from core.service_catalog import get_canonical_service_code
+except ImportError:
+    def get_canonical_service_code(service_code):
+        return service_code
+
 
 def get_default_service_priorities() -> Dict[str, int]:
     """
@@ -244,6 +250,32 @@ def apply_amazon_penalty(
     return other_playables + amazon_playables
 
 
+def _classify_espn_locale(playable: Dict[str, Any]) -> tuple:
+    """Return (is_spanish, is_named_deportes) for an ESPN playable.
+
+    Prefers the locale column (populated by migrate_add_locale.py from title
+    as well as service_name -- e.g. "En Español" in the title) since ESPN
+    Unlimited/MLB.TV/MLB Network playables often share one generic
+    service_name across English/Spanish entitlements with nothing else to
+    distinguish them. Falls back to the service_name/title text heuristic for
+    playables that predate the locale migration.
+
+    Shared by the language-preference filter and the ESPN channel tiebreak
+    sort in get_filtered_playables() so the two can't drift apart (community
+    report #787 was caused by exactly that: only one of the two had locale
+    detection).
+    """
+    service_name = (playable.get("service_name") or "").lower()
+    title = (playable.get("title") or "").lower()
+    locale = (playable.get("locale") or "").lower()
+    is_named_deportes = "deportes" in service_name or "español" in service_name
+    if locale:
+        is_spanish = locale.startswith("es")
+    else:
+        is_spanish = is_named_deportes or "español" in title
+    return is_spanish, is_named_deportes
+
+
 def get_filtered_playables(
     conn: sqlite3.Connection, event_id: str, enabled_services: List[str],
     priority_map: Optional[Dict[str, int]] = None,
@@ -315,13 +347,7 @@ def get_filtered_playables(
             # else to distinguish them. Fall back to the service_name/title text
             # heuristic for playables that predate the locale migration.
             if language_preference != "both":
-                locale = (playable.get("locale") or "").lower()
-                if locale:
-                    is_spanish = locale.startswith("es")
-                else:
-                    service_name = (playable.get("service_name") or "").lower()
-                    title = (playable.get("title") or "").lower()
-                    is_spanish = "deportes" in service_name or "español" in service_name or "español" in title
+                is_spanish, _ = _classify_espn_locale(playable)
 
                 if language_preference == "en" and is_spanish:
                     continue  # Skip Spanish feeds if user wants English only
@@ -350,21 +376,12 @@ def get_filtered_playables(
             if not amazon_master_enabled and playable["logical_service"].startswith("aiv"):
                 continue
 
-            # Normalize legacy logical_service aliases so they match what the UI/prefs store.
-            # e.g. old playables may have 'aiv_fox' while the filter UI saves 'aiv_fox_one'.
-            _LS_ALIASES: Dict[str, str] = {
-                "aiv_fox": "aiv_fox_one",
-                # Pre-fix amazon2.py had no TEXT_INFER pattern for free/ad-supported
-                # content, so it fell through to a raw-entitlement-text slug that
-                # happened to read "aiv_watch_for_free" for the "Watch for free"
-                # wording. amazon_channels rows scraped before the fix (and not yet
-                # rescraped -- up to 48h stale by default) still carry that old
-                # channel_id verbatim; alias it to the stable aiv_free code so
-                # already-cached data doesn't need a rescrape to match user filters.
-                "aiv_watch_for_free": "aiv_free",
-            }
+            # Normalize legacy logical_service aliases so they match what the UI/prefs
+            # store, e.g. old playables may have 'aiv_fox' while the filter UI saves
+            # 'aiv_fox_one'. See core.service_catalog.LEGACY_SERVICE_ALIASES for why
+            # this must be the single shared alias table.
             raw_ls = playable["logical_service"]
-            canonical_ls = _LS_ALIASES.get(raw_ls, raw_ls)
+            canonical_ls = get_canonical_service_code(raw_ls)
             if canonical_ls != raw_ls:
                 playable["logical_service"] = canonical_ls  # normalize for downstream use
 
@@ -397,27 +414,31 @@ def get_filtered_playables(
         def espn_channel_priority(playable):
             """Return priority score for ESPN channels (lower = better)"""
             service_name = (playable.get("service_name") or "").lower()
-            title = (playable.get("title") or "").lower()
-            locale = (playable.get("locale") or "").lower()
-            is_spanish = (
-                locale.startswith("es") if locale
-                else ("deportes" in service_name or "español" in service_name or "español" in title)
-            )
+            is_spanish, is_named_deportes = _classify_espn_locale(playable)
 
             # Main ESPN channel gets highest priority
             if service_name == "espn":
                 return 0
+            # ESPN Deportes -- a real, distinct linear channel (not a generic
+            # ambiguous label), so it keeps ranking above alternate English
+            # feeds for language_preference="both" users, as before.
+            elif is_named_deportes:
+                return 1
             # Alternate English feeds
             elif service_name in ("espn2", "espnu", "espnews", "sec network"):
-                return 1
+                return 2
             # Unknown/other English feeds (e.g. generic "ESPN Unlimited" labels)
             elif not is_spanish:
-                return 2
-            # Spanish feeds (locale-detected) rank last -- only reached in
-            # language_preference="both" mode, since "en" mode filters these
-            # out entirely above.
-            else:
                 return 3
+            # Locale-detected Spanish on a generic, non-Deportes-branded label
+            # (e.g. "ESPN Unlimited") ranks last -- only reached in
+            # language_preference="both" mode, since "en" mode filters these
+            # out entirely above. Keeping this below even unknown English
+            # feeds prevents the improved locale detection from letting an
+            # ambiguous Spanish entitlement silently outrank a real English
+            # alternate (community report #787).
+            else:
+                return 4
 
         # Sort by user priorities (if provided) or fallback to system priorities
         if priority_map:
@@ -522,6 +543,45 @@ def get_best_playable_for_event(
     return playables[0]
 
 
+def _resolve_deeplink_for_playable(playable: Dict[str, Any]) -> Optional[str]:
+    """Resolve a single playable dict (as returned by get_filtered_playables) to its
+    playable deeplink, applying the ESPN Watch Graph override (Apple's externalId
+    deeplink is frequently broken/wrong; ESPN's own playID is not).
+
+    Shared by get_best_deeplink_for_event() (single "best" pick) and
+    get_all_deeplinks_for_event() (expand-all-playables export mode) so the two
+    can't drift on how an ESPN deeplink gets corrected.
+    """
+    deeplink = (
+        playable.get("deeplink_play")
+        or playable.get("deeplink_open")
+        or playable.get("playable_url")
+    )
+
+    provider = playable.get("provider") or playable.get("logical_service") or ""
+    espn_graph_id = playable.get("espn_graph_id")
+
+    if provider.lower() in ("sportscenter", "espn", "espn+", "espn-plus") and espn_graph_id and deeplink:
+        try:
+            # Extract playback ID (bare UUID, or legacy espn-watch:{id}:{hash} format)
+            m = _ESPN_UUID_RE.search(espn_graph_id)
+            if not m:
+                raise ValueError("espn_graph_id has no extractable UUID")
+            playback_id = m.group(0)
+
+            # Build the correct deeplink format based on original
+            if deeplink.startswith('sportscenter://'):
+                return f"sportscenter://x-callback-url/showWatchStream?playID={playback_id}"
+            elif deeplink.startswith('http'):
+                return f"https://www.espn.com/watch/player/_/id/{playback_id}"
+            else:
+                return f"sportscenter://x-callback-url/showWatchStream?playID={playback_id}"
+        except Exception:
+            pass  # Fall back to Apple's deeplink if ESPN processing fails
+
+    return deeplink
+
+
 def get_best_deeplink_for_event(
     conn: sqlite3.Connection, event_id: str, enabled_services: List[str],
     priority_map: Optional[Dict[str, int]] = None,
@@ -547,38 +607,42 @@ def get_best_deeplink_for_event(
     )
     if not best:
         return None
+    return _resolve_deeplink_for_playable(best)
 
-    # Get base deeplink
-    deeplink = (
-        best.get("deeplink_play")
-        or best.get("deeplink_open")
-        or best.get("playable_url")
+
+def get_all_deeplinks_for_event(
+    conn: sqlite3.Connection, event_id: str, enabled_services: List[str],
+    priority_map: Optional[Dict[str, int]] = None,
+    amazon_penalty: bool = True,
+    language_preference: str = "en",
+    amazon_master_enabled: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Return every filtered playable for an event, each with its resolved deeplink
+    attached under "resolved_deeplink", sorted best-first (same order as
+    get_best_playable_for_event's pick).
+
+    Used by the "expand all playables" export mode, which emits one channel per
+    playable instead of collapsing to a single best pick like
+    get_best_deeplink_for_event() does.
+
+    Returns:
+        List of playable dicts (possibly empty), each guaranteed to have a
+        non-empty "resolved_deeplink".
+    """
+    playables = get_filtered_playables(
+        conn, event_id, enabled_services, priority_map, amazon_penalty,
+        language_preference, amazon_master_enabled,
     )
-    
-    # ESPN Watch Graph override: Use ESPN's playback ID instead of Apple's externalId
-    # Check if this is an ESPN/sportscenter event and has ESPN Graph ID
-    provider = best.get("provider") or best.get("logical_service") or ""
-    espn_graph_id = best.get("espn_graph_id")
-    
-    if provider.lower() in ("sportscenter", "espn", "espn+", "espn-plus") and espn_graph_id and deeplink:
-        try:
-            # Extract playback ID (bare UUID, or legacy espn-watch:{id}:{hash} format)
-            m = _ESPN_UUID_RE.search(espn_graph_id)
-            if not m:
-                raise ValueError("espn_graph_id has no extractable UUID")
-            playback_id = m.group(0)
-
-            # Build the correct deeplink format based on original
-            if deeplink.startswith('sportscenter://'):
-                return f"sportscenter://x-callback-url/showWatchStream?playID={playback_id}"
-            elif deeplink.startswith('http'):
-                return f"https://www.espn.com/watch/player/_/id/{playback_id}"
-            else:
-                return f"sportscenter://x-callback-url/showWatchStream?playID={playback_id}"
-        except Exception:
-            pass  # Fall back to Apple's deeplink if ESPN processing fails
-    
-    return deeplink
+    out: List[Dict[str, Any]] = []
+    for p in playables:
+        deeplink = _resolve_deeplink_for_playable(p)
+        if not deeplink:
+            continue
+        p = dict(p)
+        p["resolved_deeplink"] = deeplink
+        out.append(p)
+    return out
 
 
 def expand_enabled_services_for_amazon(
@@ -598,7 +662,14 @@ def expand_enabled_services_for_amazon(
        truth — 'aiv' is just the master toggle. Return as-is; the explicit
        aiv_* list drives filtering in get_filtered_playables.
 
-    Also normalizes legacy DB aliases (e.g. 'aiv_fox' -> 'aiv_fox_one').
+    Also normalizes legacy DB aliases (e.g. 'aiv_fox' -> 'aiv_fox_one') via
+    core.service_catalog.LEGACY_SERVICE_ALIASES -- the single shared alias
+    table also used to normalize playables.logical_service in
+    get_filtered_playables() and to normalize saved preferences in
+    db/preferences.py. Keep it there, not here: a local copy is how the
+    aiv_watch_for_free alias got added to those two but missed here, which
+    silently dropped the "Watch for free" Amazon sub-filter for anyone with
+    the old code still saved in enabled_services.
 
     Args:
         conn: Database connection
@@ -607,16 +678,12 @@ def expand_enabled_services_for_amazon(
     Returns:
         Normalized enabled_services list (aliases resolved, no expansion)
     """
-    _ALIASES: Dict[str, str] = {
-        "aiv_fox": "aiv_fox_one",   # legacy code still present in some playables rows
-    }
-
     try:
         if not enabled_services:
             return enabled_services
 
         # Normalize any legacy aliases in the stored list
-        normalized = [_ALIASES.get(s, s) for s in enabled_services]
+        normalized = [get_canonical_service_code(s) for s in enabled_services]
         return normalized
 
     except Exception:

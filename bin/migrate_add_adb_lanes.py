@@ -66,6 +66,56 @@ def ensure_adb_lanes_table(conn: sqlite3.Connection, log: logging.Logger) -> boo
     return True
 
 
+def ensure_adb_lanes_playable_id_column(conn: sqlite3.Connection, log: logging.Logger) -> bool:
+    """
+    Add playable_id column to adb_lanes, needed for "expand all playables" mode:
+    when a provider has more than one matching playable for an event, each gets
+    its own lane row so it can be tuned separately, and this column records
+    which specific playable that lane row resolves to at tune time. NULL means
+    "resolve the best sibling at tune time" (the pre-expand-mode behavior).
+
+    Returns True if column was added, False if it already existed.
+    """
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(adb_lanes)")
+    columns = [row[1] for row in cur.fetchall()]
+
+    if "playable_id" in columns:
+        log.debug("Column adb_lanes.playable_id already exists; nothing to create.")
+        return False
+
+    log.info("Adding playable_id column to adb_lanes table...")
+    cur.execute("ALTER TABLE adb_lanes ADD COLUMN playable_id TEXT")
+    conn.commit()
+    log.info("Column adb_lanes.playable_id added.")
+    return True
+
+
+def ensure_adb_lanes_playable_label_column(conn: sqlite3.Connection, log: logging.Logger) -> bool:
+    """
+    Add playable_label column to adb_lanes: the disambiguated service label
+    ("ESPN+", "ESPN+ #2", ...) computed once at lane-build time across all of
+    an event's siblings for that provider, so the export step doesn't need to
+    re-derive it (and can't drift from what was actually scheduled together).
+    NULL for pre-expand-mode rows.
+
+    Returns True if column was added, False if it already existed.
+    """
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(adb_lanes)")
+    columns = [row[1] for row in cur.fetchall()]
+
+    if "playable_label" in columns:
+        log.debug("Column adb_lanes.playable_label already exists; nothing to create.")
+        return False
+
+    log.info("Adding playable_label column to adb_lanes table...")
+    cur.execute("ALTER TABLE adb_lanes ADD COLUMN playable_label TEXT")
+    conn.commit()
+    log.info("Column adb_lanes.playable_label added.")
+    return True
+
+
 def ensure_http_deeplink_column(conn: sqlite3.Connection, log: logging.Logger) -> bool:
     """
     Add http_deeplink_url column to playables table for Android/Fire TV compatibility.
@@ -237,7 +287,11 @@ def migrate(db_path: Path) -> None:
     try:
         # Ensure adb_lanes table
         adb_created = ensure_adb_lanes_table(conn, log)
-        
+
+        # Ensure playable_id column in adb_lanes (expand-all-playables mode)
+        ensure_adb_lanes_playable_id_column(conn, log)
+        ensure_adb_lanes_playable_label_column(conn, log)
+
         # Ensure http_deeplink_url column in playables
         http_col_created = ensure_http_deeplink_column(conn, log)
         

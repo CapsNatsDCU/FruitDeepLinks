@@ -31,6 +31,7 @@ try:
         load_user_preferences,
         should_include_event,
         get_best_deeplink_for_event,
+        get_all_deeplinks_for_event,
         get_fallback_deeplink,
         expand_enabled_services_for_amazon,
     )
@@ -49,6 +50,9 @@ except ImportError:
     def get_best_deeplink_for_event(conn, event_id, services):
         return None
 
+    def get_all_deeplinks_for_event(conn, event_id, services, *args, **kwargs):
+        return []
+
     def get_fallback_deeplink(event):
         return None
 
@@ -65,7 +69,12 @@ except ImportError:
 
 # Import shared XMLTV helpers
 try:
-    from xmltv_helpers import build_enhanced_description, build_enhanced_title
+    from xmltv_helpers import (
+        build_enhanced_description,
+        build_enhanced_title,
+        get_service_label_for_playable,
+        label_playables_for_expand,
+    )
 except ImportError:
     # Fallback if not in path
     def build_enhanced_title(event):
@@ -98,6 +107,12 @@ except ImportError:
         if provider_name:
             return f"{synopsis} - Available on {provider_name}"
         return synopsis
+
+    def get_service_label_for_playable(playable, fallback="Sports", event_title=None):
+        return playable.get("service_name") or fallback
+
+    def label_playables_for_expand(all_playables, fallback, event_title=None):
+        return [(p, get_service_label_for_playable(p, fallback=fallback), fallback) for p in all_playables]
 
 
 # -------------------- Deprecated Services --------------------
@@ -186,6 +201,15 @@ def stable_channel_id(event: Dict, prefix: str = "fdl.") -> str:
         "T", ""
     ).replace("Z", "")
     return _sanitize_id(prefix + t + "." + st)
+
+
+def stable_channel_id_for_playable(event: Dict, playable_id: Optional[str], prefix: str = "fdl.") -> str:
+    """Like stable_channel_id(), but unique per playable -- used in "expand all
+    playables" mode where one event maps to several channels, one per source."""
+    base = stable_channel_id(event, prefix)
+    if not playable_id:
+        return base
+    return _sanitize_id(base + "." + playable_id)
 
 
 def get_provider_from_channel(channel_name: str) -> str:
@@ -376,6 +400,114 @@ def get_direct_events(
 
 
 # -------------------- Direct XMLTV --------------------
+def _add_direct_xmltv_channel(
+    tv: ET.Element,
+    conn: sqlite3.Connection,
+    event: Dict,
+    chan_id: str,
+    title: str,
+    provider: str,
+    now: datetime,
+    max_event_minutes: int,
+) -> None:
+    """Emit one <channel> + its placeholder/main/placeholder <programme> blocks.
+
+    Shared by the single-"best"-pick path and the expand-all-playables path in
+    build_direct_xmltv() -- everything here is per-channel, not per-deeplink,
+    so both paths call it once per emitted channel.
+    """
+    chan = ET.SubElement(tv, "channel", id=chan_id)
+    dn = ET.SubElement(chan, "display-name")
+    dn.text = title
+
+    event_start = parse_iso(event["start_utc"])
+    event_end = parse_iso(event["end_utc"])
+    if event_end <= event_start:
+        event_end = event_start + timedelta(hours=3)
+
+    # Cap runaway event lengths (e.g. bad upstream end_utc showing an
+    # MLB game as 8+ hours) to the user's configured maximum.
+    if max_event_minutes > 0:
+        max_end = event_start + timedelta(minutes=max_event_minutes)
+        if event_end > max_end:
+            event_end = max_end
+
+    # Pre-event placeholders (from now-1h snapped to :00/:30)
+    pre_start = snap_to_half_hour(now - timedelta(hours=1))
+    current = pre_start
+    while current < event_start:
+        block_end = min(current + timedelta(hours=1), event_start)
+        if (block_end - current).total_seconds() < 60:
+            break
+        pre_prog = ET.SubElement(
+            tv,
+            "programme",
+            channel=chan_id,
+            start=xmltv_time(current),
+            stop=xmltv_time(block_end),
+        )
+        ET.SubElement(pre_prog, "title").text = "Event Not Started"
+        ET.SubElement(pre_prog, "desc").text = (
+            f"Starts { _fmt_local_short(event_start) }. Available on {provider}."
+        )
+        current = block_end
+
+    # Main event
+    prog = ET.SubElement(
+        tv,
+        "programme",
+        channel=chan_id,
+        start=xmltv_time(event_start),
+        stop=xmltv_time(event_end),
+    )
+    ET.SubElement(prog, "title").text = title
+
+    # Build enhanced description (ESPN-style)
+    desc_text = build_enhanced_description(event, provider_name=provider)
+    ET.SubElement(prog, "desc").text = desc_text
+
+    # Categories
+    ET.SubElement(prog, "category").text = provider
+    ET.SubElement(prog, "category").text = "Sports"
+    genres_json = event.get("genres_json")
+    if genres_json:
+        try:
+            for g in json.loads(genres_json) or []:
+                if g and g not in (provider, "Sports"):
+                    ET.SubElement(prog, "category").text = str(g)
+        except Exception:
+            pass
+
+    # Attach image to main event
+    img_url = get_event_image_url(conn, event)
+    if img_url:
+        ET.SubElement(prog, "icon", src=img_url)
+
+    # Only mark as live if it's truly live or a premiere (not a replay)
+    # Replays should not be marked as live content
+    airing_type = event.get('airing_type')
+    if airing_type not in ('replay',):
+        ET.SubElement(prog, "live").text = "1"
+
+    # Post-event placeholders (24h in 1h blocks)
+    current = event_end
+    post_end = event_end + timedelta(hours=24)
+    while current < post_end:
+        block_end = min(current + timedelta(hours=1), post_end)
+        post_prog = ET.SubElement(
+            tv,
+            "programme",
+            channel=chan_id,
+            start=xmltv_time(current),
+            stop=xmltv_time(block_end),
+        )
+        ET.SubElement(post_prog, "title").text = "Event Ended"
+        ET.SubElement(post_prog, "desc").text = (
+            f"Ended { _fmt_local_short(event_end) }. Available on {provider}."
+        )
+        current = block_end
+
+
 def build_direct_xmltv(
     conn: sqlite3.Connection,
     xml_path: str,
@@ -390,33 +522,53 @@ def build_direct_xmltv(
 
     # Load user preferences for deeplink selection
     preferences = load_user_preferences(conn) if FILTERING_AVAILABLE else {}
-    
+
     # Filter out deprecated services and expand 'aiv' -> all aiv_* sub-services
     enabled_services = filter_deprecated_services(preferences.get("enabled_services", []))
     enabled_services = expand_enabled_services_for_amazon(conn, enabled_services)
-    
+
     priority_map = preferences.get("service_priorities", {})
     amazon_penalty = preferences.get("amazon_penalty", True)
     language_preference = preferences.get("language_preference", "en")
+    amazon_master_enabled = preferences.get("amazon_master_enabled", True)
+    expand_all = bool(get_setting(conn, "expand_all_playables", False))
     max_event_minutes = int(get_setting(conn, "max_event_minutes", 0) or 0)
 
     now = datetime.now(timezone.utc)
     tv = ET.Element("tv")
     tv.set("generator-info-name", "FruitDeepLinks - Direct")
     tv.set("generator-info-url", "https://github.com/yourusername/FruitDeepLinks")
+    cur = conn.cursor()
 
-    for idx, event in enumerate(events, start=1):
-        chan_id = stable_channel_id(event, epg_prefix)
+    channels_emitted = 0
+
+    for event in events:
         title = build_enhanced_title(event)
         channel_name = event.get("channel_name") or "Sports"
         event_id = event.get("id", "")
+
+        if expand_all and FILTERING_AVAILABLE:
+            all_playables = get_all_deeplinks_for_event(
+                conn, event_id, enabled_services, priority_map, amazon_penalty,
+                language_preference, amazon_master_enabled,
+            )
+            if not all_playables:
+                continue
+            for playable, service_label, group_label in label_playables_for_expand(all_playables, fallback=get_provider_from_channel(channel_name) or "Sports", event_title=title):
+                chan_id = stable_channel_id_for_playable(event, playable.get("playable_id"), epg_prefix)
+                chan_title = f"{title} ({service_label})"
+                _add_direct_xmltv_channel(tv, conn, event, chan_id, chan_title, group_label, now, max_event_minutes)
+                channels_emitted += 1
+            continue
+
+        chan_id = stable_channel_id(event, epg_prefix)
 
         # Get deeplink URL using similar logic as M3U
         deeplink_url = None
         if FILTERING_AVAILABLE:
             # Try filtered playables first
             deeplink_url = get_best_deeplink_for_event(conn, event_id, enabled_services, priority_map, amazon_penalty, language_preference)
-            
+
             # ESPN FIX: Apply ESPN Graph ID correction to XMLTV path too
             if deeplink_url and deeplink_url.startswith("sportscenter://"):
                 try:
@@ -431,7 +583,7 @@ def build_direct_xmltv(
                         raw_provider = prow["provider"] if prow["provider"] else ""
                         if raw_provider.lower() not in ('sportscenter', 'espn', 'espn+'):
                             continue
-                        
+
                         # sqlite3.Row uses dict-style access
                         espn_graph_id = prow["espn_graph_id"] if "espn_graph_id" in prow.keys() else None
                         if espn_graph_id:
@@ -458,15 +610,15 @@ def build_direct_xmltv(
 
         # Determine human-readable provider from the SELECTED deeplink
         provider = None
-        
+
         if FILTERING_AVAILABLE and deeplink_url:
             try:
                 from logical_service_mapper import get_service_display_name, get_logical_service_for_playable
                 from provider_utils import extract_provider_from_url, get_provider_display_name, get_display_name_from_domain
-                
+
                 # Extract provider from the actual deeplink URL scheme
                 scheme = extract_provider_from_url(deeplink_url)
-                
+
                 # Check if it's a recognized provider scheme
                 if scheme and scheme not in ("http", "https", "unknown"):
                     # Try to get display name from provider_utils first
@@ -493,108 +645,19 @@ def build_direct_xmltv(
             except Exception as e:
                 # Fall back to database channel_name if detection fails
                 pass
-        
+
         # Final fallback: use database channel_name provider
         if not provider:
             provider = get_provider_from_channel(channel_name) or "Sports"
 
-        # Channel element
-        chan = ET.SubElement(tv, "channel", id=chan_id)
-        dn = ET.SubElement(chan, "display-name")
-        dn.text = title
-
-        event_start = parse_iso(event["start_utc"])
-        event_end = parse_iso(event["end_utc"])
-        if event_end <= event_start:
-            event_end = event_start + timedelta(hours=3)
-
-        # Cap runaway event lengths (e.g. bad upstream end_utc showing an
-        # MLB game as 8+ hours) to the user's configured maximum.
-        if max_event_minutes > 0:
-            max_end = event_start + timedelta(minutes=max_event_minutes)
-            if event_end > max_end:
-                event_end = max_end
-
-        # Pre-event placeholders (from now-1h snapped to :00/:30)
-        pre_start = snap_to_half_hour(now - timedelta(hours=1))
-        current = pre_start
-        while current < event_start:
-            block_end = min(current + timedelta(hours=1), event_start)
-            if (block_end - current).total_seconds() < 60:
-                break
-            pre_prog = ET.SubElement(
-                tv,
-                "programme",
-                channel=chan_id,
-                start=xmltv_time(current),
-                stop=xmltv_time(block_end),
-            )
-            ET.SubElement(pre_prog, "title").text = "Event Not Started"
-            ET.SubElement(pre_prog, "desc").text = (
-                f"Starts { _fmt_local_short(event_start) }. Available on {provider}."
-            )
-            current = block_end
-
-        # Main event
-        prog = ET.SubElement(
-            tv,
-            "programme",
-            channel=chan_id,
-            start=xmltv_time(event_start),
-            stop=xmltv_time(event_end),
-        )
-        ET.SubElement(prog, "title").text = title
-
-        # Build enhanced description (ESPN-style)
-        desc_text = build_enhanced_description(event, provider_name=provider)
-        ET.SubElement(prog, "desc").text = desc_text
-
-        # Categories
-        ET.SubElement(prog, "category").text = provider
-        ET.SubElement(prog, "category").text = "Sports"
-        genres_json = event.get("genres_json")
-        if genres_json:
-            try:
-                for g in json.loads(genres_json) or []:
-                    if g and g not in (provider, "Sports"):
-                        ET.SubElement(prog, "category").text = str(g)
-            except Exception:
-                pass
-
-        # Attach image to main event
-        img_url = get_event_image_url(conn, event)
-        if img_url:
-            ET.SubElement(prog, "icon", src=img_url)
-
-        # Only mark as live if it's truly live or a premiere (not a replay)
-        # Replays should not be marked as live content
-        airing_type = event.get('airing_type')
-        if airing_type not in ('replay',):
-            ET.SubElement(prog, "live").text = "1"
-
-        # Post-event placeholders (24h in 1h blocks)
-        current = event_end
-        post_end = event_end + timedelta(hours=24)
-        while current < post_end:
-            block_end = min(current + timedelta(hours=1), post_end)
-            post_prog = ET.SubElement(
-                tv,
-                "programme",
-                channel=chan_id,
-                start=xmltv_time(current),
-                stop=xmltv_time(block_end),
-            )
-            ET.SubElement(post_prog, "title").text = "Event Ended"
-            ET.SubElement(post_prog, "desc").text = (
-                f"Ended { _fmt_local_short(event_end) }. Available on {provider}."
-            )
-            current = block_end
+        _add_direct_xmltv_channel(tv, conn, event, chan_id, title, provider, now, max_event_minutes)
+        channels_emitted += 1
 
     xml_str = minidom.parseString(ET.tostring(tv)).toprettyxml(indent="  ")
     Path(xml_path).parent.mkdir(parents=True, exist_ok=True)
     with open(xml_path, "w", encoding="utf-8") as f:
         f.write(xml_str)
-    print(f"Wrote Direct XMLTV: {xml_path}")
+    print(f"Wrote Direct XMLTV: {xml_path} ({channels_emitted} channels{' -- expand all playables ON' if expand_all else ''})")
 
 
 # -------------------- M3U --------------------
@@ -609,14 +672,16 @@ def build_direct_m3u(
     print(f"Direct M3U: {len(events)} event channels (within {hours_window}h)")
 
     preferences = load_user_preferences(conn) if FILTERING_AVAILABLE else {}
-    
+
     # Filter out deprecated services and expand 'aiv' -> all aiv_* sub-services
     enabled_services = filter_deprecated_services(preferences.get("enabled_services", []))
     enabled_services = expand_enabled_services_for_amazon(conn, enabled_services)
-    
+
     priority_map = preferences.get("service_priorities", {})
     amazon_penalty = preferences.get("amazon_penalty", True)
     language_preference = preferences.get("language_preference", "en")
+    amazon_master_enabled = preferences.get("amazon_master_enabled", True)
+    expand_all = bool(get_setting(conn, "expand_all_playables", False))
 
     skipped_no_deeplink = 0
     reason_counts: Dict[str, int] = {}
@@ -637,12 +702,12 @@ def build_direct_m3u(
         direct_start_ch = get_setting(conn, "direct_start_ch")
         if direct_start_ch is None:
             direct_start_ch = int(os.getenv("FRUIT_DIRECT_START_CH", "5000"))
-        for idx, event in enumerate(events, start=direct_start_ch):
+        idx = direct_start_ch
+        for event in events:
             pvid = event.get("pvid")
             if not pvid:
                 continue
 
-            chan_id = stable_channel_id(event, epg_prefix)
             title = event.get("title") or f"Sports Event {idx}"
             channel_name = event.get("channel_name") or "Sports"
             provider = get_provider_from_channel(channel_name)
@@ -650,6 +715,34 @@ def build_direct_m3u(
             img_url = get_event_image_url(conn, event)
 
             event_id = event.get("id", "")
+
+            if expand_all and FILTERING_AVAILABLE:
+                all_playables = get_all_deeplinks_for_event(
+                    conn, event_id, enabled_services, priority_map, amazon_penalty,
+                    language_preference, amazon_master_enabled,
+                )
+                if not all_playables:
+                    bump("no_url_for_any_service")
+                    skipped_no_deeplink += 1
+                    continue
+                for playable, service_label, group_label in label_playables_for_expand(all_playables, fallback=provider or "Sports", event_title=title):
+                    chan_id = stable_channel_id_for_playable(event, playable.get("playable_id"), epg_prefix)
+                    entry_title = f"{title} ({service_label})"
+                    logo_part = f'tvg-logo="{img_url}" ' if img_url else ""
+                    f.write(
+                        '#EXTINF:-1 tvg-id="{id}" tvg-name="{name}" tvg-chno="{chno}" {logo}group-title="{group}",{name}\n'.format(
+                            id=chan_id,
+                            name=entry_title.replace(",", " "),
+                            chno=idx,
+                            logo=logo_part,
+                            group=group_label.replace('"', "'"),
+                        )
+                    )
+                    f.write(f"{playable['resolved_deeplink']}\n\n")
+                    idx += 1
+                continue
+
+            chan_id = stable_channel_id(event, epg_prefix)
             deeplink_url = None
             reason = None
 
@@ -850,8 +943,9 @@ def build_direct_m3u(
                 )
             )
             f.write(f"{deeplink_url}\n\n")
+            idx += 1
 
-    print(f"Wrote Direct M3U: {m3u_path}")
+    print(f"Wrote Direct M3U: {m3u_path}{' (expand all playables ON)' if expand_all else ''}")
     if skipped_no_deeplink:
         print(f"  Skipped {skipped_no_deeplink} events with no usable deeplink")
         print("  Skip reasons:")

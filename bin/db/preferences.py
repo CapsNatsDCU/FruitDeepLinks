@@ -203,6 +203,15 @@ SETTINGS_DEFS: Dict[str, tuple] = {
         "Number of Lanes",
         "How many virtual channels (lanes) to generate.",
     ),
+    "expand_all_playables": (
+        "EXPAND_ALL_PLAYABLES", "bool", False,
+        "Show Every Source as a Separate Channel",
+        "Instead of auto-picking one \"best\" feed per event, list every enabled service's "
+        "version of the same game as its own channel (Direct export + per-provider ADB lanes) "
+        "so you can pick manually. Significantly increases channel/lane count -- you may need "
+        "to raise ADB lane counts per provider to avoid dropped duplicates. Requires a refresh "
+        "to take effect.",
+    ),
     "lane_start_ch": (
         "FRUIT_LANE_START_CH", "int", 9000,
         "Lane Start Channel",

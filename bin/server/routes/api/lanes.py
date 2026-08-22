@@ -268,7 +268,7 @@ def api_adb_lane_deeplink(provider_code, lane_number):
             # Find current adb_lanes row
             cur.execute(
                 """
-                SELECT event_id, channel_id, start_utc, stop_utc
+                SELECT event_id, channel_id, start_utc, stop_utc, playable_id
                 FROM adb_lanes
                 WHERE provider_code = ? AND lane_number = ?
                   AND datetime(start_utc) <= datetime(?) AND datetime(stop_utc) > datetime(?)
@@ -319,7 +319,9 @@ def api_adb_lane_deeplink(provider_code, lane_number):
                 })
 
             db_event_id = event_row["id"]
-            provider_link = get_provider_playable_link(conn, db_event_id, provider_code)
+            provider_link = get_provider_playable_link(
+                conn, db_event_id, provider_code, playable_id=adb_row["playable_id"]
+            )
             deeplink_url = provider_link.get("deeplink")
             espn_graph_id = provider_link.get("espn_graph_id")
             service_name = provider_link.get("service_name")

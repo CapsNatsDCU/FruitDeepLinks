@@ -9,11 +9,32 @@ import json
 import os
 import re
 import sqlite3
+import time
 import urllib.parse
 from datetime import datetime as _dt, timedelta, timezone
 from typing import Optional
 
 from server.logging_setup import log
+
+# Short TTL cache for load_user_preferences() as read by get_provider_playable_link()
+# below, which ADBTuner clients can call every few seconds via /whatson/<n>. The
+# preferences table rarely changes and a few seconds of staleness after a Settings/
+# Filters save is an acceptable tradeoff for not re-scanning it on every tune poll.
+_PREFS_CACHE_TTL_SECONDS = 5
+_prefs_cache: dict = {"prefs": None, "loaded_at": 0.0}
+
+
+def _load_user_preferences_cached(conn: sqlite3.Connection) -> dict:
+    now = time.monotonic()
+    if _prefs_cache["prefs"] is not None and (now - _prefs_cache["loaded_at"]) < _PREFS_CACHE_TTL_SECONDS:
+        return _prefs_cache["prefs"]
+
+    from filter_integration import load_user_preferences
+
+    prefs = load_user_preferences(conn)
+    _prefs_cache["prefs"] = prefs
+    _prefs_cache["loaded_at"] = now
+    return prefs
 
 # Pulls a UUID out of either the current bare-UUID espn_graph_id format or the
 # legacy "espn-watch:{playID}:{hash}" format written before 2026-01-23.
@@ -372,10 +393,21 @@ def get_event_link_columns(conn: sqlite3.Connection):
     return uid_col, primary, full
 
 
-def get_provider_playable_link(conn: sqlite3.Connection, event_id: str, provider_code: str) -> dict:
+def get_provider_playable_link(
+    conn: sqlite3.Connection, event_id: str, provider_code: str, playable_id: Optional[str] = None
+) -> dict:
     """Return provider-specific deeplink info for an event from playables.
 
-    Bypasses enabled_services selection — used by provider-based ADB lanes.
+    Used by provider-based ADB lanes. Bypasses enabled_services selection for
+    single-logical-service providers; for multi-service providers ('aiv',
+    'sportscenter') it consults enabled_services/service_priorities to pick
+    the preferred sibling instead of an arbitrary one on a database-priority
+    tie (see the mapped-services block below).
+
+    If playable_id is given (set on the adb_lanes row by "expand all
+    playables" mode, where each sibling gets its own lane), it is resolved
+    directly instead of picking a "best" sibling -- the whole point of that
+    mode is showing this specific feed on this specific lane.
     """
     empty = {"deeplink": None, "http_deeplink_url": None, "playable_id": None,
              "espn_graph_id": None, "service_name": None}
@@ -408,6 +440,37 @@ def get_provider_playable_link(conn: sqlite3.Connection, event_id: str, provider
             if extra:
                 select_cols.append(extra)
 
+        if playable_id and playable_id_col:
+            cur.execute(
+                f"SELECT {', '.join(select_cols)} FROM playables WHERE {event_fk} = ? AND {playable_id_col} = ? LIMIT 1",
+                (event_id, playable_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                return empty
+            r = dict(row) if isinstance(row, sqlite3.Row) else dict(zip(select_cols, row))
+            deeplink = next((r.get(c) for c in ["deeplink_play", "deeplink_open", "playable_url"] if r.get(c)), None)
+            espn_id = r.get(espn_col) if espn_col else None
+            if provider_code.lower() in ("sportscenter", "espn", "espn+") and espn_id and deeplink:
+                try:
+                    m = _ESPN_UUID_RE.search(espn_id)
+                    if not m:
+                        raise ValueError("espn_graph_id has no extractable UUID")
+                    playback_id = m.group(0)
+                    if deeplink.startswith("sportscenter://"):
+                        deeplink = f"sportscenter://x-callback-url/showWatchStream?playID={playback_id}"
+                    elif deeplink.startswith("http"):
+                        deeplink = f"https://www.espn.com/watch/player/_/id/{playback_id}"
+                except Exception:
+                    pass
+            return {
+                "deeplink": deeplink,
+                "http_deeplink_url": r.get(http_col) if http_col else None,
+                "playable_id": r.get(playable_id_col) if playable_id_col else None,
+                "espn_graph_id": espn_id,
+                "service_name": r.get(svc_name_col) if svc_name_col else None,
+            }
+
         mapped = None
         params = [event_id]
         if logical_col:
@@ -426,20 +489,21 @@ def get_provider_playable_link(conn: sqlite3.Connection, event_id: str, provider
 
         is_espn = provider_code.lower() in ("sportscenter", "espn", "espn+")
 
-        # Amazon ADB lanes combine every aiv_* sub-service under provider_code
-        # "aiv". Reuse the same filtered ordering shown as Computed Best rather
-        # than selecting an arbitrary sibling when database priorities tie.
+        # Amazon and ESPN ADB lanes each combine several logical sub-services
+        # under one provider_code ('aiv' for aiv_*; 'sportscenter' for
+        # espn_*). Reuse the same enabled/priority-aware filtered ordering
+        # shown as Computed Best rather than selecting an arbitrary sibling
+        # (by hardcoded service_name order) when database priorities tie.
         preferred_playable_id = None
-        amazon_filter_applied = False
-        if provider_code.lower() == "aiv" and logical_col and playable_id_col and mapped:
+        multi_service_filter_applied = False
+        if (provider_code.lower() == "aiv" or is_espn) and logical_col and playable_id_col and mapped:
             try:
                 from filter_integration import (
                     expand_enabled_services_for_amazon,
                     get_filtered_playables,
-                    load_user_preferences,
                 )
 
-                prefs = load_user_preferences(conn)
+                prefs = _load_user_preferences_cached(conn)
                 enabled = expand_enabled_services_for_amazon(
                     conn, prefs.get("enabled_services", [])
                 )
@@ -450,6 +514,7 @@ def get_provider_playable_link(conn: sqlite3.Connection, event_id: str, provider
                     priority_map=prefs.get("service_priorities", {}),
                     amazon_penalty=prefs.get("amazon_penalty", True),
                     amazon_master_enabled=prefs.get("amazon_master_enabled", True),
+                    language_preference=prefs.get("language_preference", "en"),
                 )
                 mapped_services = set(mapped)
                 preferred = next(
@@ -457,11 +522,11 @@ def get_provider_playable_link(conn: sqlite3.Connection, event_id: str, provider
                     None,
                 )
                 preferred_playable_id = preferred.get("playable_id") if preferred else None
-                amazon_filter_applied = True
+                multi_service_filter_applied = True
             except Exception as e:
-                log(f"Amazon ADB playable filtering failed for {event_id}: {e}", "WARNING")
+                log(f"ADB playable filtering failed for {provider_code}/{event_id}: {e}", "WARNING")
 
-        if amazon_filter_applied and not preferred_playable_id:
+        if multi_service_filter_applied and not preferred_playable_id:
             return empty
 
         if preferred_playable_id:
