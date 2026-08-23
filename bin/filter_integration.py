@@ -124,6 +124,13 @@ def load_user_preferences(conn: sqlite3.Connection) -> Dict[str, Any]:
             except Exception:
                 result[k] = defaults[k]
 
+        # Upgrade persisted legacy codes on read as well as on save. Several
+        # background/export paths consume preferences without a UI save first.
+        result["enabled_services"] = [
+            get_canonical_service_code(service)
+            for service in result["enabled_services"]
+        ]
+
         # Service priorities (merge user overrides onto defaults)
         v = raw.get("service_priorities", None)
         if v is not None:

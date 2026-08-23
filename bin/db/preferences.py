@@ -72,7 +72,10 @@ def load(conn: sqlite3.Connection) -> Dict[str, Any]:
         v = _json(key, [])
         return v if isinstance(v, list) else []
 
-    result["enabled_services"] = _list("enabled_services")
+    result["enabled_services"] = [
+        get_canonical_service_code(service)
+        for service in _list("enabled_services")
+    ]
     result["disabled_sports"] = _list("disabled_sports")
     result["disabled_leagues"] = _list("disabled_leagues")
     result["service_priorities"] = _json("service_priorities", {})

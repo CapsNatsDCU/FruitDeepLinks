@@ -43,6 +43,12 @@ except ImportError:
     def get_setting(conn, key, fallback=None):
         return fallback
 
+try:
+    from core.service_catalog import get_canonical_service_code
+except ImportError:
+    def get_canonical_service_code(service_code):
+        return service_code
+
 
 UTC = dt.timezone.utc
 
@@ -83,6 +89,7 @@ def load_user_preferences(conn: sqlite3.Connection, log: logging.Logger) -> Dict
         "disabled_sports": [],
         "disabled_leagues": [],
         "language_preference": "en",
+        "amazon_master_enabled": True,
     }
 
     if not table_exists(conn, "user_preferences"):
@@ -126,7 +133,10 @@ def load_user_preferences(conn: sqlite3.Connection, log: logging.Logger) -> Dict
         return []
         return []
 
-    prefs["enabled_services"] = get_list("enabled_services")
+    prefs["enabled_services"] = [
+        get_canonical_service_code(service)
+        for service in get_list("enabled_services")
+    ]
     prefs["disabled_sports"] = get_list("disabled_sports")
     prefs["disabled_leagues"] = get_list("disabled_leagues")
 
@@ -135,6 +145,12 @@ def load_user_preferences(conn: sqlite3.Connection, log: logging.Logger) -> Dict
         lang = safe_json_loads(lang_raw) if isinstance(lang_raw, str) else lang_raw
         if isinstance(lang, str) and lang in ("en", "es", "both"):
             prefs["language_preference"] = lang
+
+    amazon_master_raw = raw.get("amazon_master_enabled")
+    if amazon_master_raw is not None:
+        parsed = safe_json_loads(amazon_master_raw) if isinstance(amazon_master_raw, str) else amazon_master_raw
+        if isinstance(parsed, bool):
+            prefs["amazon_master_enabled"] = parsed
 
     log.info(
         "ADB filters loaded: enabled_services=%s disabled_sports=%d disabled_leagues=%d",
@@ -479,6 +495,7 @@ def build_adb_lanes(db_path: str, provider_filter: Optional[str] = None) -> None
     disabled_leagues: List[str] = prefs.get("disabled_leagues") or []
     expand_all_playables: bool = bool(get_setting(conn, "expand_all_playables", False))
     language_preference: str = prefs.get("language_preference", "en")
+    amazon_master_enabled: bool = prefs.get("amazon_master_enabled", True)
     max_event_minutes: int = int(get_setting(conn, "max_event_minutes", 0) or 0)
     if expand_all_playables:
         log.info("Expand-all-playables mode ON: one ADB lane per sibling playable instead of one per event.")
@@ -515,6 +532,10 @@ def build_adb_lanes(db_path: str, provider_filter: Optional[str] = None) -> None
 
     for provider_code, lane_count in providers:
         clear_adb_lanes(conn, provider_code, log)
+
+        if provider_code == "aiv" and not amazon_master_enabled:
+            log.info("Skipping provider %s because the Amazon master toggle is disabled", provider_code)
+            continue
 
         # Only enforce enabled_services when the user explicitly set a non-empty allowlist.
         # Check if ANY of the logical services mapped to this ADB provider are enabled.

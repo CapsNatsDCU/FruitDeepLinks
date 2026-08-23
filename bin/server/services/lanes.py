@@ -21,19 +21,35 @@ from server.logging_setup import log
 # preferences table rarely changes and a few seconds of staleness after a Settings/
 # Filters save is an acceptable tradeoff for not re-scanning it on every tune poll.
 _PREFS_CACHE_TTL_SECONDS = 5
-_prefs_cache: dict = {"prefs": None, "loaded_at": 0.0}
+_prefs_cache: dict[str, dict] = {}
+
+
+def _preferences_cache_key(conn: sqlite3.Connection) -> Optional[str]:
+    """Return the main database path, or None for transient databases."""
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        db_path = row[2] if row and len(row) > 2 else None
+        return os.path.realpath(db_path) if db_path else None
+    except Exception:
+        return None
 
 
 def _load_user_preferences_cached(conn: sqlite3.Connection) -> dict:
-    now = time.monotonic()
-    if _prefs_cache["prefs"] is not None and (now - _prefs_cache["loaded_at"]) < _PREFS_CACHE_TTL_SECONDS:
-        return _prefs_cache["prefs"]
-
     from filter_integration import load_user_preferences
 
+    cache_key = _preferences_cache_key(conn)
+    if cache_key is None:
+        # SQLite reports no filename for :memory:/temporary databases. Avoid
+        # caching those so preferences cannot leak between transient DBs.
+        return load_user_preferences(conn)
+
+    now = time.monotonic()
+    cached = _prefs_cache.get(cache_key)
+    if cached is not None and (now - cached["loaded_at"]) < _PREFS_CACHE_TTL_SECONDS:
+        return cached["prefs"]
+
     prefs = load_user_preferences(conn)
-    _prefs_cache["prefs"] = prefs
-    _prefs_cache["loaded_at"] = now
+    _prefs_cache[cache_key] = {"prefs": prefs, "loaded_at": now}
     return prefs
 
 # Pulls a UUID out of either the current bare-UUID espn_graph_id format or the
@@ -441,6 +457,15 @@ def get_provider_playable_link(
                 select_cols.append(extra)
 
         if playable_id and playable_id_col:
+            # Expand-all-playables rows are resolved directly, but the Amazon
+            # master toggle must still fail closed. The Filters UI deliberately
+            # leaves individual aiv_* selections intact when the master is off,
+            # so the route-level enabled-services check alone is insufficient.
+            if provider_code.lower() == "aiv":
+                prefs = _load_user_preferences_cached(conn)
+                if not prefs.get("amazon_master_enabled", True):
+                    return empty
+
             cur.execute(
                 f"SELECT {', '.join(select_cols)} FROM playables WHERE {event_fk} = ? AND {playable_id_col} = ? LIMIT 1",
                 (event_id, playable_id),

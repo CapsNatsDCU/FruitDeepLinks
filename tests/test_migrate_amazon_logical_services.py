@@ -187,6 +187,30 @@ class MigrateEndToEndTest(unittest.TestCase):
         )
         self.assertEqual(prime_result, "aiv_aggregator")
 
+    def test_existing_sibling_classification_is_repaired_on_upgrade(self):
+        content_gti = _gti("content-existing-bad-classification")
+        prime_broadcast = _gti("broadcast-existing-prime")
+        willow_broadcast = _gti("broadcast-existing-willow")
+
+        self._insert_playable("event-upgrade", prime_broadcast, content_gti)
+        self._insert_playable("event-upgrade", willow_broadcast, content_gti)
+
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "UPDATE playables SET logical_service='aiv_willow' WHERE event_id=?",
+            ("event-upgrade",),
+        )
+        conn.commit()
+        conn.close()
+
+        self._insert_amazon_channel(willow_broadcast, "aiv_willow", "Willow TV")
+        self._insert_amazon_channel(content_gti, "aiv_willow", "Willow TV")
+
+        mals.migrate(self.db_path)
+
+        self.assertEqual(self._logical_service_for(willow_broadcast), "aiv_willow")
+        self.assertEqual(self._logical_service_for(prime_broadcast), "aiv_aggregator")
+
     def test_single_feed_event_still_resolves_via_content_gti_fallback(self):
         # Regression guard: unambiguous (single-feed) events must be unaffected.
         content_gti = _gti("content-tennis")

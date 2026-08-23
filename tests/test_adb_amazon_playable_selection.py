@@ -1,13 +1,22 @@
 import json
+import logging
 import sqlite3
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 import filter_integration  # noqa: E402
-from server.services.lanes import get_provider_playable_link  # noqa: E402
+from fruit_build_adb_lanes import (  # noqa: E402
+    build_adb_lanes,
+    load_user_preferences as load_adb_preferences,
+)
+from server.services.lanes import (  # noqa: E402
+    _load_user_preferences_cached,
+    get_provider_playable_link,
+)
 
 
 class AmazonAdbPlayableSelectionTest(unittest.TestCase):
@@ -125,6 +134,79 @@ class AmazonAdbPlayableSelectionTest(unittest.TestCase):
         self.assertIsNone(actual["deeplink"])
         self.assertIsNone(actual["playable_id"])
 
+    def test_pinned_playable_respects_disabled_amazon_master(self):
+        self.insert_playable("amzn1.dv.gti.prime", "aiv_prime")
+        self.set_preferences(["aiv_prime"], amazon_master_enabled=False)
+
+        actual = get_provider_playable_link(
+            self.conn,
+            "event-1",
+            "aiv",
+            playable_id="amzn1.dv.gti.prime",
+        )
+
+        self.assertIsNone(actual["deeplink"])
+        self.assertIsNone(actual["playable_id"])
+
+    def test_adb_builder_normalizes_legacy_enabled_service_alias(self):
+        self.set_preferences(["aiv_watch_for_free"])
+
+        prefs = load_adb_preferences(self.conn, logging.getLogger(__name__))
+
+        self.assertEqual(prefs["enabled_services"], ["aiv_free"])
+
+    def test_preferences_cache_is_isolated_by_database_path(self):
+        def open_preferences_db(path, enabled_services):
+            conn = sqlite3.connect(path)
+            conn.execute(
+                "CREATE TABLE user_preferences (key TEXT PRIMARY KEY, value TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO user_preferences (key, value) VALUES (?, ?)",
+                ("enabled_services", json.dumps(enabled_services)),
+            )
+            conn.commit()
+            return conn
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            conn1 = open_preferences_db(Path(temp_dir) / "one.db", ["aiv_prime"])
+            conn2 = open_preferences_db(Path(temp_dir) / "two.db", ["aiv_free"])
+            try:
+                prefs1 = _load_user_preferences_cached(conn1)
+                prefs2 = _load_user_preferences_cached(conn2)
+
+                self.assertEqual(prefs1["enabled_services"], ["aiv_prime"])
+                self.assertEqual(prefs2["enabled_services"], ["aiv_free"])
+            finally:
+                conn1.close()
+                conn2.close()
+
+    def test_builder_clears_amazon_lanes_when_master_disabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "lanes.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                CREATE TABLE adb_lanes (provider_code TEXT, lane_number INTEGER, channel_id TEXT, event_id TEXT, start_utc TEXT, stop_utc TEXT, playable_id TEXT, playable_label TEXT);
+                CREATE TABLE provider_lanes (provider_code TEXT, adb_enabled INTEGER, adb_lane_count INTEGER);
+                CREATE TABLE user_preferences (key TEXT PRIMARY KEY, value TEXT);
+                INSERT INTO provider_lanes VALUES ('aiv', 1, 1);
+                INSERT INTO adb_lanes VALUES ('aiv', 1, 'aiv01', 'old-event', '2026-01-01', '2026-01-02', 'old-playable', 'Prime');
+                """
+            )
+            conn.execute(
+                "INSERT INTO user_preferences (key, value) VALUES (?, ?)",
+                ("amazon_master_enabled", json.dumps(False)),
+            )
+            conn.commit()
+            conn.close()
+
+            build_adb_lanes(str(db_path))
+
+            with sqlite3.connect(db_path) as check_conn:
+                remaining = check_conn.execute("SELECT COUNT(*) FROM adb_lanes").fetchone()[0]
+
+            self.assertEqual(remaining, 0)
 
 if __name__ == "__main__":
     unittest.main()

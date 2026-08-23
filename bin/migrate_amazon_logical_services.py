@@ -336,15 +336,19 @@ def migrate(db_path: str) -> int:
             # re-derive that same sibling classification on the next export,
             # silently undoing this guard. Persist aiv_aggregator explicitly so
             # that live recompute is short-circuited (it only fires when the
-            # stored value is falsy). Never overwrite an existing classification.
+            # stored value is falsy). This must also replace a pre-existing
+            # classification: installed databases may already contain the
+            # sibling-derived value written by the old migration, which is the
+            # primary upgrade case this guard is intended to repair.
             content_has_data = (
                 bool(content_gti) and content_gti in by_gti and _has_channel_data(by_gti[content_gti])
             )
-            if content_is_ambiguous and content_has_data and not raw_ls:
-                conn.execute(
-                    "UPDATE playables SET logical_service='aiv_aggregator' WHERE rowid=?",
-                    (rowid,),
-                )
+            if content_is_ambiguous and content_has_data:
+                if raw_ls != "aiv_aggregator":
+                    conn.execute(
+                        "UPDATE playables SET logical_service='aiv_aggregator' WHERE rowid=?",
+                        (rowid,),
+                    )
                 ambiguous_blocked += 1
             continue
 
