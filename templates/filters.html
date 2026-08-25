@@ -220,7 +220,12 @@ function renderAmazonServices() {
   loading.style.display = 'none'; grid.style.display = 'grid';
 }
 
-function toggleAmazonMaster() { currentPreferences.amazon_master_enabled = !currentPreferences.amazon_master_enabled; renderAmazonServices(); loadSelectionExamples(); }
+function toggleAmazonMaster() {
+  currentPreferences.amazon_master_enabled = !currentPreferences.amazon_master_enabled;
+  renderAmazonServices();
+  renderPriorities();
+  loadSelectionExamples();
+}
 function toggleAmazonService(scheme) {
   if (currentPreferences.amazon_master_enabled === false) return;
   if (currentPreferences.enabled_services.length === 0) {
@@ -258,9 +263,17 @@ function renderLeagues() {
 
 function renderPriorities() {
   const container = document.getElementById('priority-list'), loading = document.getElementById('priority-loading');
-  const all = [...(availableFilters.providers||[]),...(availableFilters.amazon_services||[])];
+  const amazonServices = currentPreferences.amazon_master_enabled === false ? [] : (availableFilters.amazon_services||[]);
+  const all = [...(availableFilters.providers||[]),...amazonServices];
   const enabled = currentPreferences.enabled_services.length === 0 ? all : all.filter(p => currentPreferences.enabled_services.includes(p.scheme));
-  if (!enabled.length) { loading.textContent = 'No services enabled. Enable services above to set priorities.'; return; }
+  if (!enabled.length) {
+    if (sortableInstance) { sortableInstance.destroy(); sortableInstance = null; }
+    container.innerHTML = '';
+    container.style.display = 'none';
+    loading.textContent = 'No services enabled. Enable services above to set priorities.';
+    loading.style.display = 'block';
+    return;
+  }
   enabled.sort((a,b) => (currentPreferences.service_priorities[b.scheme]||50) - (currentPreferences.service_priorities[a.scheme]||50));
   container.innerHTML = enabled.map(p => {
     const pri = currentPreferences.service_priorities[p.scheme]||50;
