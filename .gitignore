@@ -45,6 +45,8 @@ desktop.ini
 # Logs
 *.log
 logs/
+# Generated debug artifacts
+bin/espn_unmatched_debug.txt
 # Test files
 .pytest_cache/
 .coverage
