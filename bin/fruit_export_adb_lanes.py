@@ -65,6 +65,20 @@ except ImportError:
             return f"{synopsis} - Available on {provider_name}"
         return synopsis
 
+# ESPN and Amazon ADB lanes each collapse several distinct logical services
+# (espn_unlimited/espn_mlb_tv/... ; aiv_prime/aiv_free/...) into one
+# provider_code ("sportscenter" / "aiv"). Per-channel labeling can't tell
+# those apart -- get_provider_playable_link() resolves the actual entitlement
+# for one specific event+playable, used below so descriptions say e.g.
+# "ESPN Unlimited" / "ESPN (MLB.TV feed)" instead of the generic provider
+# default for every programme on the channel.
+try:
+    from server.services.lanes import get_provider_playable_link
+except ImportError:
+    def get_provider_playable_link(conn, event_id, provider_code, playable_id=None):
+        return {}
+
+
 def _pb_service_label(row: sqlite3.Row) -> Optional[str]:
     """Disambiguated service label for a row's specific expand-all-playables
     sibling (computed once at lane-build time across all of the event's
@@ -462,8 +476,24 @@ def export_adb_lanes(db_path: Path, out_dir: Path, server_url: str) -> Path:
                 title_el = ET.SubElement(prog_el, "title")
                 title_el.text = title
 
-                # Description - use enhanced builder for ESPN-style formatting
-                provider_display = get_provider_display_name(provider_code) or provider_label
+                # Description - use enhanced builder for ESPN-style formatting.
+                # Resolve the actual per-event entitlement (e.g. "ESPN
+                # Unlimited" vs "ESPN (MLB.TV feed)") instead of the channel's
+                # generic provider_code label -- ESPN/Amazon ADB lanes
+                # collapse several distinct logical services onto one
+                # provider_code, so every programme on the channel would
+                # otherwise show the same generic description regardless of
+                # which entitlement it actually resolved to.
+                link = get_provider_playable_link(
+                    conn, row["event_id"], provider_code,
+                    playable_id=row["adb_playable_id"] if "adb_playable_id" in row.keys() else None,
+                )
+                resolved_ls = link.get("logical_service") if link else None
+                provider_display = (
+                    (get_provider_display_name(resolved_ls) if resolved_ls else None)
+                    or get_provider_display_name(provider_code)
+                    or provider_label
+                )
                 desc_text = build_enhanced_description(dict(row), provider_name=provider_display)
                 desc_el = ET.SubElement(prog_el, "desc")
                 desc_el.text = desc_text

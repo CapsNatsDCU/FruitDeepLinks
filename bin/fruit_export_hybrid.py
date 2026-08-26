@@ -31,6 +31,7 @@ try:
         load_user_preferences,
         should_include_event,
         get_best_deeplink_for_event,
+        get_best_playable_for_event,
         get_all_deeplinks_for_event,
         get_fallback_deeplink,
         expand_enabled_services_for_amazon,
@@ -48,6 +49,9 @@ except ImportError:
         return True
 
     def get_best_deeplink_for_event(conn, event_id, services):
+        return None
+
+    def get_best_playable_for_event(conn, event_id, services, *args, **kwargs):
         return None
 
     def get_all_deeplinks_for_event(conn, event_id, services, *args, **kwargs):
@@ -72,11 +76,15 @@ try:
     from xmltv_helpers import (
         build_enhanced_description,
         build_enhanced_title,
+        get_base_service_label,
         get_service_label_for_playable,
         label_playables_for_expand,
     )
 except ImportError:
     # Fallback if not in path
+    def get_base_service_label(playable, fallback="Sports"):
+        return (playable or {}).get("service_name") or fallback
+
     def build_enhanced_title(event):
         import re
         # Get title - never use synopsis/description
@@ -563,37 +571,23 @@ def build_direct_xmltv(
 
         chan_id = stable_channel_id(event, epg_prefix)
 
-        # Get deeplink URL using similar logic as M3U
+        # Get deeplink URL + provider label from the SAME winning playable --
+        # not re-derived from the deeplink's URL scheme afterward, which
+        # collapsed every espn_* variant (Unlimited/Plus/Linear/MLB.TV/MLB
+        # Network) to the same generic "ESPN+" label since they all share
+        # the sportscenter:// scheme regardless of actual logical_service.
+        # get_best_deeplink_for_event() already applies the ESPN Graph ID
+        # swap for the specific winning playable internally, so no separate
+        # correction pass is needed here.
         deeplink_url = None
+        provider = None
         if FILTERING_AVAILABLE:
-            # Try filtered playables first
-            deeplink_url = get_best_deeplink_for_event(conn, event_id, enabled_services, priority_map, amazon_penalty, language_preference)
-
-            # ESPN FIX: Apply ESPN Graph ID correction to XMLTV path too
-            if deeplink_url and deeplink_url.startswith("sportscenter://"):
-                try:
-                    cur.execute(
-                        """SELECT provider, espn_graph_id, logical_service
-                           FROM playables
-                           WHERE event_id = ?""",
-                        (event_id,),
-                    )
-                    for prow in cur.fetchall():
-                        # Handle sqlite3.Row objects (use dict access, not .get())
-                        raw_provider = prow["provider"] if prow["provider"] else ""
-                        if raw_provider.lower() not in ('sportscenter', 'espn', 'espn+'):
-                            continue
-
-                        # sqlite3.Row uses dict-style access
-                        espn_graph_id = prow["espn_graph_id"] if "espn_graph_id" in prow.keys() else None
-                        if espn_graph_id:
-                            parts = espn_graph_id.split(':')
-                            if len(parts) >= 2:
-                                play_id = parts[1]
-                                deeplink_url = f"sportscenter://x-callback-url/showWatchStream?playID={play_id}"
-                                break
-                except Exception:
-                    pass
+            best_playable = get_best_playable_for_event(
+                conn, event_id, enabled_services, priority_map, amazon_penalty, language_preference
+            )
+            if best_playable:
+                deeplink_url = get_best_deeplink_for_event(conn, event_id, enabled_services, priority_map, amazon_penalty, language_preference)
+                provider = get_base_service_label(best_playable, fallback=None)
 
         if not deeplink_url and FILTERING_AVAILABLE:
             # Fallback to raw_attributes
@@ -607,44 +601,6 @@ def build_direct_xmltv(
                 deeplink_url = "https://www.peacocktv.com/deeplink?deeplinkData=" + urllib.parse.quote(
                     json.dumps(payload, separators=(",", ":"), ensure_ascii=False), safe=""
                 )
-
-        # Determine human-readable provider from the SELECTED deeplink
-        provider = None
-
-        if FILTERING_AVAILABLE and deeplink_url:
-            try:
-                from logical_service_mapper import get_service_display_name, get_logical_service_for_playable
-                from provider_utils import extract_provider_from_url, get_provider_display_name, get_display_name_from_domain
-
-                # Extract provider from the actual deeplink URL scheme
-                scheme = extract_provider_from_url(deeplink_url)
-
-                # Check if it's a recognized provider scheme
-                if scheme and scheme not in ("http", "https", "unknown"):
-                    # Try to get display name from provider_utils first
-                    provider = get_provider_display_name(scheme)
-                    # If it's not in provider_utils, try logical service mapper
-                    if provider == scheme.upper():  # Fallback display (not found)
-                        try:
-                            logical_service = get_logical_service_for_playable(
-                                provider=scheme,
-                                deeplink_play=deeplink_url,
-                                deeplink_open=None,
-                                playable_url=None,
-                                event_id=event_id,
-                                conn=conn,
-                            )
-                            provider = get_service_display_name(logical_service)
-                        except:
-                            pass
-                elif scheme in ("http", "https"):
-                    # For web URLs, check domain for provider name
-                    provider = get_display_name_from_domain(deeplink_url)
-                    if not provider:
-                        provider = "Web"
-            except Exception as e:
-                # Fall back to database channel_name if detection fails
-                pass
 
         # Final fallback: use database channel_name provider
         if not provider:
@@ -757,9 +713,20 @@ def build_direct_m3u(
             except Exception:
                 p_rows = []
 
+            # Winning playable dict (not just its deeplink string) so the
+            # group-title below can use its actual logical_service instead of
+            # re-deriving a label from the deeplink's URL scheme afterward --
+            # every espn_* variant (Unlimited/Plus/Linear/MLB.TV/MLB Network)
+            # shares the sportscenter:// scheme, so that re-derivation always
+            # collapsed to the same generic "ESPN+" regardless of which one
+            # actually won.
+            best_playable = get_best_playable_for_event(
+                conn, event_id, enabled_services, priority_map, amazon_penalty, language_preference
+            ) if FILTERING_AVAILABLE else None
+
             if FILTERING_AVAILABLE and p_rows:
                 deeplink_url = get_best_deeplink_for_event(conn, event_id, enabled_services, priority_map, amazon_penalty, language_preference)
-                
+
                 # ESPN FIX: Apply ESPN Graph ID correction to filtered result
                 # get_best_deeplink_for_event returns the raw deeplink_play from database
                 # We need to correct ESPN deeplinks to use Graph IDs when available
@@ -888,14 +855,18 @@ def build_direct_m3u(
                 skipped_no_deeplink += 1
                 continue
 
-            # Determine actual provider from the SELECTED deeplink, not the database channel_name
-            actual_provider = None
-            
-            if FILTERING_AVAILABLE:
+            # Determine actual provider label. Prefer the winning playable's
+            # own logical_service (correct even when multiple ESPN entitlement
+            # tiers share one URL scheme) -- only fall back to re-deriving
+            # from the deeplink URL for paths that never resolved a playable
+            # dict at all (raw_attributes-only / Peacock fallback events).
+            actual_provider = get_base_service_label(best_playable, fallback=None) if best_playable else None
+
+            if not actual_provider and FILTERING_AVAILABLE:
                 try:
                     from logical_service_mapper import get_service_display_name, get_logical_service_for_playable
                     from provider_utils import extract_provider_from_url, get_provider_display_name, get_display_name_from_domain
-                    
+
                     # Extract provider from the actual deeplink URL scheme
                     scheme = extract_provider_from_url(deeplink_url)
                     if scheme and scheme not in ("http", "https", "unknown"):

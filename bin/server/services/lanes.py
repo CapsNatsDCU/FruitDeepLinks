@@ -426,7 +426,7 @@ def get_provider_playable_link(
     mode is showing this specific feed on this specific lane.
     """
     empty = {"deeplink": None, "http_deeplink_url": None, "playable_id": None,
-             "espn_graph_id": None, "service_name": None}
+             "espn_graph_id": None, "service_name": None, "logical_service": None}
     if not event_id or not provider_code:
         return empty
 
@@ -452,7 +452,7 @@ def get_provider_playable_link(
             return empty
 
         select_cols = deeplink_cols[:]
-        for extra in (http_col, playable_id_col, espn_col, svc_name_col):
+        for extra in (http_col, playable_id_col, espn_col, svc_name_col, logical_col):
             if extra:
                 select_cols.append(extra)
 
@@ -494,6 +494,7 @@ def get_provider_playable_link(
                 "playable_id": r.get(playable_id_col) if playable_id_col else None,
                 "espn_graph_id": espn_id,
                 "service_name": r.get(svc_name_col) if svc_name_col else None,
+                "logical_service": r.get(logical_col) if logical_col else None,
             }
 
         mapped = None
@@ -614,6 +615,7 @@ def get_provider_playable_link(
             "playable_id": r.get(playable_id_col) if playable_id_col else None,
             "espn_graph_id": espn_id,
             "service_name": r.get(svc_name_col) if svc_name_col else None,
+            "logical_service": r.get(logical_col) if logical_col else None,
         }
     except Exception:
         return empty
