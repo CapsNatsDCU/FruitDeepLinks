@@ -365,6 +365,31 @@ def get_canonical_service_code(service_code: str) -> str:
     return LEGACY_SERVICE_ALIASES.get(service_code, service_code)
 
 
+# Reverse of LEGACY_SERVICE_ALIASES: canonical code -> legacy codes that
+# resolve to it. Built once at import time.
+_LEGACY_ALIASES_BY_CANONICAL: dict[str, list[str]] = {}
+for _legacy_code, _canonical_code in LEGACY_SERVICE_ALIASES.items():
+    _LEGACY_ALIASES_BY_CANONICAL.setdefault(_canonical_code, []).append(_legacy_code)
+
+
+def expand_with_legacy_aliases(service_codes) -> list[str]:
+    """Given canonical service codes, return them plus any legacy alias codes
+    that resolve to them.
+
+    For SQL WHERE clauses that compare directly against a
+    playables.logical_service value that might still be an un-migrated
+    legacy alias -- get_canonical_service_code() normalizes a single value,
+    but a raw `logical_service IN (...)` clause built only from the
+    (already-canonical) enabled_services list can't match a row that's still
+    tagged with the old code. Expanding the candidate list first keeps the
+    query a plain string match while still catching legacy-tagged rows.
+    """
+    expanded = list(service_codes)
+    for code in service_codes:
+        expanded.extend(_LEGACY_ALIASES_BY_CANONICAL.get(code, []))
+    return expanded
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

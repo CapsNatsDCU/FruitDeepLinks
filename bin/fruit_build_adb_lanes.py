@@ -44,10 +44,13 @@ except ImportError:
         return fallback
 
 try:
-    from core.service_catalog import get_canonical_service_code
+    from core.service_catalog import get_canonical_service_code, expand_with_legacy_aliases
 except ImportError:
     def get_canonical_service_code(service_code):
         return service_code
+
+    def expand_with_legacy_aliases(service_codes):
+        return list(service_codes)
 
 # Shared with filter_integration.get_filtered_playables() so the
 # espn_unlimited -> espn_mlb_tv/espn_mlb_network wildcard rule can't drift
@@ -312,6 +315,11 @@ def load_events_for_provider(
             allowed = [s for s in enabled_services if isinstance(s, str) and s.startswith("aiv_")]
             if not allowed:
                 return []
+            # Also match any legacy alias of an allowed code (e.g. a playable
+            # still tagged 'aiv_watch_for_free' when 'aiv_free' is enabled) --
+            # this compares the raw DB value directly, so it can't go through
+            # get_canonical_service_code() per-row without a SQL CASE.
+            allowed = expand_with_legacy_aliases(allowed)
             placeholders = ",".join("?" * len(allowed))
             where = f"p.logical_service IN ({placeholders})"
             params = allowed
@@ -351,6 +359,10 @@ def load_events_for_provider(
         if not logical_services:
             # No enabled services for this provider
             return []
+
+        # Also match any legacy alias of a matched code -- see the aiv branch
+        # above for why (raw DB value comparison, no per-row normalization).
+        logical_services = expand_with_legacy_aliases(logical_services)
 
         placeholders = ",".join("?" * len(logical_services))
         group_or_order = "GROUP BY e.id" if not expand_all_playables else "ORDER BY e.start_utc ASC, p.priority ASC"

@@ -17,10 +17,13 @@ from db import preferences as prefs_dal
 # individual helper modules haven't been migrated yet.
 try:
     from logical_service_mapper import get_all_logical_services_with_counts
-    from core.service_catalog import get_display_name
+    from core.service_catalog import get_display_name, get_canonical_service_code
     _LOGICAL_SERVICES_AVAILABLE = True
 except ImportError:
     _LOGICAL_SERVICES_AVAILABLE = False
+
+    def get_canonical_service_code(service_code):
+        return service_code
 
 try:
     from filter_integration import expand_enabled_services_for_amazon
@@ -105,7 +108,20 @@ def _build_filters(conn: sqlite3.Connection) -> Dict[str, Any]:
 
     if _LOGICAL_SERVICES_AVAILABLE:
         try:
-            service_counts = get_all_logical_services_with_counts(conn)
+            raw_counts = get_all_logical_services_with_counts(conn)
+            # Normalize legacy aliases (e.g. old playables tagged
+            # 'aiv_watch_for_free') to their canonical code and merge counts
+            # *before* building checkbox entries. Without this, a raw legacy
+            # code shows as its own separate, permanently-un-toggleable
+            # checkbox: saving normalizes enabled_services to the canonical
+            # code (db/preferences.py), so the legacy-keyed checkbox can never
+            # match on reload and always renders disabled again, even after
+            # being checked and saved.
+            service_counts: Dict[str, int] = {}
+            for code, count in raw_counts.items():
+                canonical = get_canonical_service_code(code)
+                service_counts[canonical] = service_counts.get(canonical, 0) + count
+
             for code, count in sorted(service_counts.items(), key=lambda x: -x[1]):
                 entry = {"scheme": code, "name": get_display_name(code), "count": count}
                 if code == "aiv" or code.startswith("aiv_"):
@@ -129,9 +145,14 @@ def _build_filters(conn: sqlite3.Connection) -> Dict[str, Any]:
                 ORDER BY count DESC
                 """
             )
+            provider_counts: Dict[str, int] = {}
             for row in cur.fetchall():
                 provider = row[0] if not hasattr(row, "__getitem__") else row["provider"]
                 count = row[1] if not hasattr(row, "__getitem__") else row["count"]
+                canonical = get_canonical_service_code(provider)
+                provider_counts[canonical] = provider_counts.get(canonical, 0) + count
+
+            for provider, count in sorted(provider_counts.items(), key=lambda x: -x[1]):
                 name = get_display_name(provider) if _LOGICAL_SERVICES_AVAILABLE else provider.upper()
                 entry = {"scheme": provider, "name": name, "count": count}
                 if provider == "aiv":

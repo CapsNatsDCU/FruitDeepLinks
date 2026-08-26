@@ -502,6 +502,17 @@ def get_provider_playable_link(
             try:
                 from adb_provider_mapper import get_logical_services_for_adb_provider
                 mapped = get_logical_services_for_adb_provider(provider_code)
+                # Also match legacy alias codes (e.g. a playable still tagged
+                # 'aiv_watch_for_free') -- this compares the raw DB value
+                # directly, so a row not yet migrated to its canonical code
+                # would otherwise be invisible to this query even when
+                # get_filtered_playables() below correctly picks it as
+                # preferred.
+                try:
+                    from core.service_catalog import expand_with_legacy_aliases
+                    mapped = expand_with_legacy_aliases(mapped)
+                except ImportError:
+                    pass
                 placeholders = ",".join("?" * len(mapped))
                 where = f"{event_fk} = ? AND {logical_col} IN ({placeholders})"
                 params.extend(mapped)
