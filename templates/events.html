@@ -140,7 +140,7 @@ async function loadProviders() {
     const data = await fetch("/api/filters").then(r=>r.json());
     const sel = document.getElementById("provider"); const keep = sel.value;
     sel.innerHTML = '<option value="">All providers</option>';
-    for (const p of [...(data.filters?.providers||[]),...(data.filters?.amazon_services||[])]) {
+    for (const p of [...(data.filters?.providers||[]),...(data.filters?.amazon_services||[]),...(data.filters?.espn_services||[])]) {
       const o = document.createElement("option"); o.value=p.scheme; o.textContent=`${p.name} (${p.count})`; sel.appendChild(o);
     }
     sel.value = keep;
