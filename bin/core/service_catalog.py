@@ -32,6 +32,20 @@ ESPN_GRANULAR_ENTITLEMENTS: frozenset = frozenset(
     set(ESPN_PACKAGE_ENTITLEMENTS.values()) | set(ESPN_NETWORK_ENTITLEMENTS.values())
 )
 
+# One Apple ESPN playable's Watch Graph program_id can carry multiple feed
+# candidates that resolve to *different* entitlements (e.g. one gated behind
+# MLB_TV, one plain "ESPN Unlimited" -- both real, independently watchable
+# streams of the same broadcast). fruit_enrich_espn.py keeps the original
+# Apple playable_id classified as whichever entitlement it already picks
+# today, and materializes the other entitlement(s) as sibling playable rows
+# so a user's actual enabled service determines which one they see, instead
+# of one entitlement silently winning for everyone. This marker distinguishes
+# those derived rows from Apple-native ones: fruit_import_appletv.py's daily
+# upsert must not delete them (they're not present in Apple's own playables
+# list to begin with), and fruit_enrich_espn.py deletes+recreates them fresh
+# every run so they self-correct if Watch Graph's entitlement data changes.
+ESPN_ENTITLEMENT_CHILD_MARKER = "::espn-ent:"
+
 # ---------------------------------------------------------------------------
 # Service Display Names
 # Maps logical service codes -> human-readable names

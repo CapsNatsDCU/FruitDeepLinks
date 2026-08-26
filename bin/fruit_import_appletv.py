@@ -21,9 +21,10 @@ try:
     _bin_dir = os.path.dirname(__file__)
     if _bin_dir not in sys.path:
         sys.path.insert(0, _bin_dir)
-    from core.service_catalog import ESPN_GRANULAR_ENTITLEMENTS
+    from core.service_catalog import ESPN_GRANULAR_ENTITLEMENTS, ESPN_ENTITLEMENT_CHILD_MARKER
 except ImportError:
     ESPN_GRANULAR_ENTITLEMENTS = frozenset({"espn_mlb_tv", "espn_mlb_network", "espn_unlimited"})
+    ESPN_ENTITLEMENT_CHILD_MARKER = "::espn-ent:"
 
 # Provider channel number "namespaces" (kept for potential future use)
 PROVIDER_CHANNEL_RANGES = {
@@ -771,15 +772,26 @@ def upsert_playables(conn: sqlite3.Connection, event_id: str, playables: List[Tu
     # event, or every service dropped it so `playables` is now empty). Existing
     # rows are upserted below rather than deleted, so enrichment columns
     # (espn_graph_id, locale) populated by later pipeline steps survive re-import.
+    #
+    # Entitlement-split child rows (playable_id containing
+    # ESPN_ENTITLEMENT_CHILD_MARKER) are never present in Apple's own
+    # playables list -- they're derived by fruit_enrich_espn.py, which
+    # deletes and recreates them itself every run. Excluded from both
+    # branches below so this step doesn't purge them out from under it.
+    child_marker_like = f"%{ESPN_ENTITLEMENT_CHILD_MARKER}%"
     new_playable_ids = [p[1] for p in playables]
     if new_playable_ids:
         placeholders = ",".join("?" * len(new_playable_ids))
         cur.execute(
-            f"DELETE FROM playables WHERE event_id = ? AND playable_id NOT IN ({placeholders})",
-            (event_id, *new_playable_ids),
+            f"DELETE FROM playables WHERE event_id = ? AND playable_id NOT IN ({placeholders}) "
+            f"AND playable_id NOT LIKE ?",
+            (event_id, *new_playable_ids, child_marker_like),
         )
     else:
-        cur.execute("DELETE FROM playables WHERE event_id = ?", (event_id,))
+        cur.execute(
+            "DELETE FROM playables WHERE event_id = ? AND playable_id NOT LIKE ?",
+            (event_id, child_marker_like),
+        )
 
     if not playables:
         return

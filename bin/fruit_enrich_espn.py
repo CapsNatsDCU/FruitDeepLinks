@@ -19,7 +19,8 @@ import os
 import sqlite3
 import sys
 import time
-from typing import Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
 
 try:
     _bin_dir = os.path.dirname(__file__)
@@ -29,6 +30,7 @@ try:
         get_internal_priority,
         ESPN_PACKAGE_ENTITLEMENTS,
         ESPN_NETWORK_ENTITLEMENTS,
+        ESPN_ENTITLEMENT_CHILD_MARKER,
     )
     _PRIORITY_AVAILABLE = True
 except ImportError:
@@ -39,6 +41,7 @@ except ImportError:
 
     ESPN_PACKAGE_ENTITLEMENTS = {"MLB_TV": "espn_mlb_tv", "MLB_NETWORK": "espn_mlb_network"}
     ESPN_NETWORK_ENTITLEMENTS = {"ESPN Unlimited": "espn_unlimited"}
+    ESPN_ENTITLEMENT_CHILD_MARKER = "::espn-ent:"
 
 
 def _log(msg: str) -> None:
@@ -250,6 +253,78 @@ def pick_espn_candidate(
     return candidates[0]  # every candidate already used — fall back to the first
 
 
+def group_candidates_by_entitlement(candidates: List[Dict], fallback_ls: str) -> Dict[str, List[Dict]]:
+    """Group a program_id's Watch Graph candidates by the entitlement each
+    resolves to. A candidate with no specific signal (entitlement_logical_service
+    returns None) falls into `fallback_ls` -- Apple's own classification for
+    this playable -- since that candidate doesn't override anything, it *is*
+    the same entitlement Apple already thinks this is.
+    """
+    groups: Dict[str, List[Dict]] = {}
+    for c in candidates:
+        ls = entitlement_logical_service(c) or fallback_ls
+        groups.setdefault(ls, []).append(c)
+    return groups
+
+
+def extract_playback_id(espn_event: Dict) -> Optional[str]:
+    """Pull the playback UUID out of a Watch Graph feed candidate."""
+    feed_url = espn_event.get('feed_url')
+    if feed_url:
+        try:
+            if '/id/' in feed_url:
+                pid = feed_url.split('/id/')[-1].split('?')[0].split('#')[0]
+                if pid:
+                    return pid
+        except Exception:
+            pass
+    event_id = espn_event.get('id')
+    if event_id:
+        try:
+            parts = event_id.split(':')
+            if len(parts) >= 2:
+                return parts[1]
+        except Exception:
+            pass
+    return None
+
+
+def child_playable_id(base_playable_id: str, playback_id: str) -> str:
+    return f"{base_playable_id}{ESPN_ENTITLEMENT_CHILD_MARKER}{playback_id}"
+
+
+def fetch_base_playable(conn: sqlite3.Connection, event_id: str, playable_id: str) -> Optional[Dict]:
+    """Fetch the fields needed to clone a playable into an entitlement-split child row."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT provider, playable_url, title, content_id, service_name, locale
+        FROM playables WHERE event_id = ? AND playable_id = ?
+        """,
+        (event_id, playable_id),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    cols = ["provider", "playable_url", "title", "content_id", "service_name", "locale"]
+    return dict(zip(cols, row))
+
+
+def build_child_row(
+    base_row: Dict, event_id: str, cpid: str, logical_service: str,
+    playback_id: str, now_utc: str,
+) -> Tuple:
+    """Build a full playables row tuple for an entitlement-split child."""
+    deeplink = f"sportscenter://x-callback-url/showWatchStream?playID={playback_id}"
+    http_deeplink = f"https://www.espn.com/watch/player/_/id/{playback_id}"
+    return (
+        event_id, cpid, base_row.get("provider"), deeplink, deeplink,
+        base_row.get("playable_url"), base_row.get("title"), base_row.get("content_id"),
+        get_internal_priority(logical_service), now_utc, http_deeplink, playback_id,
+        base_row.get("service_name"), logical_service, base_row.get("locale"), 0,
+    )
+
+
 def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_enrich: bool = False) -> None:
     """
     Match Apple TV ESPN playables with ESPN Watch Graph events.
@@ -296,55 +371,53 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
     matched = 0
     unmatched = 0
     reclassified = 0
+    split_created = 0
     unmatched_details = []
     updates_to_apply = []
     reclass_updates_to_apply = []
+    child_deletes = []
+    child_upserts = []
     used_feed_ids_by_program: Dict[str, set] = {}
+    now_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    # Read-only connection for cloning base playable fields into
+    # entitlement-split child rows (see build_child_row). Never committed to.
+    read_conn = sqlite3.connect(fruit_db)
 
     total = len(apple_playables)
     last_progress = 0
-    
+
     for idx, playable in enumerate(apple_playables, 1):
         external_id = playable['external_id']
-        
+        base_event_id = playable['event_id']
+        base_playable_id = playable['playable_id']
+
         # Progress indicator every 10%
         progress = int((idx / total) * 100)
         if progress >= last_progress + 10:
             _log(f"Progress: {progress}% ({idx}/{total}) - {matched} matched, {unmatched} unmatched")
             last_progress = progress
-        
+
+        # Always clear any previously-created entitlement-split children for
+        # this playable before re-deciding this run -- self-corrects if
+        # Watch Graph's entitlement data for this game changes day to day
+        # (an extra tier appears, or the one that justified a split before
+        # disappears).
+        child_deletes.append((base_event_id, f"{base_playable_id}{ESPN_ENTITLEMENT_CHILD_MARKER}%"))
+
         if external_id in espn_events:
+            candidates = espn_events[external_id]
             used_feed_ids = used_feed_ids_by_program.setdefault(external_id, set())
             espn_event = pick_espn_candidate(
-                espn_events[external_id], playable.get('logical_service'), used_feed_ids
+                candidates, playable.get('logical_service'), used_feed_ids
             )
             used_feed_ids.add(espn_event['feed_id'])
+            espn_playback_id = extract_playback_id(espn_event)
 
-            # Extract playback ID from feed URL
-            espn_playback_id = None
-            
-            if espn_event.get('feed_url'):
-                try:
-                    feed_url = espn_event['feed_url']
-                    if '/id/' in feed_url:
-                        espn_playback_id = feed_url.split('/id/')[-1]
-                        espn_playback_id = espn_playback_id.split('?')[0].split('#')[0]
-                except Exception as e:
-                    _log(f"Warning: Could not extract playback ID from {feed_url}: {e}")
-            
-            # Fallback to event ID format
-            if not espn_playback_id and espn_event.get('id'):
-                try:
-                    parts = espn_event['id'].split(':')
-                    if len(parts) >= 2:
-                        espn_playback_id = parts[1]
-                except Exception:
-                    pass
-            
             if espn_playback_id:
                 # Store just the UUID, not the espn-watch: prefix
                 espn_graph_id = espn_playback_id
-                updates_to_apply.append((espn_graph_id, playable['event_id'], playable['playable_id']))
+                updates_to_apply.append((espn_graph_id, base_event_id, base_playable_id))
                 matched += 1
 
                 # ESPN's own packages/network data reveals entitlements Apple's catalog
@@ -355,7 +428,7 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
                 if new_ls:
                     new_priority = get_internal_priority(new_ls)
                     reclass_updates_to_apply.append(
-                        (new_ls, new_priority, playable['event_id'], playable['playable_id'])
+                        (new_ls, new_priority, base_event_id, base_playable_id)
                     )
                     reclassified += 1
 
@@ -367,6 +440,42 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
                     _log(f"   FireTV URL:     https://www.espn.com/watch/player/_/id/{espn_graph_id}")
                     if new_ls:
                         _log(f"   Reclassified:   -> {new_ls} (packages={espn_event.get('packages')}, network={espn_event.get('network')})")
+
+                # Entitlement split: if this program_id's candidates resolve to
+                # more than one distinct entitlement, the primary playable_id
+                # above keeps whichever pick_espn_candidate() already chose --
+                # materialize the *other* entitlement(s) as sibling playable
+                # rows so a user's actual enabled service determines which one
+                # they see, instead of one entitlement always winning. See
+                # ESPN_ENTITLEMENT_CHILD_MARKER docstring for why this doesn't
+                # need a migration -- these rows are derived fresh each run.
+                fallback_ls = playable.get('logical_service') or 'espn_plus'
+                primary_effective_ls = new_ls or fallback_ls
+                groups = group_candidates_by_entitlement(candidates, fallback_ls)
+                if len(groups) > 1:
+                    base_row = None
+                    for ls, group_candidates in groups.items():
+                        if ls == primary_effective_ls:
+                            continue
+                        child_candidate = next(
+                            (c for c in group_candidates if c['feed_id'] not in used_feed_ids),
+                            group_candidates[0],
+                        )
+                        used_feed_ids.add(child_candidate['feed_id'])
+                        child_playback_id = extract_playback_id(child_candidate)
+                        if not child_playback_id:
+                            continue
+                        if base_row is None:
+                            base_row = fetch_base_playable(read_conn, base_event_id, base_playable_id)
+                            if base_row is None:
+                                break
+                        cpid = child_playable_id(base_playable_id, child_playback_id)
+                        child_upserts.append(
+                            build_child_row(base_row, base_event_id, cpid, ls, child_playback_id, now_utc)
+                        )
+                        split_created += 1
+                        if split_created <= 3:
+                            _log(f"   Entitlement split: -> also {ls} via {cpid}")
             else:
                 _log(f"Match found but no usable ESPN ID: {playable['title'][:50]}")
                 unmatched += 1
@@ -375,34 +484,42 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
             unmatched_details.append({
                 'title': playable['title'],
                 'program_id': external_id,
-                'playable_id': playable['playable_id'],
+                'playable_id': base_playable_id,
                 'start_utc': playable.get('start_utc', 'Unknown')
             })
-            
+
             # Log first 3 unmatched
             if unmatched <= 2:
                 _log(f"No match: {playable['title'][:60]}")
                 _log(f"   program.id: {external_id}")
-    
+
+    read_conn.close()
+
     match_time = time.time() - start_time
     _log(f"\nMatching completed in {match_time:.2f} seconds")
-    
+
     # Apply batch update
     updated = 0
-    if not dry_run and updates_to_apply:
+    if not dry_run:
         _log(f"\nApplying {len(updates_to_apply)} updates in batch...")
         start_time = time.time()
-        
+
         conn = sqlite3.connect(fruit_db)
         cursor = conn.cursor()
-        
-        cursor.executemany("""
-            UPDATE playables
-            SET espn_graph_id = ?
-            WHERE event_id = ? AND playable_id = ?
-        """, updates_to_apply)
 
-        updated = cursor.rowcount
+        if child_deletes:
+            cursor.executemany(
+                "DELETE FROM playables WHERE event_id = ? AND playable_id LIKE ?",
+                child_deletes,
+            )
+
+        if updates_to_apply:
+            cursor.executemany("""
+                UPDATE playables
+                SET espn_graph_id = ?
+                WHERE event_id = ? AND playable_id = ?
+            """, updates_to_apply)
+            updated = cursor.rowcount
 
         if reclass_updates_to_apply:
             cursor.executemany("""
@@ -411,6 +528,16 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
                 WHERE event_id = ? AND playable_id = ?
             """, reclass_updates_to_apply)
 
+        if child_upserts:
+            cursor.executemany("""
+                INSERT OR REPLACE INTO playables (
+                    event_id, playable_id, provider, deeplink_play, deeplink_open,
+                    playable_url, title, content_id, priority, created_utc,
+                    http_deeplink_url, espn_graph_id, service_name, logical_service,
+                    locale, locale_fallback
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, child_upserts)
+
         conn.commit()
         conn.close()
 
@@ -418,10 +545,11 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
         _log(f"Batch update complete in {update_time:.2f} seconds - {updated} playables updated")
         if reclass_updates_to_apply:
             _log(f"   {len(reclass_updates_to_apply)} reclassified by ESPN entitlement data (MLB.TV / MLB Network / ESPN Unlimited)")
-    elif dry_run:
+        if child_upserts:
+            _log(f"   {len(child_upserts)} entitlement-split child playables created")
+    else:
         updated = len(updates_to_apply)
-        reclassified = len(reclass_updates_to_apply)
-    
+
     # Summary
     _log("\n" + "="*80)
     _log("ENRICHMENT SUMMARY")
@@ -432,6 +560,7 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
     _log(f"Matched:   {matched} ({matched/len(apple_playables)*100:.1f}%)")
     _log(f"Unmatched: {unmatched} ({unmatched/len(apple_playables)*100:.1f}%)")
     _log(f"Reclassified by entitlement data: {reclassified}")
+    _log(f"Entitlement-split child playables: {split_created}")
     
     if dry_run:
         _log("\nDry run only - no changes were made")
