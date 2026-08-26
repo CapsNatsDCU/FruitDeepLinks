@@ -741,6 +741,16 @@ def main(argv=None):
     ]):
         return 1
 
+    # Step 5e: Ensure locale_fallback column exists (marks Spanish-only ESPN
+    # playables that fix_espn_spanish_only.py has repaired, so the language
+    # filter doesn't treat the fixed deeplink as still Spanish-exclusive)
+    if not run_step("5e", total_steps, "Ensuring locale_fallback column exists", [
+        "python3", "migrate_add_espn_locale_fallback.py",
+        "--db", str(DB_PATH),
+        "--yes",
+    ]):
+        return 1
+
     # Step 6: Import Apple TV events (DB-to-DB from apple_events.db)
     # NOTE: Step 6 can be slow (GZIP + JSON parse). If --skip-scrape was used and the Apple DB
     # hasn't changed since the last successful import, we skip this step to keep "Skip Scrape" fast.

@@ -267,6 +267,17 @@ def _classify_espn_locale(playable: Dict[str, Any]) -> tuple:
     distinguish them. Falls back to the service_name/title text heuristic for
     playables that predate the locale migration.
 
+    locale_fallback overrides is_spanish to False: fix_espn_spanish_only.py
+    sets it on Spanish-only ESPN events whose deeplink it has already
+    rewritten to the general broadcast (via espn_graph_id/externalId) rather
+    than the Spanish-specific playID. The locale column itself is left as
+    'es_MX' on purpose (fix_espn_spanish_only.py needs it to re-detect and
+    re-fix the row every day after re-scrape resets the deeplink), so without
+    this override an "en" language preference would exclude the only,
+    already-repaired playable for the event and leave it with zero valid
+    links (regression: MLB Unlimited games with only a Spanish broadcast
+    showing no valid links under an English filter).
+
     Shared by the language-preference filter and the ESPN channel tiebreak
     sort in get_filtered_playables() so the two can't drift apart (community
     report #787 was caused by exactly that: only one of the two had locale
@@ -280,6 +291,8 @@ def _classify_espn_locale(playable: Dict[str, Any]) -> tuple:
         is_spanish = locale.startswith("es")
     else:
         is_spanish = is_named_deportes or "español" in title
+    if playable.get("locale_fallback"):
+        is_spanish = False
     return is_spanish, is_named_deportes
 
 
@@ -316,20 +329,37 @@ def get_filtered_playables(
 
 
     try:
-        cur.execute(
-            """
-            SELECT playable_id, provider, deeplink_play, deeplink_open,
-                   playable_url, title, content_id, priority, service_name, espn_graph_id,
-                   logical_service, locale
-            FROM playables
-            WHERE event_id = ?
-            ORDER BY priority ASC, playable_id ASC
-            """,
-            (event_id,),
-        )
+        try:
+            cur.execute(
+                """
+                SELECT playable_id, provider, deeplink_play, deeplink_open,
+                       playable_url, title, content_id, priority, service_name, espn_graph_id,
+                       logical_service, locale, locale_fallback
+                FROM playables
+                WHERE event_id = ?
+                ORDER BY priority ASC, playable_id ASC
+                """,
+                (event_id,),
+            )
+            rows = cur.fetchall()
+        except sqlite3.OperationalError:
+            # locale_fallback column not migrated yet (migrate_add_espn_locale_fallback.py
+            # hasn't run in this environment) -- fall back to no-flag behavior.
+            cur.execute(
+                """
+                SELECT playable_id, provider, deeplink_play, deeplink_open,
+                       playable_url, title, content_id, priority, service_name, espn_graph_id,
+                       logical_service, locale
+                FROM playables
+                WHERE event_id = ?
+                ORDER BY priority ASC, playable_id ASC
+                """,
+                (event_id,),
+            )
+            rows = [tuple(row) + (0,) for row in cur.fetchall()]
 
         playables: List[Dict[str, Any]] = []
-        for row in cur.fetchall():
+        for row in rows:
             playable: Dict[str, Any] = {
                 "playable_id": row[0],
                 "provider": row[1],
@@ -343,6 +373,7 @@ def get_filtered_playables(
                 "espn_graph_id": row[9],
                 "logical_service": row[10],  # Read from database
                 "locale": row[11],
+                "locale_fallback": row[12],
                 "event_id": event_id,
             }
 
@@ -406,6 +437,15 @@ def get_filtered_playables(
                     ls.startswith("aiv")
                     and "aiv" in enabled_services
                     and not any(s.startswith("aiv_") for s in enabled_services)
+                ):
+                    playables.append(playable)
+                # 'espn_unlimited' alone (no granular tier explicitly picked) also
+                # covers the espn_mlb_tv/espn_mlb_network tiers Step 7c carves out
+                # of it -- see expand_enabled_services_for_espn_unlimited() above.
+                elif (
+                    ls in ESPN_UNLIMITED_GRANULAR_TIERS
+                    and "espn_unlimited" in enabled_services
+                    and not any(s in ESPN_UNLIMITED_GRANULAR_TIERS for s in enabled_services)
                 ):
                     playables.append(playable)
             else:
@@ -695,6 +735,35 @@ def expand_enabled_services_for_amazon(
 
     except Exception:
         return enabled_services
+
+
+# Granular ESPN entitlement tiers that fruit_enrich_espn.py (Step 7c) carves
+# out of the generic "espn_unlimited" bucket. Apple's catalog sometimes only
+# exposes an event's English broadcast under one of these tiers while the
+# event's espn_unlimited-tagged playable is Spanish-only -- so a user who
+# only checked "ESPN Unlimited" in Filters (not knowing these exist as
+# separate, independently-listed services) gets zero valid links for exactly
+# those events even though an English option exists.
+ESPN_UNLIMITED_GRANULAR_TIERS = ("espn_mlb_tv", "espn_mlb_network")
+
+
+def expand_enabled_services_for_espn_unlimited(enabled_services: List[str]) -> List[str]:
+    """If 'espn_unlimited' is enabled and none of its granular MLB tiers are
+    explicitly listed, treat 'espn_unlimited' as also covering them --
+    mirrors the 'aiv' -> aiv_* wildcard above. If the user HAS explicitly
+    picked any granular tier, that's the source of truth and no wildcard is
+    applied (same override rule as Amazon's).
+
+    Pure list transform, no DB access needed -- callable from any of the
+    filter-application call sites (get_filtered_playables below, and
+    fruit_build_adb_lanes.py's own SQL-level provider/event eligibility
+    check, which doesn't go through get_filtered_playables at all).
+    """
+    if not enabled_services or "espn_unlimited" not in enabled_services:
+        return enabled_services
+    if any(s in ESPN_UNLIMITED_GRANULAR_TIERS for s in enabled_services):
+        return enabled_services
+    return enabled_services + [s for s in ESPN_UNLIMITED_GRANULAR_TIERS if s not in enabled_services]
 
 
 def get_fallback_deeplink(event: Dict[str, Any]) -> Optional[str]:

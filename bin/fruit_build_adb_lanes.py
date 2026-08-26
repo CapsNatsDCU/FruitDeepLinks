@@ -49,6 +49,14 @@ except ImportError:
     def get_canonical_service_code(service_code):
         return service_code
 
+# Shared with filter_integration.get_filtered_playables() so the
+# espn_unlimited -> espn_mlb_tv/espn_mlb_network wildcard rule can't drift
+# between the two filter paths (see ESPN_UNLIMITED_GRANULAR_TIERS docstring).
+try:
+    from filter_integration import ESPN_UNLIMITED_GRANULAR_TIERS as _ESPN_UNLIMITED_GRANULAR_TIERS
+except ImportError:
+    _ESPN_UNLIMITED_GRANULAR_TIERS = ("espn_mlb_tv", "espn_mlb_network")
+
 
 UTC = dt.timezone.utc
 
@@ -292,7 +300,7 @@ def load_events_for_provider(
 
     select_cols = "e.id, e.title, e.start_utc, e.end_utc, e.start_ms, e.end_ms, e.classification_json"
     if expand_all_playables:
-        select_cols += ", p.playable_id, p.service_name, p.locale, p.title AS p_title, p.priority, p.logical_service"
+        select_cols += ", p.playable_id, p.service_name, p.locale, p.title AS p_title, p.priority, p.logical_service, p.locale_fallback"
 
     # --- Amazon special case: collapse all aiv_* services into provider_code "aiv" for ADB ---
     if provider_code == "aiv":
@@ -325,7 +333,18 @@ def load_events_for_provider(
         # Filter to only include enabled services
         # If enabled_services is empty, include all (legacy behavior)
         if enabled_services:
-            logical_services = [ls for ls in all_logical_services if ls in enabled_services]
+            effective_enabled = enabled_services
+            # 'espn_unlimited' alone (no granular tier explicitly picked) also
+            # covers espn_mlb_tv/espn_mlb_network -- same wildcard rule as
+            # filter_integration.get_filtered_playables() (kept in sync via
+            # the _ESPN_UNLIMITED_GRANULAR_TIERS import above).
+            if "espn_unlimited" in enabled_services and not any(
+                s in _ESPN_UNLIMITED_GRANULAR_TIERS for s in enabled_services
+            ):
+                effective_enabled = list(enabled_services) + [
+                    s for s in _ESPN_UNLIMITED_GRANULAR_TIERS if s not in enabled_services
+                ]
+            logical_services = [ls for ls in all_logical_services if ls in effective_enabled]
         else:
             logical_services = all_logical_services
 
@@ -365,10 +384,10 @@ def load_events_for_provider(
         by_event: Dict[str, Dict[str, Any]] = {}
         playables_by_event: Dict[str, List[Dict[str, Any]]] = {}
         for row in cur.fetchall():
-            eid, title, start_utc, end_utc, start_ms, end_ms, classification_json, playable_id, service_name, locale, p_title, priority, logical_service = row
+            eid, title, start_utc, end_utc, start_ms, end_ms, classification_json, playable_id, service_name, locale, p_title, priority, logical_service, locale_fallback = row
             if language_preference != "both":
                 is_spanish, _ = _classify_espn_locale(
-                    {"service_name": service_name, "locale": locale, "title": p_title}
+                    {"service_name": service_name, "locale": locale, "title": p_title, "locale_fallback": locale_fallback}
                 )
                 if language_preference == "en" and is_spanish:
                     continue

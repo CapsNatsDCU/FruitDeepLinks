@@ -60,32 +60,41 @@ def find_spanish_only_events(conn: sqlite3.Connection) -> List[Tuple]:
 
 
 def fix_spanish_only_playables(
-    conn: sqlite3.Connection, 
-    playables: List[Tuple], 
+    conn: sqlite3.Connection,
+    playables: List[Tuple],
     dry_run: bool = False
 ) -> int:
     """
     Update deeplinks for Spanish-only playables to use ESPN Graph ID or externalId.
-    
+
     Priority:
     1. espn_graph_id (if enriched by fruit_enrich_espn.py)
     2. externalId from raw_attributes_json (fallback if no ESPN Graph data)
-    
+
+    Every candidate row also gets locale_fallback=1 (regardless of whether its
+    deeplink actually needed rewriting this run), so filter_integration.py's
+    language filter stops treating the repaired deeplink as still
+    Spanish-exclusive. The row's locale column is intentionally left as
+    'es_MX' -- find_spanish_only_events() depends on it to re-detect and
+    re-fix this same row every day after Apple's re-scrape resets
+    deeplink_play back to the Spanish playID.
+
     Args:
         conn: Database connection
         playables: List of (event_id, playable_id, deeplink_play, service_name, title, espn_graph_id, raw_attributes_json)
         dry_run: If True, don't make changes
-    
+
     Returns: Number of playables updated
     """
     if not playables:
         print("No Spanish-only ESPN playables found")
         return 0
-    
+
     import json
     cur = conn.cursor()
     updates = []
-    
+    fallback_flags = []
+
     for event_id, playable_id, deeplink_play, service_name, title, espn_graph_id, raw_json in playables:
         # Extract current playID from deeplink (if exists)
         current_playid = None
@@ -129,14 +138,19 @@ def fix_spanish_only_playables(
             # Use externalId as fallback
             best_playid = external_id
             source = "externalId"
-        
-        # Skip if already using the best playID
+
+        # This row has a usable general-broadcast playID, so it's no longer
+        # Spanish-exclusive from the filter's point of view -- flag it even
+        # if the deeplink text below turns out to already be up to date.
+        fallback_flags.append((event_id, playable_id))
+
+        # Skip rewriting the deeplink if already using the best playID
         if current_playid == best_playid:
             continue
-        
+
         # Build new deeplink
         new_deeplink = f"sportscenter://x-callback-url/showWatchStream?playID={best_playid}"
-        
+
         if dry_run:
             print(f"\n[DRY RUN] Would update:")
             print(f"  Event: {event_id}")
@@ -144,26 +158,45 @@ def fix_spanish_only_playables(
             print(f"  Service: {service_name}")
             print(f"  Old playID: {current_playid}")
             print(f"  New playID: {best_playid} (from {source})")
-        
+
         updates.append((new_deeplink, event_id, playable_id))
-    
-    if not updates:
-        print("All Spanish-only playables already using best playID")
-        return 0
-    
+
     if dry_run:
-        print(f"\n[DRY RUN] Would update {len(updates)} playables")
+        if updates:
+            print(f"\n[DRY RUN] Would update {len(updates)} playables")
+        else:
+            print("All Spanish-only playables already using best playID")
         return len(updates)
-    
-    # Apply updates
-    cur.executemany("""
-        UPDATE playables
-        SET deeplink_play = ?
-        WHERE event_id = ? AND playable_id = ?
-    """, updates)
+
+    if not updates and not fallback_flags:
+        print("No Spanish-only playables found")
+        return 0
+
+    # Apply deeplink updates
+    if updates:
+        cur.executemany("""
+            UPDATE playables
+            SET deeplink_play = ?
+            WHERE event_id = ? AND playable_id = ?
+        """, updates)
+
+    # Stamp locale_fallback=1 for every repaired candidate so
+    # filter_integration.py stops excluding it as Spanish-only. Column is
+    # added by migrate_add_espn_locale_fallback.py; tolerate it being absent
+    # (e.g. this script run standalone against an unmigrated db).
+    if fallback_flags:
+        try:
+            cur.executemany("""
+                UPDATE playables
+                SET locale_fallback = 1
+                WHERE event_id = ? AND playable_id = ?
+            """, fallback_flags)
+        except sqlite3.OperationalError as e:
+            print(f"[WARN] Could not set locale_fallback (run migrate_add_espn_locale_fallback.py first?): {e}")
+
     conn.commit()
-    
-    print(f"Updated {len(updates)} Spanish-only playables")
+
+    print(f"Updated {len(updates)} Spanish-only playables ({len(fallback_flags)} flagged as locale_fallback)")
     return len(updates)
 
 
