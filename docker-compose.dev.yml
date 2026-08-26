@@ -1,0 +1,25 @@
+# Dev override: bind-mounts source directories over the image's baked-in
+# copies (Dockerfile does `COPY bin ./bin` / `COPY templates ./templates` at
+# build time, so normally a code change needs `docker compose build`).
+#
+# Usage (from this repo, in addition to the base docker-compose.yml):
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# Then after editing anything under bin/ or templates/:
+#   - Pipeline steps (daily_refresh.py and friends) pick up changes on their
+#     next run automatically -- each step is a fresh `python3 <script>.py`
+#     subprocess that reads the file from disk when it starts.
+#   - The Flask server itself (routes, filter_integration, services/*) is a
+#     long-running process and needs a restart to pick up changes:
+#       docker compose -f docker-compose.yml -f docker-compose.dev.yml restart
+#     No rebuild needed for either case -- the image is untouched.
+#
+# `docker compose up -d` / `docker compose build` with no -f flags (what a
+# public user runs) ignores this file entirely and uses the image's baked-in
+# code, unaffected by anything here.
+services:
+  fruitdeeplinks:
+    volumes:
+      - ./bin:/app/bin
+      - ./templates:/app/templates
+      - ./VERSION:/app/VERSION
