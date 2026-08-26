@@ -83,10 +83,11 @@ def save_auto_refresh(settings: Dict[str, Any]) -> bool:
 
 def get_available_filters() -> Dict[str, Any]:
     """
-    Return { providers, amazon_services, sports, leagues } for the Filters UI.
-    Providers and Amazon services are split so the UI can show them separately.
+    Return { providers, amazon_services, espn_services, sports, leagues } for the
+    Filters UI. Providers, Amazon services, and ESPN services are split so the
+    UI can show each group separately.
     """
-    empty = {"providers": [], "amazon_services": [], "sports": [], "leagues": []}
+    empty = {"providers": [], "amazon_services": [], "espn_services": [], "sports": [], "leagues": []}
     if not db_exists():
         return empty
 
@@ -100,6 +101,7 @@ def get_available_filters() -> Dict[str, Any]:
 def _build_filters(conn: sqlite3.Connection) -> Dict[str, Any]:
     providers: List[dict] = []
     amazon_services: List[dict] = []
+    espn_services: List[dict] = []
 
     if _LOGICAL_SERVICES_AVAILABLE:
         try:
@@ -108,6 +110,8 @@ def _build_filters(conn: sqlite3.Connection) -> Dict[str, Any]:
                 entry = {"scheme": code, "name": get_display_name(code), "count": count}
                 if code == "aiv" or code.startswith("aiv_"):
                     amazon_services.append(entry)
+                elif code == "sportscenter" or code.startswith("espn"):
+                    espn_services.append(entry)
                 else:
                     providers.append(entry)
         except Exception:
@@ -132,6 +136,8 @@ def _build_filters(conn: sqlite3.Connection) -> Dict[str, Any]:
                 entry = {"scheme": provider, "name": name, "count": count}
                 if provider == "aiv":
                     amazon_services.append(entry)
+                elif provider == "sportscenter":
+                    espn_services.append(entry)
                 else:
                     providers.append(entry)
         except Exception:
@@ -198,6 +204,7 @@ def _build_filters(conn: sqlite3.Connection) -> Dict[str, Any]:
     return {
         "providers": providers,
         "amazon_services": amazon_services,
+        "espn_services": espn_services,
         "sports": sports_list,
         "leagues": leagues_list,
     }

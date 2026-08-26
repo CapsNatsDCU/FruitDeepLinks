@@ -57,7 +57,13 @@
 .example-service { padding: 3px 8px; border-radius: 4px; font-size: 11px; background: var(--bg-card); border: 1px solid var(--border); }
 .example-service.winner { background: #14532d; border-color: #22c55e; color: #22c55e; font-weight: 700; }
 .example-reason { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
-.actions { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+body { padding-bottom: 88px; }
+.actions-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+  background: var(--bg-card); border-top: 1px solid var(--border);
+  box-shadow: 0 -4px 16px rgba(0,0,0,0.25);
+}
+.actions { max-width: 1400px; margin: 0 auto; padding: 14px 20px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 {% endblock %}
 
 {% block content %}
@@ -90,6 +96,13 @@
     <div id="amazon-services-loading" class="status-muted" style="padding:16px;text-align:center">Loading Amazon services...</div>
     <div id="amazon-services-grid" class="filter-grid" style="display:none"></div>
   </div>
+</div>
+
+<div class="card" style="margin-bottom:16px" id="espn-section">
+  <h2>ESPN Services</h2>
+  <p class="section-desc">ESPN splits its catalog into separate entitlement feeds — an event can appear under only one of these even if you have others enabled. Turn on every feed you have access to.</p>
+  <div id="espn-services-loading" class="status-muted" style="padding:16px;text-align:center">Loading ESPN services...</div>
+  <div id="espn-services-grid" class="filter-grid" style="display:none"></div>
 </div>
 
 <div class="card" style="margin-bottom:16px">
@@ -150,18 +163,20 @@
   <div id="leagues-grid" class="filter-grid" style="display:none"></div>
 </div>
 
-<div class="actions">
-  <button class="btn btn-success" onclick="savePreferences()">Save Filters</button>
-  <button class="btn" style="background:#f59e0b" onclick="applyFilters()">Apply Filters Now</button>
-  <button class="btn" style="background:#8b5cf6" onclick="clearStaleServices()">Clear Stale Services</button>
-  <button class="btn btn-secondary" onclick="resetToDefaults()">Reset to Defaults</button>
+<div class="actions-bar">
+  <div class="actions">
+    <button class="btn btn-success" onclick="savePreferences()">Save Filters</button>
+    <button class="btn" style="background:#f59e0b" onclick="applyFilters()">Apply Filters Now</button>
+    <button class="btn" style="background:#8b5cf6" onclick="clearStaleServices()">Clear Stale Services</button>
+    <button class="btn btn-secondary" onclick="resetToDefaults()">Reset to Defaults</button>
+  </div>
 </div>
 {% endblock %}
 
 {% block extra_script %}
 <script>
 let currentPreferences = { enabled_services:[], disabled_sports:[], disabled_leagues:[], service_priorities:{}, amazon_penalty:true, amazon_master_enabled:true, language_preference:'en' };
-let availableFilters = { providers:[], amazon_services:[], sports:[], leagues:[] };
+let availableFilters = { providers:[], amazon_services:[], espn_services:[], sports:[], leagues:[] };
 let sortableInstance = null;
 
 const SCRAPER_CONTROLLED_SERVICES = new Set(['kayo_web','kayo','fanatiz_web','fanatiz','bein','nesn','victory','gotham','espn_plus','espn_linear','espn_unlimited','espn_mlb_network','espn_mlb_tv']);
@@ -175,7 +190,7 @@ async function loadFilters() {
     if (!currentPreferences.language_preference) currentPreferences.language_preference = 'en';
     if (currentPreferences.amazon_master_enabled === undefined) currentPreferences.amazon_master_enabled = true;
     await loadPriorities();
-    renderProviders(); renderAmazonServices(); renderSports(); renderLeagues(); renderPriorities();
+    renderProviders(); renderAmazonServices(); renderEspnServices(); renderSports(); renderLeagues(); renderPriorities();
     updateStats(); setLanguage(currentPreferences.language_preference); loadSelectionExamples();
   } catch (err) { showToast('Failed to load filters: ' + err.message, 'error'); }
 }
@@ -229,16 +244,44 @@ function toggleAmazonMaster() {
 function toggleAmazonService(scheme) {
   if (currentPreferences.amazon_master_enabled === false) return;
   if (currentPreferences.enabled_services.length === 0) {
-    currentPreferences.enabled_services = [
-      ...availableFilters.providers.map(p => p.scheme),
-      ...(availableFilters.amazon_services || []).map(s => s.scheme)
-    ].filter(s => s !== scheme);
+    currentPreferences.enabled_services = allKnownServiceSchemes().filter(s => s !== scheme);
   } else {
     const i = currentPreferences.enabled_services.indexOf(scheme);
     if (i > -1) currentPreferences.enabled_services.splice(i, 1);
     else currentPreferences.enabled_services.push(scheme);
   }
   renderAmazonServices(); renderPriorities(); loadSelectionExamples();
+}
+
+function allKnownServiceSchemes() {
+  return [
+    ...availableFilters.providers.map(p => p.scheme),
+    ...(availableFilters.amazon_services || []).map(s => s.scheme),
+    ...(availableFilters.espn_services || []).map(s => s.scheme),
+  ];
+}
+
+function renderEspnServices() {
+  const grid = document.getElementById('espn-services-grid');
+  const loading = document.getElementById('espn-services-loading');
+  const svcs = availableFilters.espn_services || [];
+  if (!svcs.length) { loading.textContent = 'No ESPN services found.'; return; }
+  grid.innerHTML = svcs.map(s => {
+    const on = !currentPreferences.enabled_services.length || currentPreferences.enabled_services.includes(s.scheme);
+    const badge = SCRAPER_CONTROLLED_SERVICES.has(s.scheme) ? ' <span title="Has dedicated scraper">🔄</span>' : '';
+    return `<div class="filter-item ${on?'enabled':'disabled'}" onclick="toggleEspnService('${s.scheme}')"><div class="checkbox"></div><div class="filter-info"><div class="filter-name">${s.name}${badge}</div><div class="filter-count">${s.count} events</div></div></div>`;
+  }).join('');
+  loading.style.display = 'none'; grid.style.display = 'grid';
+}
+function toggleEspnService(scheme) {
+  if (currentPreferences.enabled_services.length === 0) {
+    currentPreferences.enabled_services = allKnownServiceSchemes().filter(s => s !== scheme);
+  } else {
+    const i = currentPreferences.enabled_services.indexOf(scheme);
+    if (i > -1) currentPreferences.enabled_services.splice(i, 1);
+    else currentPreferences.enabled_services.push(scheme);
+  }
+  renderEspnServices(); renderPriorities(); loadSelectionExamples();
 }
 
 function renderSports() {
@@ -264,7 +307,7 @@ function renderLeagues() {
 function renderPriorities() {
   const container = document.getElementById('priority-list'), loading = document.getElementById('priority-loading');
   const amazonServices = currentPreferences.amazon_master_enabled === false ? [] : (availableFilters.amazon_services||[]);
-  const all = [...(availableFilters.providers||[]),...amazonServices];
+  const all = [...(availableFilters.providers||[]),...amazonServices,...(availableFilters.espn_services||[])];
   const enabled = currentPreferences.enabled_services.length === 0 ? all : all.filter(p => currentPreferences.enabled_services.includes(p.scheme));
   if (!enabled.length) {
     if (sortableInstance) { sortableInstance.destroy(); sortableInstance = null; }
@@ -318,10 +361,7 @@ function setLanguage(lang) {
 }
 function toggleProvider(scheme) {
   if (currentPreferences.enabled_services.length === 0) {
-    currentPreferences.enabled_services = [
-      ...availableFilters.providers.map(p => p.scheme),
-      ...(availableFilters.amazon_services || []).map(s => s.scheme)
-    ].filter(s => s !== scheme);
+    currentPreferences.enabled_services = allKnownServiceSchemes().filter(s => s !== scheme);
   } else {
     const i = currentPreferences.enabled_services.indexOf(scheme);
     if (i > -1) currentPreferences.enabled_services.splice(i, 1);
