@@ -95,7 +95,32 @@ def ensure_espn_graph_id_column(fruit_db: str) -> None:
         _log("Column added successfully")
     else:
         _log("espn_graph_id column already exists")
-    
+
+    conn.close()
+
+
+def ensure_feed_name_column(fruit_db: str) -> None:
+    """Add feed_name column to playables table if it doesn't exist.
+
+    Mirrors ensure_espn_graph_id_column -- also covered by
+    migrate_add_espn_feed_name_column.py in the daily_refresh.py pipeline,
+    but duplicated here so this script still works standalone (--dry-run,
+    manual runs) without depending on that step having run first.
+    """
+    conn = sqlite3.connect(fruit_db)
+    cursor = conn.cursor()
+
+    cursor.execute("PRAGMA table_info(playables)")
+    columns = [row[1] for row in cursor.fetchall()]
+
+    if 'feed_name' not in columns:
+        _log("Adding feed_name column to playables table...")
+        cursor.execute("ALTER TABLE playables ADD COLUMN feed_name TEXT")
+        conn.commit()
+        _log("Column added successfully")
+    else:
+        _log("feed_name column already exists")
+
     conn.close()
 
 
@@ -188,7 +213,7 @@ def get_espn_graph_events(espn_db: str) -> Dict[str, List[Dict]]:
     
     cursor.execute("""
         SELECT e.id, e.program_id, e.airing_id, e.simulcast_airing_id, e.title, f.url,
-               e.packages, e.network, f.id as feed_id, e.language
+               e.packages, e.network, f.id as feed_id, e.language, e.feed_name, e.feed_type
         FROM events e
         JOIN feeds f ON e.id = f.event_id
         WHERE e.program_id IS NOT NULL
@@ -208,6 +233,8 @@ def get_espn_graph_events(espn_db: str) -> Dict[str, List[Dict]]:
             'network': row[7],
             'feed_id': row[8],
             'language': row[9],
+            'feed_name': row[10],
+            'feed_type': row[11],
         })
 
     conn.close()
@@ -325,7 +352,7 @@ def fetch_base_playable(conn: sqlite3.Connection, event_id: str, playable_id: st
 
 def build_child_row(
     base_row: Dict, event_id: str, cpid: str, logical_service: str,
-    playback_id: str, now_utc: str, locale: Optional[str],
+    playback_id: str, now_utc: str, locale: Optional[str], feed_name: Optional[str] = None,
 ) -> Tuple:
     """Build a full playables row tuple for an entitlement-split child.
 
@@ -334,7 +361,8 @@ def build_child_row(
     that language never varies between candidates sharing one program_id, but
     sourcing it per-candidate is the more correct architecture regardless.
     Falls back to the parent's locale if this candidate's language was
-    unrecognized (see locale_from_espn_event).
+    unrecognized (see locale_from_espn_event). `feed_name` is likewise this
+    child's own candidate's feed_name, not the parent's.
     """
     deeplink = f"sportscenter://x-callback-url/showWatchStream?playID={playback_id}"
     http_deeplink = f"https://www.espn.com/watch/player/_/id/{playback_id}"
@@ -343,6 +371,7 @@ def build_child_row(
         base_row.get("playable_url"), base_row.get("title"), base_row.get("content_id"),
         get_internal_priority(logical_service), now_utc, http_deeplink, playback_id,
         base_row.get("service_name"), logical_service, locale or base_row.get("locale"), 0,
+        feed_name,
     )
 
 
@@ -363,6 +392,7 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
     
     if not dry_run:
         ensure_espn_graph_id_column(fruit_db)
+        ensure_feed_name_column(fruit_db)
     
     _log("\nStep 1: Loading Apple TV ESPN playables...")
     start_time = time.time()
@@ -393,11 +423,13 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
     unmatched = 0
     reclassified = 0
     locale_set = 0
+    feed_name_set = 0
     split_created = 0
     unmatched_details = []
     updates_to_apply = []
     reclass_updates_to_apply = []
     locale_updates_to_apply = []
+    feed_name_updates_to_apply = []
     child_deletes = []
     child_upserts = []
     used_feed_ids_by_program: Dict[str, set] = {}
@@ -466,6 +498,17 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
                     locale_updates_to_apply.append((new_locale, base_event_id, base_playable_id))
                     locale_set += 1
 
+                # ESPN's own feed_name (e.g. "Cubs Broadcast" for a HOME feed)
+                # distinguishes same-service duplicate playables -- e.g. two
+                # MLB Unlimited playables for one game, home vs away market
+                # broadcast, that share an identical Apple title. Used as a
+                # fallback qualifier in xmltv_helpers.get_service_label_for_playable
+                # when the title itself has nothing to go on.
+                new_feed_name = (espn_event.get('feed_name') or '').strip() or None
+                if new_feed_name:
+                    feed_name_updates_to_apply.append((new_feed_name, base_event_id, base_playable_id))
+                    feed_name_set += 1
+
                 # Log first 5 matches
                 if matched <= 3:
                     _log(f"Match #{matched}: {playable['title'][:60]}")
@@ -505,8 +548,12 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
                                 break
                         cpid = child_playable_id(base_playable_id, child_playback_id)
                         child_locale = locale_from_espn_event(child_candidate)
+                        child_feed_name = (child_candidate.get('feed_name') or '').strip() or None
                         child_upserts.append(
-                            build_child_row(base_row, base_event_id, cpid, ls, child_playback_id, now_utc, child_locale)
+                            build_child_row(
+                                base_row, base_event_id, cpid, ls, child_playback_id, now_utc,
+                                child_locale, child_feed_name,
+                            )
                         )
                         split_created += 1
                         if split_created <= 3:
@@ -570,14 +617,21 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
                 WHERE event_id = ? AND playable_id = ?
             """, locale_updates_to_apply)
 
+        if feed_name_updates_to_apply:
+            cursor.executemany("""
+                UPDATE playables
+                SET feed_name = ?
+                WHERE event_id = ? AND playable_id = ?
+            """, feed_name_updates_to_apply)
+
         if child_upserts:
             cursor.executemany("""
                 INSERT OR REPLACE INTO playables (
                     event_id, playable_id, provider, deeplink_play, deeplink_open,
                     playable_url, title, content_id, priority, created_utc,
                     http_deeplink_url, espn_graph_id, service_name, logical_service,
-                    locale, locale_fallback
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    locale, locale_fallback, feed_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, child_upserts)
 
         conn.commit()
@@ -605,6 +659,7 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
     _log(f"Unmatched: {unmatched} ({unmatched/len(apple_playables)*100:.1f}%)")
     _log(f"Reclassified by entitlement data: {reclassified}")
     _log(f"Locale set from Watch Graph language: {locale_set}")
+    _log(f"Feed name set from Watch Graph feed_name: {feed_name_set}")
     _log(f"Entitlement-split child playables: {split_created}")
     
     if dry_run:

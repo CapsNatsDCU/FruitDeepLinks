@@ -154,9 +154,18 @@ def get_service_label_for_playable(
     extract_feed_qualifier), that's appended in parens -- e.g. "ESPN+ (Marquee
     Group)" -- since same-service duplicates otherwise have no distinguishing
     label at all beyond an arbitrary "#2"/"#3" counter.
+
+    Falls back to the playable's own `feed_name` (from ESPN Watch Graph,
+    set by fruit_enrich_espn.py) when title-parsing finds nothing -- covers
+    same-service duplicates whose Apple title is identical for both, e.g. two
+    MLB Unlimited playables for one game that are actually the home-market
+    and away-market broadcasts ("Cubs Broadcast" / "Reds Broadcast"), which
+    extract_feed_qualifier can't tell apart since neither title names the feed.
     """
     base = get_base_service_label(playable, fallback)
     qualifier = extract_feed_qualifier(playable.get("title"), event_title)
+    if not qualifier:
+        qualifier = (playable.get("feed_name") or "").strip() or None
     return f"{base} ({qualifier})" if qualifier else base
 
 

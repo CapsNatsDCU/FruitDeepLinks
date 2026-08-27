@@ -303,7 +303,7 @@ def load_events_for_provider(
 
     select_cols = "e.id, e.title, e.start_utc, e.end_utc, e.start_ms, e.end_ms, e.classification_json"
     if expand_all_playables:
-        select_cols += ", p.playable_id, p.service_name, p.locale, p.title AS p_title, p.priority, p.logical_service, p.locale_fallback"
+        select_cols += ", p.playable_id, p.service_name, p.locale, p.title AS p_title, p.priority, p.logical_service, p.locale_fallback, p.feed_name"
 
     # --- Amazon special case: collapse all aiv_* services into provider_code "aiv" for ADB ---
     if provider_code == "aiv":
@@ -396,7 +396,7 @@ def load_events_for_provider(
         by_event: Dict[str, Dict[str, Any]] = {}
         playables_by_event: Dict[str, List[Dict[str, Any]]] = {}
         for row in cur.fetchall():
-            eid, title, start_utc, end_utc, start_ms, end_ms, classification_json, playable_id, service_name, locale, p_title, priority, logical_service, locale_fallback = row
+            eid, title, start_utc, end_utc, start_ms, end_ms, classification_json, playable_id, service_name, locale, p_title, priority, logical_service, locale_fallback, feed_name = row
             if language_preference != "both":
                 is_spanish, _ = _classify_espn_locale(
                     {"service_name": service_name, "locale": locale, "title": p_title, "locale_fallback": locale_fallback}
@@ -415,7 +415,10 @@ def load_events_for_provider(
                 "classification_json": classification_json or "",
             }
             playables_by_event.setdefault(eid, []).append(
-                {"playable_id": playable_id, "service_name": service_name, "logical_service": logical_service, "title": p_title}
+                {
+                    "playable_id": playable_id, "service_name": service_name,
+                    "logical_service": logical_service, "title": p_title, "feed_name": feed_name,
+                }
             )
 
         try:

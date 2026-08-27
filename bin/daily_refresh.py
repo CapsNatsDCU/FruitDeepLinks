@@ -712,6 +712,15 @@ def main(argv=None):
     ]):
         return 1
 
+    # Step 5f: Ensure feed_name column exists (ESPN Watch Graph's home/away/
+    # alternate feed name, used to distinguish same-service duplicate playables)
+    if not run_step("5f", total_steps, "Ensuring feed_name column exists", [
+        "python3", "migrate_add_espn_feed_name_column.py",
+        "--db", str(DB_PATH),
+        "--yes",
+    ]):
+        return 1
+
     # Step 6: Import Apple TV events (DB-to-DB from apple_events.db)
     # NOTE: Step 6 can be slow (GZIP + JSON parse). If --skip-scrape was used and the Apple DB
     # hasn't changed since the last successful import, we skip this step to keep "Skip Scrape" fast.

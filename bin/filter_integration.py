@@ -344,7 +344,7 @@ def get_filtered_playables(
                 """
                 SELECT playable_id, provider, deeplink_play, deeplink_open,
                        playable_url, title, content_id, priority, service_name, espn_graph_id,
-                       logical_service, locale, locale_fallback
+                       logical_service, locale, locale_fallback, feed_name
                 FROM playables
                 WHERE event_id = ?
                 ORDER BY priority ASC, playable_id ASC
@@ -353,8 +353,8 @@ def get_filtered_playables(
             )
             rows = cur.fetchall()
         except sqlite3.OperationalError:
-            # locale_fallback column not migrated yet (migrate_add_espn_locale_fallback.py
-            # hasn't run in this environment) -- fall back to no-flag behavior.
+            # locale_fallback/feed_name columns not migrated yet (migrate_add_espn_locale_fallback.py /
+            # migrate_add_espn_feed_name_column.py haven't run in this environment) -- fall back to no-flag behavior.
             cur.execute(
                 """
                 SELECT playable_id, provider, deeplink_play, deeplink_open,
@@ -366,7 +366,7 @@ def get_filtered_playables(
                 """,
                 (event_id,),
             )
-            rows = [tuple(row) + (0,) for row in cur.fetchall()]
+            rows = [tuple(row) + (0, None) for row in cur.fetchall()]
 
         playables: List[Dict[str, Any]] = []
         for row in rows:
@@ -384,6 +384,7 @@ def get_filtered_playables(
                 "logical_service": row[10],  # Read from database
                 "locale": row[11],
                 "locale_fallback": row[12],
+                "feed_name": row[13],
                 "event_id": event_id,
             }
 
