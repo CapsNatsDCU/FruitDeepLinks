@@ -52,15 +52,6 @@ except ImportError:
     def expand_with_legacy_aliases(service_codes):
         return list(service_codes)
 
-# Shared with filter_integration.get_filtered_playables() so the
-# espn_unlimited -> espn_mlb_tv/espn_mlb_network wildcard rule can't drift
-# between the two filter paths (see ESPN_UNLIMITED_GRANULAR_TIERS docstring).
-try:
-    from filter_integration import ESPN_UNLIMITED_GRANULAR_TIERS as _ESPN_UNLIMITED_GRANULAR_TIERS
-except ImportError:
-    _ESPN_UNLIMITED_GRANULAR_TIERS = ("espn_mlb_tv", "espn_mlb_network")
-
-
 UTC = dt.timezone.utc
 
 
@@ -341,18 +332,13 @@ def load_events_for_provider(
         # Filter to only include enabled services
         # If enabled_services is empty, include all (legacy behavior)
         if enabled_services:
-            effective_enabled = enabled_services
-            # 'espn_unlimited' alone (no granular tier explicitly picked) also
-            # covers espn_mlb_tv/espn_mlb_network -- same wildcard rule as
-            # filter_integration.get_filtered_playables() (kept in sync via
-            # the _ESPN_UNLIMITED_GRANULAR_TIERS import above).
-            if "espn_unlimited" in enabled_services and not any(
-                s in _ESPN_UNLIMITED_GRANULAR_TIERS for s in enabled_services
-            ):
-                effective_enabled = list(enabled_services) + [
-                    s for s in _ESPN_UNLIMITED_GRANULAR_TIERS if s not in enabled_services
-                ]
-            logical_services = [ls for ls in all_logical_services if ls in effective_enabled]
+            # NOTE: espn_mlb_tv/espn_mlb_network are NOT wildcarded in under
+            # 'espn_unlimited' -- see filter_integration.py's
+            # expand_enabled_services_for_espn_unlimited() docstring for why
+            # that was removed from live filtering (it silently overrode an
+            # explicit uncheck). migrate_backfill_espn_unlimited_granular_tiers.py
+            # backfills existing saved preferences once instead.
+            logical_services = [ls for ls in all_logical_services if ls in enabled_services]
         else:
             logical_services = all_logical_services
 

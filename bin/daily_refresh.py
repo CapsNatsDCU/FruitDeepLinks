@@ -721,6 +721,15 @@ def main(argv=None):
     ]):
         return 1
 
+    # Step 5g: One-time backfill of enabled_services for the removed
+    # espn_unlimited -> espn_mlb_tv/espn_mlb_network live wildcard (see
+    # migrate_backfill_espn_unlimited_granular_tiers.py). No-ops after first run.
+    run_step("5g", total_steps, "Backfilling ESPN Unlimited granular tier preferences", [
+        "python3", "migrate_backfill_espn_unlimited_granular_tiers.py",
+        "--db", str(DB_PATH),
+        "--yes",
+    ], allow_fail=True)
+
     # Step 6: Import Apple TV events (DB-to-DB from apple_events.db)
     # NOTE: Step 6 can be slow (GZIP + JSON parse). If --skip-scrape was used and the Apple DB
     # hasn't changed since the last successful import, we skip this step to keep "Skip Scrape" fast.

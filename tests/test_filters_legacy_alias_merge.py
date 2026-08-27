@@ -1,6 +1,7 @@
 import sqlite3
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
@@ -34,6 +35,7 @@ class FiltersLegacyAliasMergeTest(unittest.TestCase):
             """
             CREATE TABLE events (
                 id TEXT PRIMARY KEY,
+                start_utc TEXT,
                 end_utc TEXT,
                 genres_json TEXT,
                 classification_json TEXT
@@ -53,14 +55,20 @@ class FiltersLegacyAliasMergeTest(unittest.TestCase):
             )
             """
         )
+        # Within the default days_ahead window (7 days) -- get_all_logical_services_with_counts()
+        # caps its forward window to days_ahead, so a far-future fixture (this used to be
+        # hardcoded to 2099) would be silently excluded and produce a misleading empty result.
+        now = datetime.now(timezone.utc)
+        start_utc = (now + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_utc = (now + timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
         rows = [
-            ("evt-1", "2099-01-01T00:00:00Z", "aiv", "aiv_watch_for_free"),
-            ("evt-2", "2099-01-01T00:00:00Z", "aiv", "aiv_free"),
+            ("evt-1", "aiv", "aiv_watch_for_free"),
+            ("evt-2", "aiv", "aiv_free"),
         ]
-        for event_id, end_utc, provider, logical_service in rows:
+        for event_id, provider, logical_service in rows:
             self.conn.execute(
-                "INSERT INTO events (id, end_utc, genres_json, classification_json) VALUES (?, ?, '[]', '[]')",
-                (event_id, end_utc),
+                "INSERT INTO events (id, start_utc, end_utc, genres_json, classification_json) VALUES (?, ?, ?, '[]', '[]')",
+                (event_id, start_utc, end_utc),
             )
             self.conn.execute(
                 """

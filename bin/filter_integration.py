@@ -436,15 +436,17 @@ def get_filtered_playables(
                     and not any(s.startswith("aiv_") for s in enabled_services)
                 ):
                     playables.append(playable)
-                # 'espn_unlimited' alone (no granular tier explicitly picked) also
-                # covers the espn_mlb_tv/espn_mlb_network tiers Step 7c carves out
-                # of it -- see expand_enabled_services_for_espn_unlimited() above.
-                elif (
-                    ls in ESPN_UNLIMITED_GRANULAR_TIERS
-                    and "espn_unlimited" in enabled_services
-                    and not any(s in ESPN_UNLIMITED_GRANULAR_TIERS for s in enabled_services)
-                ):
-                    playables.append(playable)
+                # NOTE: espn_mlb_tv/espn_mlb_network are NOT wildcarded in under
+                # 'espn_unlimited' here -- that used to happen (see
+                # migrate_backfill_espn_unlimited_granular_tiers.py for why it
+                # was removed: it couldn't distinguish "user never saw this
+                # checkbox" from "user explicitly unchecked it", so an explicit
+                # uncheck of ESPN MLB.TV was silently overridden back on every
+                # request -- reported on the forum). Existing users' saved
+                # enabled_services were backfilled once by that migration to
+                # preserve the old inclusive behavior for anyone who legitimately
+                # never considered these tiers; from here on, absence means off,
+                # same as every other checkbox.
             else:
                 # No filtering - include all
                 playables.append(playable)
@@ -746,15 +748,18 @@ ESPN_UNLIMITED_GRANULAR_TIERS = ("espn_mlb_tv", "espn_mlb_network")
 
 def expand_enabled_services_for_espn_unlimited(enabled_services: List[str]) -> List[str]:
     """If 'espn_unlimited' is enabled and none of its granular MLB tiers are
-    explicitly listed, treat 'espn_unlimited' as also covering them --
-    mirrors the 'aiv' -> aiv_* wildcard above. If the user HAS explicitly
-    picked any granular tier, that's the source of truth and no wildcard is
-    applied (same override rule as Amazon's).
+    explicitly listed, treat 'espn_unlimited' as also covering them.
 
-    Pure list transform, no DB access needed -- callable from any of the
-    filter-application call sites (get_filtered_playables below, and
-    fruit_build_adb_lanes.py's own SQL-level provider/event eligibility
-    check, which doesn't go through get_filtered_playables at all).
+    ONE-TIME USE ONLY, via migrate_backfill_espn_unlimited_granular_tiers.py.
+    This used to be applied live on every filter evaluation (mirroring the
+    'aiv' -> aiv_* wildcard above), but unlike Amazon's wildcard it couldn't
+    actually tell "user never saw this checkbox" apart from "user explicitly
+    unchecked it" -- both look identical as an absence from enabled_services.
+    That silently overrode an explicit uncheck of ESPN MLB.TV back on every
+    request (reported on the forum). The migration calls this once to
+    preserve the old inclusive behavior for existing saved preferences, then
+    marks itself done; from then on absence means off, like every other
+    service.
     """
     if not enabled_services or "espn_unlimited" not in enabled_services:
         return enabled_services

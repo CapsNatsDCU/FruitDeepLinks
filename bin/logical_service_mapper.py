@@ -369,10 +369,23 @@ def get_all_logical_services_with_counts(conn: sqlite3.Connection) -> Dict[str, 
         Dict mapping service_code -> count
     """
     cur = conn.cursor()
-    
-    # Get all future playables with event info
+
+    # Cap to the same forward window the rest of the app uses (days_ahead
+    # setting / FRUIT_DAYS_AHEAD, default 7). Previously unbounded, which
+    # let this count include events weeks out that the Event Inspector's
+    # default view (days_forward=7) would never show -- producing exactly
+    # the "checkbox says 92, Inspector shows 10" mismatch reported on the
+    # forum. Both numbers were individually correct for what they computed;
+    # they just weren't computing the same thing.
+    try:
+        from db.preferences import get_setting
+        days_ahead = get_setting(conn, "days_ahead") or 7
+    except Exception:
+        days_ahead = 7
+
+    # Get future playables with event info, within the app's forward window
     cur.execute("""
-        SELECT 
+        SELECT
             p.provider,
             p.deeplink_play,
             p.deeplink_open,
@@ -383,7 +396,8 @@ def get_all_logical_services_with_counts(conn: sqlite3.Connection) -> Dict[str, 
         FROM playables p
         JOIN events e ON p.event_id = e.id
         WHERE e.end_utc > datetime('now')
-    """)
+          AND e.start_utc <= datetime('now', ?)
+    """, (f"+{days_ahead} days",))
     
     # CRITICAL FIX: Fetch ALL rows first before processing
     # This prevents SQLite lock when get_logical_service_for_playable 
