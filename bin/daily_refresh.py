@@ -666,65 +666,26 @@ def main(argv=None):
     
     # Step 5b: Ensure espn_graph_id column exists in playables table
     # (Non-fatal migration that enables ESPN enrichment to store FireTV deeplinks)
-    print("\n" + "=" * 60)
-    print(f"[5b/{total_steps}] Ensuring database schema (espn_graph_id column)")
-    print("=" * 60)
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("PRAGMA table_info(playables)")
-        columns = [row[1] for row in cur.fetchall()]
-        if "espn_graph_id" not in columns:
-            cur.execute("ALTER TABLE playables ADD COLUMN espn_graph_id TEXT")
-            conn.commit()
-            print("[OK] Added espn_graph_id column to playables")
-        else:
-            print("[OK] espn_graph_id column already exists")
-        conn.close()
-        print("[OK] Step 5b complete")
-    except Exception as e:
-        print(f"[WARN] Step 5b failed (non-fatal): {e}")
-        # Non-fatal - ESPN enrichment will just skip if column doesn't exist
+    run_step("5b", total_steps, "Ensuring database schema (espn_graph_id column)", [
+        "python3", "migrate_add_espn_graph_id_column.py",
+        "--db", str(DB_PATH),
+        "--yes",
+    ], allow_fail=True)
     
-    # Step 5c: Clean up old events (keep database fresh and improve ESPN enrichment rate)
-    print("\n" + "=" * 60)
-    print(f"[5c/{total_steps}] Cleaning up old events")
-    print("=" * 60)
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        # SQLite defaults foreign_keys OFF per-connection, so the playables
-        # ON DELETE CASCADE never fires unless we enable it here. Without this
-        # every deleted event strands its playables rows (DB bloat).
-        conn.execute("PRAGMA foreign_keys = ON")
-        cur = conn.cursor()
-
-        # Count events before cleanup (including NULL end_utc events with old start dates)
-        cur.execute("""
-            SELECT COUNT(*) FROM events 
-            WHERE end_utc < datetime('now', '-1 day')
-               OR (end_utc IS NULL AND start_utc < datetime('now', '-2 days'))
-        """)
-        old_count = cur.fetchone()[0]
-        
-        if old_count > 0:
-            # Delete events that ended before yesterday OR have NULL end_utc and started 2+ days ago
-            # This removes stale events and improves ESPN enrichment match rate
-            # Note: NULL end_utc events stay fresh via last_seen_utc updates, so we check start_utc
-            cur.execute("""
-                DELETE FROM events 
-                WHERE end_utc < datetime('now', '-1 day')
-                   OR (end_utc IS NULL AND start_utc < datetime('now', '-2 days'))
-            """)
-            deleted = cur.rowcount
-            conn.commit()
-            print(f"[OK] Deleted {deleted} old events (ended or started 2+ days ago with NULL end_utc)")
-        else:
-            print("[OK] No old events to clean up")
-        
-        conn.close()
-        print("[OK] Step 5c complete")
-    except Exception as e:
-        print(f"[WARN] Step 5c failed (non-fatal): {e}")
+    # Step 5c: Clean up old events (keep database fresh and improve ESPN enrichment rate).
+    # NULL end_utc events stay fresh via last_seen_utc updates, so those are
+    # judged by start_utc instead. --cascade enables PRAGMA foreign_keys=ON so
+    # deleting an event also cascades to its playables (off by default per
+    # SQLite connection; without it, deleted events would strand their
+    # playables rows instead).
+    run_step("5c", total_steps, "Cleaning up old events", [
+        "python3", "cleanup_stale_rows.py",
+        "--db", str(DB_PATH),
+        "--table", "events",
+        "--where", "end_utc < datetime('now', '-1 day') OR (end_utc IS NULL AND start_utc < datetime('now', '-2 days'))",
+        "--label", "fruit events",
+        "--cascade",
+    ], allow_fail=True)
 
     # Step 5c-purge: Sweep up orphaned playables left by past non-cascading
     # event deletes. Idempotent and non-fatal (only deletes/vacuums if needed).
@@ -769,31 +730,16 @@ def main(argv=None):
             return 1
         _write_apple_import_stamp(APPLE_DB_PATH)
     
-    # Step 6a: Clean up old Apple TV events (keep database lean)
-    print("\n" + "=" * 60)
-    print(f"[6a/{total_steps}] Cleaning up old Apple TV events")
-    print("=" * 60)
-    try:
-        conn = sqlite3.connect(APPLE_DB_PATH)
-        cur = conn.cursor()
-        
-        # Count events before cleanup
-        cur.execute("SELECT COUNT(*) FROM apple_events WHERE last_updated < datetime('now', '-5 days')")
-        old_count = cur.fetchone()[0]
-        
-        if old_count > 0:
-            # Delete events not updated in 7+ days (likely ended/cancelled)
-            cur.execute("DELETE FROM apple_events WHERE last_updated < datetime('now', '-5 days')")
-            deleted = cur.rowcount
-            conn.commit()
-            print(f"Deleted {deleted} old Apple TV events (not updated in 7+ days)")
-        else:
-            print("No old Apple TV events to clean up")
-        
-        conn.close()
-        print("Step 6a complete")
-    except Exception as e:
-        print(f"Step 6a failed (non-fatal): {e}")
+    # Step 6a: Clean up old Apple TV events (keep database lean; not updated
+    # in 5+ days means likely ended/cancelled and no longer being refreshed
+    # by the scraper)
+    run_step("6a", total_steps, "Cleaning up old Apple TV events", [
+        "python3", "cleanup_stale_rows.py",
+        "--db", str(APPLE_DB_PATH),
+        "--table", "apple_events",
+        "--where", "last_updated < datetime('now', '-5 days')",
+        "--label", "Apple TV",
+    ], allow_fail=True)
 
     # Step 6b: Optional DB maintenance (VACUUM Apple DB when bloated)
     db_maint_enabled = os.getenv("DB_MAINTENANCE", "true").lower() not in ("0", "false", "no")
@@ -933,36 +879,18 @@ def main(argv=None):
             "--days", espn_days,
         ], allow_fail=True)
 
-    # Step 7b-cleanup: Clean up old ESPN Graph events (after scraping, before enrichment)
+    # Step 7b-cleanup: Clean up old ESPN Graph events (after scraping, before
+    # enrichment). --cascade enables PRAGMA foreign_keys=ON so deleting an
+    # event also removes its feeds (off by default per SQLite connection).
     if espn_db.exists():
-        print("\n" + "=" * 60)
-        print(f"[7b-cleanup/{total_steps}] Cleaning up old ESPN Graph events")
-        print("=" * 60)
-        try:
-            conn = sqlite3.connect(espn_db)
-            # Required for the "CASCADE automatically removes associated feeds"
-            # behavior below — SQLite ignores FKs unless enabled per-connection.
-            conn.execute("PRAGMA foreign_keys = ON")
-            cur = conn.cursor()
-
-            # Count events before cleanup (using stop_utc for ESPN Graph)
-            cur.execute("SELECT COUNT(*) FROM events WHERE stop_utc < datetime('now', '-2 days')")
-            old_count = cur.fetchone()[0]
-            
-            if old_count > 0:
-                # Delete events that ended before 2 days ago
-                # CASCADE automatically removes associated feeds
-                cur.execute("DELETE FROM events WHERE stop_utc < datetime('now', '-2 days')")
-                deleted = cur.rowcount
-                conn.commit()
-                print(f"[OK] Deleted {deleted} old ESPN Graph events (and their feeds)")
-            else:
-                print("[OK] No old ESPN Graph events to clean up")
-            
-            conn.close()
-            print("[OK] Step 7b-cleanup complete")
-        except Exception as e:
-            print(f"[WARN] Step 7b-cleanup failed (non-fatal): {e}")
+        run_step("7b-cleanup", total_steps, "Cleaning up old ESPN Graph events", [
+            "python3", "cleanup_stale_rows.py",
+            "--db", str(espn_db),
+            "--table", "events",
+            "--where", "stop_utc < datetime('now', '-2 days')",
+            "--label", "ESPN Graph",
+            "--cascade",
+        ], allow_fail=True)
 
     # Step 7c: Enrich ESPN playables with Watch Graph IDs (conditional based on scraping)
     if espn_db.exists():
