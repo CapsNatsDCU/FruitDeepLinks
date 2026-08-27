@@ -53,8 +53,6 @@ def api_events():
     has_playables = parse_int_arg("has_playables", 0, 0, 1)
     multi = parse_int_arg("multi", 0, 0, 1)
     missing_http = parse_int_arg("missing_http", 0, 0, 1)
-    premium = parse_int_arg("premium", 0, 0, 1)
-    free = parse_int_arg("free", 0, 0, 1)
 
     try:
         with get_conn() as conn:
@@ -64,7 +62,7 @@ def api_events():
 
             where, params = _build_where(
                 q, provider, svc, days_back, days_forward,
-                live, has_playables, multi, missing_http, premium, free,
+                live, has_playables, multi, missing_http,
                 conn
             )
             where_sql = ("WHERE " + " AND ".join(where)) if where else ""
@@ -79,8 +77,6 @@ def api_events():
                 f"""
                 SELECT e.id, e.title, e.start_utc, e.end_utc, e.channel_name,
                        e.last_seen_utc,
-                       COALESCE(e.is_free, 0) AS is_free,
-                       COALESCE(e.is_premium, 0) AS is_premium,
                        (SELECT COUNT(*) FROM playables p WHERE p.event_id = e.id) AS playables_count,
                        (SELECT GROUP_CONCAT(DISTINCT {svc}) FROM playables p WHERE p.event_id = e.id) AS providers_csv,
                        CASE WHEN datetime(e.start_utc) <= datetime('now')
@@ -254,7 +250,7 @@ def _str_arg(name: str) -> str:
 
 
 def _build_where(q, provider, svc, days_back, days_forward,
-                 live, has_playables, multi, missing_http, premium, free, conn):
+                 live, has_playables, multi, missing_http, conn):
     where, params = [], []
     where.append("datetime(e.end_utc) >= datetime('now', ?)")
     params.append(f"-{days_back} days")
@@ -291,11 +287,6 @@ def _build_where(q, provider, svc, days_back, days_forward,
 
     if live:
         where.append("datetime(e.start_utc) <= datetime('now') AND datetime(e.end_utc) > datetime('now')")
-
-    if premium:
-        where.append("COALESCE(e.is_premium, 0) = 1")
-    if free:
-        where.append("COALESCE(e.is_free, 0) = 1")
 
     return where, params
 

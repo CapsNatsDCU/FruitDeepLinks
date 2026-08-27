@@ -63,8 +63,6 @@
     <div class="filter-item" id="f_has_playables" onclick="toggleFlag('has_playables')"><div><div class="name">Has playables</div><div class="desc">at least one playable</div></div><div class="state">OFF</div></div>
     <div class="filter-item" id="f_multi" onclick="toggleFlag('multi')"><div><div class="name">Multi-service</div><div class="desc">2+ services available</div></div><div class="state">OFF</div></div>
     <div class="filter-item" id="f_missing_http" onclick="toggleFlag('missing_http')"><div><div class="name">Missing HTTP</div><div class="desc">scheme but no http deeplink</div></div><div class="state">OFF</div></div>
-    <div class="filter-item" id="f_premium" onclick="toggleFlag('premium')"><div><div class="name">Premium only</div><div class="desc">is_premium = 1</div></div><div class="state">OFF</div></div>
-    <div class="filter-item" id="f_free" onclick="toggleFlag('free')"><div><div class="name">Free only</div><div class="desc">is_free = 1</div></div><div class="state">OFF</div></div>
   </div>
   <div style="font-size:12px;color:var(--text-muted)" id="status">Loading…</div>
 </div>
@@ -97,8 +95,8 @@
 
 {% block extra_script %}
 <script>
-let state = { q:"", provider:"", sort:"start_desc", days_back:2, days_forward:7, page:1, page_size:50, live:0, has_playables:0, multi:0, missing_http:0, premium:0, free:0 };
-const INT_KEYS = new Set(["page","page_size","days_back","days_forward","live","has_playables","multi","missing_http","premium","free"]);
+let state = { q:"", provider:"", sort:"start_desc", days_back:2, days_forward:7, page:1, page_size:50, live:0, has_playables:0, multi:0, missing_http:0 };
+const INT_KEYS = new Set(["page","page_size","days_back","days_forward","live","has_playables","multi","missing_http"]);
 
 function qsGet() { const p = new URLSearchParams(window.location.search); for (const k of Object.keys(state)) if (p.has(k)) state[k] = INT_KEYS.has(k) ? (parseInt(p.get(k)||"0",10)||0) : p.get(k); }
 function qsSet() { const p = new URLSearchParams(); for (const [k,v] of Object.entries(state)) if (v !== "" && v !== 0) p.set(k,String(v)); window.history.replaceState({},"",(window.location.pathname+"?"+p).replace(/\?$/,"")); }
@@ -109,7 +107,7 @@ function syncUI() {
   document.getElementById("days_back").value = state.days_back;
   document.getElementById("days_forward").value = state.days_forward;
   document.getElementById("page_size").value = String(state.page_size);
-  ["live","has_playables","multi","missing_http","premium","free"].forEach(k => setToggle(k, state[k]));
+  ["live","has_playables","multi","missing_http"].forEach(k => setToggle(k, state[k]));
 }
 function setToggle(k, on) {
   const el = document.getElementById("f_"+k); if (!el) return;
@@ -117,8 +115,6 @@ function setToggle(k, on) {
 }
 function toggleFlag(k) {
   state[k] = state[k] ? 0 : 1;
-  if (k==="premium" && state.premium) state.free = 0;
-  if (k==="free" && state.free) state.premium = 0;
   state.page = 1; qsSet(); syncUI(); loadEvents();
 }
 function applyFromUI() {
@@ -130,7 +126,7 @@ function applyFromUI() {
   state.page_size = parseInt(document.getElementById("page_size").value||"50",10);
   state.page = 1; qsSet(); loadEvents();
 }
-function resetFilters() { state = {q:"",provider:"",sort:"start_desc",days_back:2,days_forward:7,page:1,page_size:50,live:0,has_playables:0,multi:0,missing_http:0,premium:0,free:0}; qsSet(); syncUI(); loadEvents(); }
+function resetFilters() { state = {q:"",provider:"",sort:"start_desc",days_back:2,days_forward:7,page:1,page_size:50,live:0,has_playables:0,multi:0,missing_http:0}; qsSet(); syncUI(); loadEvents(); }
 function pageBy(d) { state.page = Math.max(1,(state.page||1)+d); qsSet(); loadEvents(); }
 
 function escH(s) { return String(s||"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
