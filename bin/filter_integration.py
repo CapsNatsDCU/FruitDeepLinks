@@ -339,54 +339,40 @@ def get_filtered_playables(
 
 
     try:
-        try:
-            cur.execute(
-                """
-                SELECT playable_id, provider, deeplink_play, deeplink_open,
-                       playable_url, title, content_id, priority, service_name, espn_graph_id,
-                       logical_service, locale, locale_fallback, feed_name
-                FROM playables
-                WHERE event_id = ?
-                ORDER BY priority ASC, playable_id ASC
-                """,
-                (event_id,),
-            )
-            rows = cur.fetchall()
-        except sqlite3.OperationalError:
-            # locale_fallback/feed_name columns not migrated yet (migrate_add_espn_locale_fallback.py /
-            # migrate_add_espn_feed_name_column.py haven't run in this environment) -- fall back to no-flag behavior.
-            cur.execute(
-                """
-                SELECT playable_id, provider, deeplink_play, deeplink_open,
-                       playable_url, title, content_id, priority, service_name, espn_graph_id,
-                       logical_service, locale
-                FROM playables
-                WHERE event_id = ?
-                ORDER BY priority ASC, playable_id ASC
-                """,
-                (event_id,),
-            )
-            rows = [tuple(row) + (0, None) for row in cur.fetchall()]
+        # Build the SELECT from whichever optional columns this DB actually
+        # has migrated, rather than assuming migrate_add_espn_locale_fallback.py
+        # and migrate_add_espn_feed_name_column.py either both ran or neither
+        # did -- they're independent migrations that can be applied in either
+        # order (or not at all, e.g. a test fixture's hand-built schema), so a
+        # DB can have one column without the other.
+        cur.execute("PRAGMA table_info(playables)")
+        available_cols = {row[1] for row in cur.fetchall()}
+
+        base_cols = [
+            "playable_id", "provider", "deeplink_play", "deeplink_open",
+            "playable_url", "title", "content_id", "priority", "service_name",
+            "espn_graph_id", "logical_service", "locale",
+        ]
+        optional_cols = [c for c in ("locale_fallback", "feed_name") if c in available_cols]
+        select_cols = base_cols + optional_cols
+
+        cur.execute(
+            f"""
+            SELECT {', '.join(select_cols)}
+            FROM playables
+            WHERE event_id = ?
+            ORDER BY priority ASC, playable_id ASC
+            """,
+            (event_id,),
+        )
+        rows = cur.fetchall()
 
         playables: List[Dict[str, Any]] = []
         for row in rows:
-            playable: Dict[str, Any] = {
-                "playable_id": row[0],
-                "provider": row[1],
-                "deeplink_play": row[2],
-                "deeplink_open": row[3],
-                "playable_url": row[4],
-                "title": row[5],
-                "content_id": row[6],
-                "priority": row[7],
-                "service_name": row[8],
-                "espn_graph_id": row[9],
-                "logical_service": row[10],  # Read from database
-                "locale": row[11],
-                "locale_fallback": row[12],
-                "feed_name": row[13],
-                "event_id": event_id,
-            }
+            playable: Dict[str, Any] = dict(zip(select_cols, row))
+            playable.setdefault("locale_fallback", 0)
+            playable.setdefault("feed_name", None)
+            playable["event_id"] = event_id
 
             # Language filtering for ESPN feeds.
             # Prefer the locale column (populated by migrate_add_locale.py from

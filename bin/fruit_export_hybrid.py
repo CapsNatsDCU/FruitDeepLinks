@@ -725,98 +725,24 @@ def build_direct_m3u(
             ) if FILTERING_AVAILABLE else None
 
             if FILTERING_AVAILABLE and p_rows:
+                # get_best_deeplink_for_event() already resolves the ESPN Watch
+                # Graph correction internally (via _resolve_deeplink_for_playable(),
+                # using the SAME winning playable's own espn_graph_id) -- no
+                # separate "fix" pass needed here. A prior version of this function
+                # had two such passes: one that scanned ALL of this event's
+                # playables (ignoring enabled_services entirely) for "any" ESPN
+                # graph ID to splice in, and a second fallback pass reimplementing
+                # the same filtering logic by hand. Both were silent no-ops in
+                # practice -- the first's `espn_graph_id.split(':')` check assumed
+                # the legacy "espn-watch:{id}:{hash}" format and never matched
+                # today's bare-UUID storage, and the second crashed on
+                # `sqlite3.Row.get()` (Row has no .get() method) and was swallowed
+                # by its own try/except -- but if either had ever actually fired,
+                # it could have silently substituted a DIFFERENT playable's stream
+                # (including one excluded by the user's filters) for the correctly
+                # selected one. Removed rather than fixed: get_filtered_playables()
+                # already does everything the second pass was trying to do.
                 deeplink_url = get_best_deeplink_for_event(conn, event_id, enabled_services, priority_map, amazon_penalty, language_preference)
-
-                # ESPN FIX: Apply ESPN Graph ID correction to filtered result
-                # get_best_deeplink_for_event returns the raw deeplink_play from database
-                # We need to correct ESPN deeplinks to use Graph IDs when available
-                if deeplink_url and deeplink_url.startswith("sportscenter://"):
-                    try:
-                        # Find ANY ESPN playable with a Graph ID (prefer enriched over un-enriched)
-                        for prow in p_rows:
-                            raw_provider = prow["provider"] if prow["provider"] else ""
-                            if raw_provider.lower() not in ('sportscenter', 'espn', 'espn+'):
-                                continue
-                            
-                            # sqlite3.Row dict-style access
-                            espn_graph_id = prow["espn_graph_id"] if "espn_graph_id" in prow.keys() else None
-                            if espn_graph_id:
-                                parts = espn_graph_id.split(':')
-                                if len(parts) >= 2:
-                                    play_id = parts[1]
-                                    deeplink_url = f"sportscenter://x-callback-url/showWatchStream?playID={play_id}"
-                                    break  # Use first ESPN playable with Graph ID
-                    except Exception:
-                        pass  # Fall back to original deeplink
-
-            # Second pass: use logical_service_mapper directly on playables
-            if (
-                not deeplink_url
-                and p_rows
-                and FILTERING_AVAILABLE
-                and enabled_services
-            ):
-                try:
-                    from logical_service_mapper import get_logical_service_for_playable
-                    
-                    # Determine if this event is Amazon-exclusive (for synthetic service labeling)
-                    is_exclusive = False
-                    best = None
-                    for prow in p_rows:
-                        raw_provider = (prow["provider"] or "").strip()
-                        playable_url = (prow["playable_url"] or "").strip()
-                        deeplink_play = (prow["deeplink_play"] or "").strip()
-                        deeplink_open = (prow["deeplink_open"] or "").strip()
-                        espn_graph_id = (prow.get("espn_graph_id") or "").strip() if "espn_graph_id" in prow.keys() else ""
-
-                        url = deeplink_play or deeplink_open or playable_url
-                        if not url:
-                            continue
-
-                        # ESPN FIX: Use ESPN Graph ID to generate working deeplinks
-                        # Apple TV provides broken playChannel or wrong playID deeplinks
-                        # ESPN Watch Graph provides correct playID deeplinks that work
-                        if espn_graph_id and raw_provider.lower() in ('sportscenter', 'espn', 'espn+'):
-                            try:
-                                # Extract playID from ESPN Graph ID (format: espn-watch:{playID}:{hash})
-                                parts = espn_graph_id.split(':')
-                                if len(parts) >= 2:
-                                    play_id = parts[1]
-                                    # Generate corrected scheme deeplink
-                                    url = f"sportscenter://x-callback-url/showWatchStream?playID={play_id}"
-                                    deeplink_play = url
-                            except Exception:
-                                pass  # Fall back to original deeplink
-
-                        logical_service = get_logical_service_for_playable(
-                            provider=raw_provider,
-                            deeplink_play=deeplink_play or None,
-                            deeplink_open=deeplink_open or None,
-                            playable_url=playable_url or None,
-                            event_id=event_id,
-                            conn=conn,
-                        )
-                        
-                        if not logical_service or logical_service not in enabled_services:
-                            continue
-
-                        prio = 0
-                        try:
-                            if "priority" in prow.keys() and prow["priority"] is not None:
-                                prio = int(prow["priority"])
-                        except Exception:
-                            pass
-
-                        if best is None or prio > best["priority"]:
-                            best = {"url": url, "priority": prio}
-
-                    if best is not None:
-                        deeplink_url = best["url"]
-                        reason = None
-                except Exception:
-                    # Don't break the whole export if mapping fails
-                    pass
-
 
             if not deeplink_url:
                 has_playables = bool(p_rows)

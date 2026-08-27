@@ -63,7 +63,9 @@ def _make_espn_db(path):
             airing_id TEXT,
             simulcast_airing_id TEXT,
             program_id TEXT,
-            language TEXT
+            language TEXT,
+            feed_name TEXT,
+            feed_type TEXT
         )
         """
     )

@@ -330,15 +330,18 @@ def api_adb_lane_deeplink(provider_code, lane_number):
             # ESPN correction
             if espn_graph_id and provider_code.lower() in ("sportscenter", "espn", "espn+"):
                 try:
-                    from deeplink_converter import generate_espn_scheme_deeplink
+                    from deeplink_converter import generate_espn_scheme_deeplink, convert_espn
                     corrected = generate_espn_scheme_deeplink(espn_graph_id, deeplink_url)
                     if corrected:
                         deeplink_url = corrected
-                        parts = espn_graph_id.split(":")
-                        if len(parts) >= 2:
-                            provider_link["http_deeplink_url"] = (
-                                f"https://www.espn.com/watch/player/_/id/{parts[1]}"
-                            )
+                        # convert_espn() pulls the UUID via regex search rather than
+                        # assuming the legacy "espn-watch:{id}:{hash}" colon format --
+                        # a prior `espn_graph_id.split(":")` here silently never
+                        # matched today's bare-UUID storage, so http_deeplink_url
+                        # was never actually updated by this block.
+                        http_corrected = convert_espn(deeplink_url, espn_graph_id=espn_graph_id)
+                        if http_corrected:
+                            provider_link["http_deeplink_url"] = http_corrected
                 except ImportError:
                     pass
 
