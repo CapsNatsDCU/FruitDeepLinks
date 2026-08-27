@@ -67,6 +67,18 @@ def entitlement_logical_service(espn_event: Dict) -> Optional[str]:
     return ESPN_NETWORK_ENTITLEMENTS.get(network)
 
 
+# ESPN Watch Graph's own `language` field (confirmed live: always exactly
+# "en" or "es", no other values, and never mixed between candidates sharing
+# one program_id) is authoritative -- ESPN told us directly, nothing here is
+# inferred from Apple's title/service_name text the way migrate_add_locale.py
+# has to for playables that never match Watch Graph at all.
+WATCH_GRAPH_LANGUAGE_TO_LOCALE = {"en": "en_US", "es": "es_MX"}
+
+
+def locale_from_espn_event(espn_event: Dict) -> Optional[str]:
+    return WATCH_GRAPH_LANGUAGE_TO_LOCALE.get((espn_event.get('language') or '').strip().lower())
+
+
 def ensure_espn_graph_id_column(fruit_db: str) -> None:
     """Add espn_graph_id column to playables table if it doesn't exist"""
     conn = sqlite3.connect(fruit_db)
@@ -176,7 +188,7 @@ def get_espn_graph_events(espn_db: str) -> Dict[str, List[Dict]]:
     
     cursor.execute("""
         SELECT e.id, e.program_id, e.airing_id, e.simulcast_airing_id, e.title, f.url,
-               e.packages, e.network, f.id as feed_id
+               e.packages, e.network, f.id as feed_id, e.language
         FROM events e
         JOIN feeds f ON e.id = f.event_id
         WHERE e.program_id IS NOT NULL
@@ -195,6 +207,7 @@ def get_espn_graph_events(espn_db: str) -> Dict[str, List[Dict]]:
             'packages': row[6],
             'network': row[7],
             'feed_id': row[8],
+            'language': row[9],
         })
 
     conn.close()
@@ -312,16 +325,24 @@ def fetch_base_playable(conn: sqlite3.Connection, event_id: str, playable_id: st
 
 def build_child_row(
     base_row: Dict, event_id: str, cpid: str, logical_service: str,
-    playback_id: str, now_utc: str,
+    playback_id: str, now_utc: str, locale: Optional[str],
 ) -> Tuple:
-    """Build a full playables row tuple for an entitlement-split child."""
+    """Build a full playables row tuple for an entitlement-split child.
+
+    `locale` comes from the child's own Watch Graph candidate (its own
+    `language` field), not copied from the parent playable -- confirmed live
+    that language never varies between candidates sharing one program_id, but
+    sourcing it per-candidate is the more correct architecture regardless.
+    Falls back to the parent's locale if this candidate's language was
+    unrecognized (see locale_from_espn_event).
+    """
     deeplink = f"sportscenter://x-callback-url/showWatchStream?playID={playback_id}"
     http_deeplink = f"https://www.espn.com/watch/player/_/id/{playback_id}"
     return (
         event_id, cpid, base_row.get("provider"), deeplink, deeplink,
         base_row.get("playable_url"), base_row.get("title"), base_row.get("content_id"),
         get_internal_priority(logical_service), now_utc, http_deeplink, playback_id,
-        base_row.get("service_name"), logical_service, base_row.get("locale"), 0,
+        base_row.get("service_name"), logical_service, locale or base_row.get("locale"), 0,
     )
 
 
@@ -371,10 +392,12 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
     matched = 0
     unmatched = 0
     reclassified = 0
+    locale_set = 0
     split_created = 0
     unmatched_details = []
     updates_to_apply = []
     reclass_updates_to_apply = []
+    locale_updates_to_apply = []
     child_deletes = []
     child_upserts = []
     used_feed_ids_by_program: Dict[str, set] = {}
@@ -432,6 +455,17 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
                     )
                     reclassified += 1
 
+                # ESPN's own `language` field is authoritative -- ESPN told us
+                # directly whether this specific airing is English or Spanish,
+                # no need to infer it from Apple's title/service_name text the
+                # way migrate_add_locale.py has to for playables that never
+                # match here at all. Overwrites whatever locale Step 6/5d
+                # guessed for this row.
+                new_locale = locale_from_espn_event(espn_event)
+                if new_locale:
+                    locale_updates_to_apply.append((new_locale, base_event_id, base_playable_id))
+                    locale_set += 1
+
                 # Log first 5 matches
                 if matched <= 3:
                     _log(f"Match #{matched}: {playable['title'][:60]}")
@@ -470,8 +504,9 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
                             if base_row is None:
                                 break
                         cpid = child_playable_id(base_playable_id, child_playback_id)
+                        child_locale = locale_from_espn_event(child_candidate)
                         child_upserts.append(
-                            build_child_row(base_row, base_event_id, cpid, ls, child_playback_id, now_utc)
+                            build_child_row(base_row, base_event_id, cpid, ls, child_playback_id, now_utc, child_locale)
                         )
                         split_created += 1
                         if split_created <= 3:
@@ -528,6 +563,13 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
                 WHERE event_id = ? AND playable_id = ?
             """, reclass_updates_to_apply)
 
+        if locale_updates_to_apply:
+            cursor.executemany("""
+                UPDATE playables
+                SET locale = ?
+                WHERE event_id = ? AND playable_id = ?
+            """, locale_updates_to_apply)
+
         if child_upserts:
             cursor.executemany("""
                 INSERT OR REPLACE INTO playables (
@@ -545,6 +587,8 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
         _log(f"Batch update complete in {update_time:.2f} seconds - {updated} playables updated")
         if reclass_updates_to_apply:
             _log(f"   {len(reclass_updates_to_apply)} reclassified by ESPN entitlement data (MLB.TV / MLB Network / ESPN Unlimited)")
+        if locale_updates_to_apply:
+            _log(f"   {len(locale_updates_to_apply)} locale values set from ESPN Watch Graph's own language field")
         if child_upserts:
             _log(f"   {len(child_upserts)} entitlement-split child playables created")
     else:
@@ -560,6 +604,7 @@ def enrich_playables(fruit_db: str, espn_db: str, dry_run: bool = False, skip_en
     _log(f"Matched:   {matched} ({matched/len(apple_playables)*100:.1f}%)")
     _log(f"Unmatched: {unmatched} ({unmatched/len(apple_playables)*100:.1f}%)")
     _log(f"Reclassified by entitlement data: {reclassified}")
+    _log(f"Locale set from Watch Graph language: {locale_set}")
     _log(f"Entitlement-split child playables: {split_created}")
     
     if dry_run:

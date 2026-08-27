@@ -62,7 +62,8 @@ def _make_espn_db(path):
             packages TEXT,
             airing_id TEXT,
             simulcast_airing_id TEXT,
-            program_id TEXT
+            program_id TEXT,
+            language TEXT
         )
         """
     )
@@ -127,11 +128,11 @@ class EspnEntitlementSplitTest(unittest.TestCase):
         )
         self.fconn.commit()
 
-    def _insert_espn_feed(self, espn_event_id, url, packages, network):
+    def _insert_espn_feed(self, espn_event_id, url, packages, network, language="en", program_id=None):
         self.econn.execute(
-            "INSERT INTO events (id, start_utc, stop_utc, title, network, packages, program_id) "
-            "VALUES (?, '2026-08-26T19:00:00Z', '2026-08-26T22:00:00Z', 'Cubs at D-backs', ?, ?, ?)",
-            (espn_event_id, network, packages, self.program_id),
+            "INSERT INTO events (id, start_utc, stop_utc, title, network, packages, program_id, language) "
+            "VALUES (?, '2026-08-26T19:00:00Z', '2026-08-26T22:00:00Z', 'Cubs at D-backs', ?, ?, ?, ?)",
+            (espn_event_id, network, packages, program_id or self.program_id, language),
         )
         self.econn.execute(
             "INSERT INTO feeds (event_id, url) VALUES (?, ?)",
@@ -173,14 +174,42 @@ class EspnEntitlementSplitTest(unittest.TestCase):
         primary = next(r for r in rows if r[0] == "apple-playable-1")
         self.assertEqual(primary[1], "espn_mlb_tv", "primary keeps today's existing pick (packages-preferring)")
         self.assertEqual(primary[2], "mlbtv-playback-id")
+        self.assertEqual(primary[4], "en_US", "locale set authoritatively from Watch Graph's language field")
 
         child = next(r for r in rows if r[0] != "apple-playable-1")
         self.assertIn("apple-playable-1::espn-ent:", child[0])
         self.assertEqual(child[1], "espn_unlimited", "discarded entitlement must survive as its own row")
         self.assertEqual(child[2], "unlimited-playback-id")
         self.assertIn("unlimited-playback-id", child[3])
-        self.assertEqual(child[4], "en_US", "child inherits parent's locale")
+        self.assertEqual(child[4], "en_US", "child's locale comes from its own Watch Graph candidate")
         self.assertEqual(child[5], 0)
+
+    def test_split_child_gets_its_own_locale_not_parents(self):
+        # Distinct from the entitlement split above: here both candidates
+        # share the same entitlement bucket resolution (network doesn't map
+        # to a package-based reclassification) but differ in language --
+        # exercises that build_child_row() sources locale per-candidate
+        # rather than copying the parent's.
+        self._insert_espn_feed(
+            "espn-watch:en-feed", "https://www.espn.com/watch/player/_/id/en-feed",
+            None, "ESPN Unlimited", language="en",
+        )
+        self._insert_espn_feed(
+            "espn-watch:es-feed", "https://www.espn.com/watch/player/_/id/es-feed",
+            '["MLB_TV"]', "MLB.TV", language="es",
+        )
+
+        enrich.enrich_playables(self.fruit_db, self.espn_db, dry_run=False, skip_enrich=False)
+
+        conn = sqlite3.connect(self.fruit_db)
+        rows = conn.execute(
+            "SELECT playable_id, logical_service, locale FROM playables WHERE event_id = 'evt-1' ORDER BY playable_id"
+        ).fetchall()
+        self.assertEqual(len(rows), 2)
+
+        by_ls = {r[1]: r[2] for r in rows}
+        self.assertEqual(by_ls["espn_mlb_tv"], "es_MX", "the Spanish candidate's own language, not the parent's")
+        self.assertEqual(by_ls["espn_unlimited"], "en_US", "the English candidate's own language")
 
     def test_single_entitlement_creates_no_sibling(self):
         # Only one Watch Graph candidate at all -- today's common case, must

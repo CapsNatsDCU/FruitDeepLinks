@@ -136,6 +136,93 @@ class EspnSpanishOnlyLocaleFallbackTest(unittest.TestCase):
         )
         self.assertEqual(len(after), 1)
 
+    def test_named_deportes_only_event_is_never_fixed_or_shown_under_english(self):
+        # Regression: spot-checking the locale_fallback fix found that a real,
+        # distinctly-branded "ESPN Deportes" channel (not an ambiguous generic
+        # label) got swept up by find_spanish_only_events() and flagged
+        # locale_fallback=1 -- which then made _classify_espn_locale() treat
+        # a genuinely Spanish-language broadcast as non-Spanish, so it started
+        # showing under an English-only filter (real example: a Little League
+        # game with only an ESPN Deportes broadcast). Unlike the generic
+        # "ESPN Unlimited" label case above, there's no hidden English
+        # broadcast behind a Deportes-branded feed for the "fix" to unlock.
+        raw_json = json.dumps({"playables": {"p2": {"externalId": "ext-deportes-456"}}})
+        self.conn.execute(
+            "INSERT INTO events (id, raw_attributes_json) VALUES ('evt-deportes', ?)",
+            (raw_json,),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO playables (
+                event_id, playable_id, provider, deeplink_play, deeplink_open,
+                playable_url, title, content_id, priority, service_name,
+                logical_service, locale
+            ) VALUES (
+                'evt-deportes', 'p2', 'sportscenter',
+                'sportscenter://x-callback-url/showWatchStream?playID=deportes-only-playid',
+                'sportscenter://x-callback-url/showWatchStream?playID=deportes-only-playid',
+                'https://plus.espn.com/watch/deportes-only-playid',
+                'Little League Baseball', 'p2', 26, 'ESPN Deportes',
+                'espn_unlimited', 'es_MX'
+            )
+            """
+        )
+        self.conn.commit()
+
+        candidates = fix_espn_spanish_only.find_spanish_only_events(self.conn)
+        self.assertEqual(
+            [c[0] for c in candidates], ["evt-cubs"],
+            "named-Deportes event must not be treated as a fixable ambiguous label",
+        )
+
+        # Even if locale_fallback were set on it anyway (belt-and-suspenders:
+        # don't rely solely on the SQL exclusion above), the classifier must
+        # still treat it as Spanish.
+        self.conn.execute(
+            "UPDATE playables SET locale_fallback = 1 WHERE event_id = 'evt-deportes'"
+        )
+        self.conn.commit()
+
+        result = filter_integration.get_filtered_playables(
+            self.conn, "evt-deportes", enabled_services=[], language_preference="en",
+        )
+        self.assertEqual(result, [], "genuine Deportes-only broadcast must stay excluded under English")
+
+    def test_matched_spanish_only_playable_is_not_a_fix_candidate(self):
+        # fruit_enrich_espn.py now sets locale authoritatively from ESPN
+        # Watch Graph's own language field for any matched playable (has
+        # espn_graph_id set) -- if it's still es_MX after that, that's
+        # confirmed reality, not something to rewrite or flag. This script's
+        # job is now only the ~20% Watch Graph never matches at all.
+        raw_json = json.dumps({"playables": {"p3": {"externalId": "ext-matched-789"}}})
+        self.conn.execute(
+            "INSERT INTO events (id, raw_attributes_json) VALUES ('evt-matched', ?)",
+            (raw_json,),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO playables (
+                event_id, playable_id, provider, deeplink_play, deeplink_open,
+                playable_url, title, content_id, priority, service_name,
+                logical_service, locale, espn_graph_id
+            ) VALUES (
+                'evt-matched', 'p3', 'sportscenter',
+                'sportscenter://x-callback-url/showWatchStream?playID=matched-spanish-playid',
+                'sportscenter://x-callback-url/showWatchStream?playID=matched-spanish-playid',
+                'https://plus.espn.com/watch/matched-spanish-playid',
+                'Cubs vs Brewers', 'p3', 26, 'ESPN Unlimited',
+                'espn_unlimited', 'es_MX', 'matched-spanish-playid'
+            )
+            """
+        )
+        self.conn.commit()
+
+        candidates = fix_espn_spanish_only.find_spanish_only_events(self.conn)
+        self.assertEqual(
+            [c[0] for c in candidates], ["evt-cubs"],
+            "matched (espn_graph_id set) event must not be treated as a fix candidate",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

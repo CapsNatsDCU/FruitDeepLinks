@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
 """
-fix_espn_spanish_only.py - Fix ESPN playables that only have Spanish broadcasts
+fix_espn_spanish_only.py - Fix ESPN playables that only have Spanish broadcasts,
+for the subset ESPN Watch Graph never matched.
 
-For ESPN events where Apple TV only provides Spanish playables (es_MX locale),
-this script updates the deeplink to use the externalId instead of the Spanish
-punchoutUrl playID. This allows the ESPN app to launch the main English broadcast.
+For a MATCHED playable, fruit_enrich_espn.py already sets `locale` directly
+from Watch Graph's own `language` field -- authoritative, not a guess, so
+there's nothing for this script to "fix": if Watch Graph confirms an event's
+only ESPN option is genuinely Spanish, that's just reality, and the deeplink
+it gets is already correct (filter_integration.py's _resolve_deeplink_for_playable
+swaps in the Watch Graph playback ID for any playable with espn_graph_id set,
+independent of anything this script does).
+
+This script only has real work to do for the ~20% of ESPN playables Watch
+Graph never matches at all (see fruit_enrich_espn.py's unmatched rate): for
+those, Apple's own locale guess (from migrate_add_locale.py, since there's no
+better signal) might say Spanish-only with no way to verify, so this rewrites
+the deeplink to Apple's own externalId (which tends to launch the general
+broadcast rather than a Spanish-specific playID) as a best effort, and flags
+locale_fallback=1 since we can't be certain the language actually changed.
 
 Usage:
   python fix_espn_spanish_only.py --db data/fruit_events.db
@@ -19,17 +32,36 @@ from typing import List, Tuple
 
 def find_spanish_only_events(conn: sqlite3.Connection) -> List[Tuple]:
     """
-    Find ESPN events that only have Spanish playables (no English alternatives).
-    
+    Find ESPN events that only have Spanish playables (no English
+    alternatives) AND were never matched by fruit_enrich_espn.py -- a matched
+    playable already has an authoritative locale straight from ESPN Watch
+    Graph's own language field (see fruit_enrich_espn.py's locale_set), so if
+    it's still Spanish-only after that, that's confirmed reality, not
+    something to "fix".
+
+    Also excludes playables whose service_name names a real,
+    distinctly-branded Spanish-language channel ("ESPN Deportes",
+    "...Español"). Those aren't an ambiguous generic label with an English
+    broadcast hiding behind them -- rewriting the deeplink to the externalId
+    "general broadcast" wouldn't change what's actually airing, so there's
+    nothing to fix. Flagging them here would also set locale_fallback=1,
+    which tells _classify_espn_locale() in filter_integration.py to stop
+    treating the row as Spanish -- correct for a genuinely ambiguous generic
+    label, wrong for a real Deportes feed (that check itself also refuses to
+    honor the flag for named-Deportes rows, as defense in depth, but
+    excluding them here too avoids the pointless deeplink rewrite and
+    misleading locale_fallback=1 state on data that was never actually
+    broken).
+
     Returns: List of (event_id, playable_id, deeplink_play, service_name, title, espn_graph_id, raw_attributes_json) tuples
     """
     cur = conn.cursor()
-    
+
     # Find events with ESPN playables
     # Note: external_id is stored in events.raw_attributes_json, not in playables table
     cur.execute("""
         WITH event_locales AS (
-            SELECT 
+            SELECT
                 event_id,
                 COUNT(CASE WHEN locale = 'es_MX' THEN 1 END) as spanish_count,
                 COUNT(CASE WHEN locale = 'en_US' OR locale IS NULL THEN 1 END) as english_count
@@ -37,7 +69,7 @@ def find_spanish_only_events(conn: sqlite3.Connection) -> List[Tuple]:
             WHERE logical_service IN ('espn_plus', 'espn_linear', 'espn_unlimited', 'espn_mlb_network', 'espn_mlb_tv')
             GROUP BY event_id
         )
-        SELECT 
+        SELECT
             p.event_id,
             p.playable_id,
             p.deeplink_play,
@@ -52,10 +84,13 @@ def find_spanish_only_events(conn: sqlite3.Connection) -> List[Tuple]:
           AND el.spanish_count > 0
           AND el.english_count = 0
           AND p.locale = 'es_MX'
+          AND (p.espn_graph_id IS NULL OR p.espn_graph_id = '')
           AND e.raw_attributes_json IS NOT NULL
+          AND p.service_name NOT LIKE '%Deportes%'
+          AND p.service_name NOT LIKE '%Espa%ol%'
         ORDER BY p.event_id, p.priority
     """)
-    
+
     return cur.fetchall()
 
 
@@ -65,11 +100,11 @@ def fix_spanish_only_playables(
     dry_run: bool = False
 ) -> int:
     """
-    Update deeplinks for Spanish-only playables to use ESPN Graph ID or externalId.
-
-    Priority:
-    1. espn_graph_id (if enriched by fruit_enrich_espn.py)
-    2. externalId from raw_attributes_json (fallback if no ESPN Graph data)
+    Update deeplinks for Spanish-only, Watch-Graph-unmatched playables to use
+    Apple's own externalId instead of the Spanish punchoutUrl playID (tends
+    to launch the general broadcast rather than a Spanish-specific stream).
+    find_spanish_only_events() already restricts candidates to rows with no
+    espn_graph_id, so there's no better (Watch Graph) ID to prefer here.
 
     Every candidate row also gets locale_fallback=1 (regardless of whether its
     deeplink actually needed rewriting this run), so filter_integration.py's
@@ -95,7 +130,9 @@ def fix_spanish_only_playables(
     updates = []
     fallback_flags = []
 
-    for event_id, playable_id, deeplink_play, service_name, title, espn_graph_id, raw_json in playables:
+    for event_id, playable_id, deeplink_play, service_name, title, _espn_graph_id, raw_json in playables:
+        # _espn_graph_id is always empty here -- find_spanish_only_events()
+        # only returns Watch-Graph-unmatched candidates (see its docstring).
         # Extract current playID from deeplink (if exists)
         current_playid = None
         if deeplink_play and 'playID=' in deeplink_play:
@@ -117,27 +154,9 @@ def fix_spanish_only_playables(
         if not external_id:
             # Skip if we can't find externalId
             continue
-        
-        # Determine best playID to use
-        # Priority: ESPN Graph ID > externalId
-        best_playid = None
-        source = None
-        
-        if espn_graph_id:
-            # ESPN Graph ID is in format: espn-watch:PLAYID
-            # Extract just the playID
-            if espn_graph_id.startswith('espn-watch:'):
-                best_playid = espn_graph_id.replace('espn-watch:', '', 1)
-                source = "ESPN Graph"
-            else:
-                # Fallback: use it as-is
-                best_playid = espn_graph_id
-                source = "ESPN Graph"
-        
-        if not best_playid:
-            # Use externalId as fallback
-            best_playid = external_id
-            source = "externalId"
+
+        best_playid = external_id
+        source = "externalId"
 
         # This row has a usable general-broadcast playID, so it's no longer
         # Spanish-exclusive from the filter's point of view -- flag it even

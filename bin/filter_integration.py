@@ -278,6 +278,16 @@ def _classify_espn_locale(playable: Dict[str, Any]) -> tuple:
     links (regression: MLB Unlimited games with only a Spanish broadcast
     showing no valid links under an English filter).
 
+    That override does NOT apply when is_named_deportes is True. "ESPN
+    Deportes" is a real, distinctly-branded Spanish-language linear network,
+    not an ambiguous generic label with an English broadcast hiding behind
+    it -- fix_espn_spanish_only.py's rewrite (point at the externalId/
+    espn_graph_id "general broadcast") doesn't change what's actually being
+    aired for a genuine Deportes feed, so locale_fallback must not silence
+    the language filter for it (regression found spot-checking: a Little
+    League game with only an ESPN Deportes broadcast got locale_fallback
+    set and started showing under an English-only filter).
+
     Shared by the language-preference filter and the ESPN channel tiebreak
     sort in get_filtered_playables() so the two can't drift apart (community
     report #787 was caused by exactly that: only one of the two had locale
@@ -291,7 +301,7 @@ def _classify_espn_locale(playable: Dict[str, Any]) -> tuple:
         is_spanish = locale.startswith("es")
     else:
         is_spanish = is_named_deportes or "español" in title
-    if playable.get("locale_fallback"):
+    if playable.get("locale_fallback") and not is_named_deportes:
         is_spanish = False
     return is_spanish, is_named_deportes
 
