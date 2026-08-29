@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -50,6 +51,7 @@ class XtreamConfig:
     category_ids: tuple[str, ...]
     timezone_name: str = "UTC"
     default_duration_minutes: int = DEFAULT_DURATION_MINUTES
+    event_window_days: int = 7
 
     def validate(self) -> None:
         if not self.enabled:
@@ -66,6 +68,8 @@ class XtreamConfig:
             )
         if self.default_duration_minutes <= 0:
             raise XtreamError("XTREAM_DEFAULT_DURATION_MINUTES must be positive")
+        if self.event_window_days <= 0:
+            raise XtreamError("Xtream event import window must be positive")
         try:
             ZoneInfo(self.timezone_name)
         except ZoneInfoNotFoundError as exc:
@@ -128,6 +132,10 @@ def load_config(conn: Optional[sqlite3.Connection] = None,
         duration = int(duration_raw)
     except (TypeError, ValueError) as exc:
         raise XtreamError("XTREAM_DEFAULT_DURATION_MINUTES must be an integer") from exc
+    try:
+        event_window_days = int(setting("days_ahead", "FRUIT_DAYS_AHEAD", 7))
+    except (TypeError, ValueError) as exc:
+        raise XtreamError("FRUIT_DAYS_AHEAD must be an integer") from exc
 
     enabled = _as_bool(setting("xtream_enabled", "XTREAM_ENABLED", False))
     # Match the other scraper toggles: an explicit false environment value is
@@ -146,6 +154,7 @@ def load_config(conn: Optional[sqlite3.Connection] = None,
         ),
         timezone_name=str(setting("xtream_timezone", "XTREAM_TIMEZONE", "UTC") or "UTC"),
         default_duration_minutes=duration,
+        event_window_days=event_window_days,
     )
 
 
@@ -179,13 +188,32 @@ def build_stream_url(config: XtreamConfig, stream_id: Any,
 
 class XtreamClient:
     def __init__(self, config: XtreamConfig, session=None,
-                 timeout: int = DEFAULT_TIMEOUT_SECONDS):
+                 timeout: int = DEFAULT_TIMEOUT_SECONDS,
+                 subprocess_runner=None, curl_binary: str = "curl"):
         config.validate()
         self.config = config
         self.session = session or requests.Session()
         self.timeout = timeout
+        self.subprocess_runner = subprocess_runner or subprocess.run
+        self.curl_binary = curl_binary
 
-    def _get(self, action: str, category_id: Optional[str] = None) -> list[dict]:
+    @staticmethod
+    def _usable_payload(payload: Any, required_key: str) -> Optional[list[dict]]:
+        if not isinstance(payload, list):
+            return None
+        rows = [
+            item for item in payload
+            if isinstance(item, dict) and item.get(required_key) is not None
+        ]
+        # An empty list is structurally valid for curl (the final transport).
+        # A non-empty list with no usable objects is never safe for stale
+        # reconciliation.
+        if payload and not rows:
+            return None
+        return rows
+
+    def _get_with_requests(self, action: str,
+                           category_id: Optional[str]) -> Optional[list[dict]]:
         params = {
             "username": self.config.username,
             "password": self.config.password,
@@ -200,13 +228,77 @@ class XtreamClient:
                 timeout=self.timeout,
             )
             response.raise_for_status()
-            payload = response.json()
+            required_key = "category_id" if action == "get_live_categories" else "stream_id"
+            rows = self._usable_payload(response.json(), required_key)
+            # Some incompatible providers return a misleading empty list to
+            # Python clients. Give curl one chance; curl may confirm the empty
+            # list as the final authoritative response.
+            return rows if rows else None
         except Exception:
             # requests exceptions can embed the fully-authenticated request URL.
-            raise XtreamError(f"Xtream API request failed for action {action}") from None
-        if not isinstance(payload, list):
-            raise XtreamError(f"Xtream API returned an unexpected response for action {action}")
-        return [item for item in payload if isinstance(item, dict)]
+            # Do not propagate or log their text; curl gets one clean retry.
+            return None
+
+    def _get_with_curl(self, action: str,
+                       category_id: Optional[str]) -> list[dict]:
+        command = [
+            self.curl_binary,
+            "-4",
+            "-sS",
+            "-L",
+            "--max-time",
+            str(self.timeout),
+            "--get",
+            f"{self.config.server_url}/player_api.php",
+            "--data-urlencode",
+            f"username={self.config.username}",
+            "--data-urlencode",
+            f"password={self.config.password}",
+            "--data-urlencode",
+            f"action={action}",
+        ]
+        if category_id is not None:
+            command.extend(("--data-urlencode", f"category_id={category_id}"))
+        try:
+            completed = self.subprocess_runner(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout + 5,
+                check=False,
+            )
+        except Exception:
+            # File/process errors may include command arguments. Never surface
+            # the original exception because those arguments contain secrets.
+            raise XtreamError(
+                f"Xtream curl transport could not run for action {action}"
+            ) from None
+        if completed.returncode != 0:
+            # curl stderr can include the requested URL, so only retain its
+            # credential-free exit code.
+            raise XtreamError(
+                f"Xtream curl transport failed for action {action} "
+                f"with exit code {completed.returncode}"
+            )
+        try:
+            payload = json.loads(completed.stdout)
+        except (TypeError, json.JSONDecodeError):
+            raise XtreamError(
+                f"Xtream curl transport returned invalid JSON for action {action}"
+            ) from None
+        required_key = "category_id" if action == "get_live_categories" else "stream_id"
+        rows = self._usable_payload(payload, required_key)
+        if rows is None:
+            raise XtreamError(
+                f"Xtream curl transport returned an unusable response for action {action}"
+            )
+        return rows
+
+    def _get(self, action: str, category_id: Optional[str] = None) -> list[dict]:
+        rows = self._get_with_requests(action, category_id)
+        if rows is not None:
+            return rows
+        return self._get_with_curl(action, category_id)
 
     def get_live_categories(self) -> list[dict]:
         return self._get("get_live_categories")
@@ -262,42 +354,120 @@ def parse_timestamp(value: Any, timezone_name: str = "UTC") -> Optional[datetime
     return parsed.astimezone(timezone.utc)
 
 
+_NAME_SEPARATOR = r"[\sT|\-–—]+"
+_NAME_TIME = (
+    r"(?:"
+    r"(?P<hour12>0?[1-9]|1[0-2])"
+    r"(?::(?P<minute12>[0-5]\d)(?::(?P<second12>[0-5]\d))?)?"
+    r"\s*(?P<ampm>AM|PM)"
+    r"|"
+    r"(?P<hour24>[01]?\d|2[0-3]):(?P<minute24>[0-5]\d)"
+    r"(?::(?P<second24>[0-5]\d))?(?!\s*(?:AM|PM))"
+    r")"
+)
 _NAME_TIME_PATTERNS = (
-    re.compile(
-        r"(?P<date>\d{4}-\d{1,2}-\d{1,2})[ T|\-]+"
-        r"(?P<time>\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)",
-        re.IGNORECASE,
+    (
+        "iso",
+        re.compile(
+            rf"(?<!\d)(?P<year>\d{{4}})-(?P<month>\d{{1,2}})-(?P<day>\d{{1,2}})"
+            rf"{_NAME_SEPARATOR}{_NAME_TIME}",
+            re.IGNORECASE,
+        ),
     ),
-    re.compile(
-        r"(?P<date>\d{1,2}/\d{1,2}/\d{4})[ T|\-]+"
-        r"(?P<time>\d{1,2}:\d{2}\s*(?:AM|PM)?)",
-        re.IGNORECASE,
+    (
+        "us_with_year",
+        re.compile(
+            rf"(?<!\d)(?P<month>\d{{1,2}})/(?P<day>\d{{1,2}})/(?P<year>\d{{4}})"
+            rf"{_NAME_SEPARATOR}{_NAME_TIME}",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "us_without_year",
+        re.compile(
+            rf"(?<![\d/])(?P<month>\d{{1,2}})/(?P<day>\d{{1,2}})"
+            rf"{_NAME_SEPARATOR}{_NAME_TIME}",
+            re.IGNORECASE,
+        ),
     ),
 )
 
 
-def parse_start_from_name(name: Any, timezone_name: str = "UTC") -> Optional[datetime]:
-    """Parse only names containing a complete date plus time.
+def _time_from_name_match(match: re.Match) -> tuple[int, int, int]:
+    if match.group("hour12") is not None:
+        hour = int(match.group("hour12"))
+        minute = int(match.group("minute12") or 0)
+        if match.group("ampm").upper() == "AM":
+            hour = 0 if hour == 12 else hour
+        else:
+            hour = 12 if hour == 12 else hour + 12
+        return hour, minute, int(match.group("second12") or 0)
+    return (
+        int(match.group("hour24")),
+        int(match.group("minute24")),
+        int(match.group("second24") or 0),
+    )
 
-    Time-only names such as ``NHL | Team A @ Team B | 7:00 PM`` are rejected;
-    assigning today's date would create incorrect guide entries around time-zone
-    and midnight boundaries.
+
+def _reference_in_zone(now: Optional[datetime], zone: ZoneInfo) -> datetime:
+    reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=zone)
+    return reference.astimezone(zone)
+
+
+def parse_start_from_name(
+    name: Any,
+    timezone_name: str = "UTC",
+    now: Optional[datetime] = None,
+    event_window_days: int = 7,
+) -> Optional[datetime]:
+    """Parse a provider name only when it contains a calendar date and time.
+
+    Names may use an explicit year or an ``M/D`` date. For yearless names,
+    candidates in the previous, current, and next year are compared in the
+    configured provider timezone. The closest candidate must fall within the
+    configured event-import window, preventing a blind current-year choice at
+    New Year. Completely date-free names remain unparseable.
     """
     text = str(name or "")
-    for pattern in _NAME_TIME_PATTERNS:
+    zone = _configured_zone(timezone_name)
+    reference = _reference_in_zone(now, zone)
+    for date_kind, pattern in _NAME_TIME_PATTERNS:
         match = pattern.search(text)
         if not match:
             continue
-        candidate = f"{match.group('date')} {match.group('time')}"
-        for fmt in (
-            "%Y-%m-%d %I:%M %p", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
-            "%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M",
-        ):
+        month = int(match.group("month"))
+        day = int(match.group("day"))
+        hour, minute, second = _time_from_name_match(match)
+
+        if date_kind != "us_without_year":
             try:
-                parsed = datetime.strptime(candidate.upper(), fmt)
-                return parsed.replace(tzinfo=_configured_zone(timezone_name)).astimezone(timezone.utc)
+                parsed = datetime(
+                    int(match.group("year")), month, day, hour, minute, second, tzinfo=zone
+                )
+            except ValueError:
+                return None
+            return parsed.astimezone(timezone.utc)
+
+        candidates: list[datetime] = []
+        for year in (reference.year - 1, reference.year, reference.year + 1):
+            try:
+                candidates.append(datetime(year, month, day, hour, minute, second, tzinfo=zone))
             except ValueError:
                 continue
+        if not candidates:
+            return None
+        closest = min(
+            candidates,
+            key=lambda candidate: (
+                abs((candidate - reference).total_seconds()),
+                0 if candidate >= reference else 1,
+            ),
+        )
+        if abs(closest - reference) > timedelta(days=max(1, event_window_days)):
+            return None
+        return closest.astimezone(timezone.utc)
     return None
 
 
@@ -322,7 +492,12 @@ def normalize_stream(stream: Mapping[str, Any], category_id: str,
         stream,
         ("start_timestamp", "start_utc", "start_time", "event_start", "epg_start"),
         config.timezone_name,
-    ) or parse_start_from_name(original_name, config.timezone_name)
+    ) or parse_start_from_name(
+        original_name,
+        config.timezone_name,
+        now=now,
+        event_window_days=config.event_window_days,
+    )
     if start is None:
         return None
 
@@ -480,7 +655,8 @@ def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
         for item in categories
         if item.get("category_id") is not None and str(item.get("category_id")) in selected
     }
-    fetched_playable_ids: set[str] = set()
+    observed_playable_ids: set[str] = set()
+    normalized_playable_ids: set[str] = set()
     imported = skipped = 0
 
     try:
@@ -489,7 +665,7 @@ def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
             for stream in streams_by_category.get(category_id, []):
                 stream_id = stream.get("stream_id")
                 if stream_id is not None:
-                    fetched_playable_ids.add(stable_playable_id(category_id, stream_id))
+                    observed_playable_ids.add(stable_playable_id(category_id, stream_id))
                 normalized = normalize_stream(
                     stream, category_id, category_names.get(category_id, "Xtream"), config, now
                 )
@@ -499,13 +675,14 @@ def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
                 _upsert(conn, "events", _EVENT_COLUMNS, normalized["event"], "id")
                 _upsert(conn, "playables", _PLAYABLE_COLUMNS, normalized["playable"],
                         "event_id,playable_id")
+                normalized_playable_ids.add(normalized["playable"]["playable_id"])
                 imported += 1
 
         prior = conn.execute(
             "SELECT event_id, playable_id FROM playables WHERE provider = ?", (PROVIDER,)
         ).fetchall()
         stale_rows = [(event_id, playable_id) for event_id, playable_id in prior
-                      if playable_id not in fetched_playable_ids]
+                      if playable_id not in normalized_playable_ids]
         for event_id, playable_id in stale_rows:
             conn.execute(
                 "DELETE FROM playables WHERE event_id = ? AND playable_id = ? AND provider = ?",
@@ -531,7 +708,13 @@ def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
         conn.rollback()
         raise
 
-    return {"imported": imported, "skipped_unparseable": skipped, "stale_removed": len(stale_rows)}
+    return {
+        "observed_upstream": len(observed_playable_ids),
+        "normalized": len(normalized_playable_ids),
+        "imported": imported,
+        "skipped_unparseable": skipped,
+        "stale_removed": len(stale_rows),
+    }
 
 
 def fetch_snapshot(client: XtreamClient, config: XtreamConfig) -> tuple[list[dict], dict[str, list[dict]]]:
@@ -570,6 +753,8 @@ def main(argv=None) -> int:
         return 1
     print(
         "Xtream ingest complete: "
+        f"observed_upstream={result['observed_upstream']} "
+        f"normalized={result['normalized']} "
         f"imported={result['imported']} "
         f"skipped_unparseable={result['skipped_unparseable']} "
         f"stale_removed={result['stale_removed']}"

@@ -173,9 +173,20 @@ Xtream username and password are intentionally environment-only: they are not
 returned by the settings API or stored in SQLite. The server URL and non-secret
 ingestion controls can be managed on the Settings page. Xtream entries are
 imported only when their metadata or name contains a reliable start date and
-time. A name containing only a time (for example, `7:00 PM`) is skipped rather
-than being assigned an invented date. If a reliable start has no end, the
-configured default duration is used and the event metadata marks it inferred.
+time. Supported dynamic-name forms include
+`NFL | 05 - 8/28 6pm Commanders at Ravens`, `8/29 7pm`,
+`08/29 7:00 PM`, `8/30 3pm`, and 24-hour forms such as `8/30 15:00`. When the year is omitted,
+FruitDeepLinks compares previous/current/next-year candidates in
+`XTREAM_TIMEZONE` and accepts the closest only when it falls within the
+configured `FRUIT_DAYS_AHEAD` window. A name containing only a time (for
+example, `7:00 PM`) is skipped rather than being assigned an invented date. If
+a reliable start has no end, the configured default duration is used and the
+event metadata marks it inferred.
+
+Xtream API calls use the normal Python HTTP client first. If the provider
+rejects that request or returns an unusable response, the adapter retries with
+`curl -4 -sS -L`. Neither transport's credential-bearing URL or error text is
+written to application logs.
 
 ---
 

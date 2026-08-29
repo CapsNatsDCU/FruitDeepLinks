@@ -3,9 +3,10 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
@@ -30,27 +31,47 @@ class XtreamLanePipelineTest(unittest.TestCase):
         self.conn.row_factory = sqlite3.Row
         self.addCleanup(self.conn.close)
         self.now = datetime.now(timezone.utc).replace(microsecond=0)
+        provider_zone = ZoneInfo("America/New_York")
+        start_local = self.now.astimezone(provider_zone).replace(
+            minute=0, second=0, microsecond=0
+        )
+        hour12 = start_local.hour % 12 or 12
+        ampm = "am" if start_local.hour < 12 else "pm"
+        self.provider_name = (
+            f"NFL | 05 - {start_local.month}/{start_local.day} "
+            f"{hour12}{ampm} Commanders at Ravens"
+        )
+        self.expected_start = start_local.astimezone(timezone.utc)
         cfg = XtreamConfig(
             enabled=True,
             server_url="http://provider.example:8080",
             username="demo user",
             password="secret/pass",
             category_ids=("10",),
-            timezone_name="UTC",
-            default_duration_minutes=120,
+            timezone_name="America/New_York",
+            default_duration_minutes=180,
+            event_window_days=2,
         )
+        # Live-shaped get_live_streams entry: schedule information exists only
+        # in the dynamic name, not in synthetic start/end timestamp fields.
         stream = {
+            "num": 17,
+            "stream_type": "live",
             "stream_id": "500",
-            "name": "NHL | Capitals @ Lightning",
-            "start_timestamp": int((self.now - timedelta(minutes=5)).timestamp()),
-            "end_timestamp": int((self.now + timedelta(minutes=55)).timestamp()),
+            "name": self.provider_name,
             "stream_icon": "https://img.example/game.png",
             "epg_channel_id": "nhl.game",
+            "added": "1693251000",
+            "category_id": "10",
+            "custom_sid": "",
+            "tv_archive": 0,
+            "direct_source": "",
+            "tv_archive_duration": 0,
             "container_extension": "ts",
         }
         ingest_payload(
             self.conn,
-            [{"category_id": "10", "category_name": "NHL PPV"}],
+            [{"category_id": "10", "category_name": "NFL PPV"}],
             {"10": [stream]},
             cfg,
             now=self.now,
@@ -69,7 +90,7 @@ class XtreamLanePipelineTest(unittest.TestCase):
             "XTREAM_USERNAME": "demo user",
             "XTREAM_PASSWORD": "secret/pass",
             "XTREAM_CATEGORY_IDS": "10",
-            "XTREAM_TIMEZONE": "UTC",
+            "XTREAM_TIMEZONE": "America/New_York",
         }
 
     def test_lane_selects_xtream_playable_and_resolves_direct_stream(self):
@@ -104,7 +125,7 @@ class XtreamLanePipelineTest(unittest.TestCase):
         path = Path(self.tmp.name) / "lanes.xml"
         build_lanes_xmltv(self.conn, str(path))
         content = path.read_text(encoding="utf-8")
-        self.assertIn("NHL | Capitals @ Lightning", content)
+        self.assertIn(self.provider_name, content)
         self.assertIn("Xtream IPTV", content)
         self.assertNotIn("demo user", content)
         self.assertNotIn("secret", content)
@@ -126,6 +147,43 @@ class XtreamLanePipelineTest(unittest.TestCase):
             "http://provider.example:8080/live/demo%20user/secret%2Fpass/500.ts",
         )
         self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+    def test_live_shaped_name_flows_through_complete_lane_pipeline(self):
+        event = self.conn.execute(
+            "SELECT title, start_utc FROM events WHERE title=?", (self.provider_name,)
+        ).fetchone()
+        self.assertIsNotNone(event)
+        self.assertEqual(
+            datetime.fromisoformat(event["start_utc"].replace("Z", "+00:00")),
+            self.expected_start,
+        )
+        lane = self.conn.execute(
+            "SELECT chosen_provider FROM lane_events WHERE is_placeholder=0"
+        ).fetchone()
+        self.assertEqual(lane["chosen_provider"], "xtream")
+
+        xml_path = Path(self.tmp.name) / "live-shaped.xml"
+        m3u_path = Path(self.tmp.name) / "live-shaped.m3u"
+        build_lanes_xmltv(self.conn, str(xml_path))
+        build_lanes_m3u(self.conn, str(m3u_path), "http://fruit.local:6655")
+        self.assertIn(self.provider_name, xml_path.read_text(encoding="utf-8"))
+        self.assertIn(
+            "http://fruit.local:6655/lane/1/stream.m3u8",
+            m3u_path.read_text(encoding="utf-8"),
+        )
+
+        env = dict(self.tune_env)
+        env["FRUIT_DB_PATH"] = str(self.db_path)
+        with patch.dict(os.environ, env, clear=False):
+            response = create_app().test_client().get(
+                "/lane/1/stream.m3u8",
+                query_string={"at": self.now.isoformat(timespec="seconds")},
+            )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"],
+            "http://provider.example:8080/live/demo%20user/secret%2Fpass/500.ts",
+        )
 
 
 if __name__ == "__main__":

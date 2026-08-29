@@ -4,6 +4,7 @@ import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
@@ -61,16 +62,105 @@ class FakeSession:
         return FakeResponse(self.payload)
 
 
+class FakeCompleted:
+    def __init__(self, returncode=0, stdout="[]", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class FakeRunner:
+    def __init__(self, completed=None, error=None):
+        self.completed = completed or FakeCompleted()
+        self.error = error
+        self.calls = []
+
+    def __call__(self, command, **kwargs):
+        self.calls.append((command, kwargs))
+        if self.error:
+            raise self.error
+        return self.completed
+
+
 class XtreamParsingTest(unittest.TestCase):
     def test_api_response_parsing_and_request_shape(self):
         session = FakeSession([{"category_id": "10", "category_name": "Sports"}, "bad"])
-        client = XtreamClient(config(), session=session)
+        runner = FakeRunner(error=AssertionError("curl must not run on requests success"))
+        client = XtreamClient(config(), session=session, subprocess_runner=runner)
         result = client.get_live_categories()
         self.assertEqual(result, [{"category_id": "10", "category_name": "Sports"}])
         _, params, _ = session.calls[0]
         self.assertEqual(params["action"], "get_live_categories")
         self.assertEqual(params["username"], "user name")
         self.assertEqual(params["password"], "p@ss/word")
+        self.assertEqual(runner.calls, [])
+
+    def test_requests_failure_falls_back_to_curl(self):
+        session = FakeSession([])
+        session.get = lambda *args, **kwargs: FakeResponse([], status_code=503)
+        runner = FakeRunner(FakeCompleted(stdout=json.dumps([
+            {"stream_id": 55, "name": "NHL | 8/29 7pm Teams"}
+        ])))
+        client = XtreamClient(config(), session=session, subprocess_runner=runner)
+        rows = client.get_live_streams("10")
+        self.assertEqual(rows[0]["stream_id"], 55)
+        command, kwargs = runner.calls[0]
+        self.assertEqual(command[:5], ["curl", "-4", "-sS", "-L", "--max-time"])
+        self.assertIn("category_id=10", command)
+        self.assertNotIn("shell", kwargs)
+
+    def test_unusable_requests_response_falls_back_to_curl(self):
+        session = FakeSession({"user_info": {"auth": 1}})
+        runner = FakeRunner(FakeCompleted(stdout='[{"category_id":"10"}]'))
+        client = XtreamClient(config(), session=session, subprocess_runner=runner)
+        self.assertEqual(client.get_live_categories(), [{"category_id": "10"}])
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_empty_requests_response_is_confirmed_by_curl(self):
+        session = FakeSession([])
+        runner = FakeRunner(FakeCompleted(stdout='[{"category_id":"10"}]'))
+        client = XtreamClient(config(), session=session, subprocess_runner=runner)
+        self.assertEqual(client.get_live_categories(), [{"category_id": "10"}])
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_invalid_curl_json_is_safe(self):
+        session = FakeSession({"not": "a list"})
+        runner = FakeRunner(FakeCompleted(stdout="not-json user name p@ss/word"))
+        client = XtreamClient(config(), session=session, subprocess_runner=runner)
+        with self.assertRaises(XtreamError) as caught:
+            client.get_live_categories()
+        message = str(caught.exception)
+        self.assertIn("invalid JSON", message)
+        self.assertNotIn("user name", message)
+        self.assertNotIn("p@ss/word", message)
+
+    def test_curl_process_error_is_safe(self):
+        session = FakeSession([])
+        runner = FakeRunner(error=RuntimeError(
+            "curl failed for username=user name password=p@ss/word"
+        ))
+        client = XtreamClient(config(), session=session, subprocess_runner=runner)
+        with self.assertRaises(XtreamError) as caught:
+            client.get_live_categories()
+        message = str(caught.exception)
+        self.assertIn("could not run", message)
+        self.assertNotIn("user name", message)
+        self.assertNotIn("p@ss/word", message)
+
+    def test_curl_failure_is_safe(self):
+        session = FakeSession([])
+        session.get = lambda *args, **kwargs: FakeResponse([], status_code=500)
+        runner = FakeRunner(FakeCompleted(
+            returncode=28,
+            stderr="failed http://provider/player_api.php?username=user%20name&password=p%40ss%2Fword",
+        ))
+        client = XtreamClient(config(), session=session, subprocess_runner=runner)
+        with self.assertRaises(XtreamError) as caught:
+            client.get_live_streams("10")
+        message = str(caught.exception)
+        self.assertIn("exit code 28", message)
+        for secret in ("user name", "p@ss/word", "user%20name", "p%40ss%2Fword"):
+            self.assertNotIn(secret, message)
 
     def test_category_filtering_fetches_only_configured_ids(self):
         class Client:
@@ -119,6 +209,58 @@ class XtreamParsingTest(unittest.TestCase):
         self.assertEqual(metadata["epg_channel_id"], "nhl.555")
         self.assertTrue(metadata["duration_inferred"])
 
+    def test_real_provider_name_without_year_or_colon(self):
+        local_zone = ZoneInfo("America/New_York")
+        now = datetime(2026, 8, 28, 17, 30, tzinfo=local_zone)
+        parsed = parse_start_from_name(
+            "NFL | 05 - 8/28 6pm Commanders at Ravens",
+            "America/New_York",
+            now=now,
+            event_window_days=7,
+        )
+        self.assertEqual(parsed, datetime(2026, 8, 28, 22, 0, tzinfo=timezone.utc))
+
+    def test_supported_yearless_provider_formats(self):
+        now = datetime(2026, 8, 29, 12, 0, tzinfo=ZoneInfo("America/New_York"))
+        cases = {
+            "NHL | 8/29 7pm Capitals at Rangers": (2026, 8, 29, 23, 0),
+            "NHL | 08/29 7:00 PM Capitals at Rangers": (2026, 8, 29, 23, 0),
+            "ESPN+ | 8/30 3pm Team A vs Team B": (2026, 8, 30, 19, 0),
+            "ESPN+ | 8/30 15:30 Team A vs Team B": (2026, 8, 30, 19, 30),
+        }
+        for name, expected in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(
+                    parse_start_from_name(
+                        name, "America/New_York", now=now, event_window_days=7
+                    ),
+                    datetime(*expected, tzinfo=timezone.utc),
+                )
+
+    def test_yearless_dates_choose_previous_or_next_year_at_boundary(self):
+        previous = parse_start_from_name(
+            "NHL | 12/31 11pm Capitals at Rangers",
+            "America/New_York",
+            now=datetime(2027, 1, 1, 0, 30, tzinfo=ZoneInfo("America/New_York")),
+            event_window_days=7,
+        )
+        following = parse_start_from_name(
+            "NHL | 1/1 1am Capitals at Rangers",
+            "America/New_York",
+            now=datetime(2026, 12, 31, 23, 30, tzinfo=ZoneInfo("America/New_York")),
+            event_window_days=7,
+        )
+        self.assertEqual(previous, datetime(2027, 1, 1, 4, 0, tzinfo=timezone.utc))
+        self.assertEqual(following, datetime(2027, 1, 1, 6, 0, tzinfo=timezone.utc))
+
+    def test_yearless_date_outside_import_window_is_rejected(self):
+        self.assertIsNone(parse_start_from_name(
+            "NHL | 8/29 7pm Capitals at Rangers",
+            "America/New_York",
+            now=datetime(2027, 1, 1, tzinfo=ZoneInfo("America/New_York")),
+            event_window_days=7,
+        ))
+
     def test_time_only_name_is_not_assigned_a_date(self):
         self.assertIsNone(parse_start_from_name("NHL | Capitals @ Lightning | 7:00 PM"))
         self.assertIsNone(normalize_stream(
@@ -139,16 +281,6 @@ class XtreamParsingTest(unittest.TestCase):
         self.assertNotIn("p@ss/word", redacted)
         self.assertNotIn("user%20name", redacted)
         self.assertNotIn("p%40ss%2Fword", redacted)
-
-    def test_api_failure_message_never_contains_credentials(self):
-        session = FakeSession([])
-        session.get = lambda *args, **kwargs: FakeResponse([], status_code=500)
-        client = XtreamClient(config(), session=session)
-        with self.assertRaises(XtreamError) as caught:
-            client.get_live_streams("10")
-        message = str(caught.exception)
-        self.assertNotIn("user name", message)
-        self.assertNotIn("p@ss/word", message)
 
     def test_false_environment_value_is_a_hard_disable(self):
         conn = sqlite3.connect(":memory:")
@@ -213,6 +345,35 @@ class XtreamStaleHandlingTest(unittest.TestCase):
         self.assertEqual(other_count, 1)
         self.assertIsNotNone(
             self.conn.execute("SELECT 1 FROM events WHERE id='other-event'").fetchone()
+        )
+
+    def test_observed_but_unparseable_stream_expires_prior_normalized_row(self):
+        ingest_payload(
+            self.conn, self.categories, {"10": [self.stream(7)]}, self.cfg,
+            now=datetime(2026, 8, 29, tzinfo=timezone.utc),
+        )
+        result = ingest_payload(
+            self.conn,
+            self.categories,
+            {"10": [{
+                "stream_id": 7,
+                "name": "NHL | Capitals at Rangers | 7pm",
+                "container_extension": "ts",
+            }]},
+            self.cfg,
+            now=datetime(2026, 8, 29, tzinfo=timezone.utc),
+        )
+        self.assertEqual(result["observed_upstream"], 1)
+        self.assertEqual(result["normalized"], 0)
+        self.assertEqual(result["stale_removed"], 1)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM playables WHERE provider='xtream'").fetchone()[0],
+            0,
+        )
+        self.assertIsNone(
+            self.conn.execute(
+                "SELECT 1 FROM events WHERE id=?", (stable_event_id("10", 7),)
+            ).fetchone()
         )
 
 
