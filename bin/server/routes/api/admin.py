@@ -294,6 +294,22 @@ def api_settings():
         if not isinstance(updates, dict):
             return jsonify({"status": "error", "message": "Expected JSON object"}), 400
 
+        if "favorite_teams" in updates:
+            if not isinstance(updates["favorite_teams"], list):
+                return jsonify({
+                    "status": "error",
+                    "message": "favorite_teams must be a JSON array",
+                }), 400
+            invalid = [
+                index for index, item in enumerate(updates["favorite_teams"])
+                if not isinstance(item, dict) or not str(item.get("team") or "").strip()
+            ]
+            if invalid:
+                return jsonify({
+                    "status": "error",
+                    "message": "Each favorite team must be an object with a non-empty team name",
+                }), 400
+
         if save_settings(conn, updates):
             log(f"Settings updated: {list(updates.keys())}", "INFO")
             if "timezone" in updates and updates["timezone"]:

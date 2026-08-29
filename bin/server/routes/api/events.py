@@ -312,7 +312,14 @@ def _compute_best(conn, event_id, playables) -> dict | None:
         deeplink = None
         try:
             deeplink = get_best_deeplink_for_event(
-                conn, event_id, enabled, priority_map=priority_map, amazon_penalty=amazon_penalty
+                conn, event_id, enabled, priority_map=priority_map,
+                amazon_penalty=amazon_penalty,
+                amazon_master_enabled=amazon_master,
+                language_preference=prefs.get("language_preference", "en"),
+                prefer_favorite_team_broadcaster=prefs.get(
+                    "prefer_favorite_team_broadcaster", False
+                ),
+                favorite_teams=prefs.get("favorite_teams", []),
             )
         except Exception:
             pass
@@ -323,25 +330,54 @@ def _compute_best(conn, event_id, playables) -> dict | None:
                 conn, event_id, enabled,
                 priority_map=priority_map, amazon_penalty=amazon_penalty,
                 amazon_master_enabled=amazon_master,
+                language_preference=prefs.get("language_preference", "en"),
+                prefer_favorite_team_broadcaster=prefs.get(
+                    "prefer_favorite_team_broadcaster", False
+                ),
+                favorite_teams=prefs.get("favorite_teams", []),
             )
             if filtered:
                 top = filtered[0]
+                ranked_by_id = {
+                    p.get("playable_id"): p for p in filtered if p.get("playable_id")
+                }
+                for raw_playable in playables:
+                    ranked = ranked_by_id.get(raw_playable.get("playable_id"))
+                    if ranked and ranked.get("team_preference") is not None:
+                        raw_playable["team_preference"] = ranked["team_preference"]
         except Exception:
             pass
 
         if top:
-            actual = deeplink or top.get("deeplink_play") or top.get("deeplink_open")
-            src = "ESPN Watch Graph" if (deeplink and top.get("espn_graph_id")) else "Apple TV"
+            actual = (
+                deeplink or top.get("deeplink_play") or top.get("deeplink_open")
+                or top.get("playable_url")
+            )
+            if top.get("stream_id"):
+                src = "Direct stream (resolved at tune time)"
+            else:
+                src = "ESPN Watch Graph" if (deeplink and top.get("espn_graph_id")) else "Apple TV"
             code = top.get("logical_service") or top.get("provider") or ""
+            team_preference = top.get("team_preference")
+            reason = "Top of filtered playables order"
+            if team_preference and team_preference.get("reasons"):
+                details = "; ".join(
+                    f"{item.get('score', 0):+d} {item.get('reason', '')}"
+                    for item in team_preference["reasons"]
+                )
+                reason = f"Team preference {team_preference.get('score', 0):+d}: {details}"
             return {
                 "provider": top.get("provider"),
+                "playable_id": top.get("playable_id"),
                 "logical_service": top.get("logical_service"),
                 "display_name": get_display_name(code) if code else "",
                 "deeplink": actual,
                 "http_deeplink_url": top.get("http_deeplink_url"),
                 "espn_graph_id": top.get("espn_graph_id"),
+                "stream_id": top.get("stream_id"),
                 "deeplink_source": src,
-                "reason": "Top of filtered playables order",
+                "reason": reason,
+                "team_preference": team_preference,
             }
         if deeplink:
             match = next(

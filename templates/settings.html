@@ -13,6 +13,12 @@
 .setting-hint { font-size: 11px; color: var(--text-muted); margin-top: 3px; line-height: 1.4; }
 .setting-env  { font-size: 10px; color: #475569; font-family: var(--mono); margin-top: 2px; }
 .save-bar { position: sticky; bottom: 0; background: var(--bg-page); border-top: 1px solid var(--border); padding: 12px 0; display: flex; align-items: center; gap: 12px; }
+.favorite-team-editor { display:flex; flex-direction:column; gap:10px; }
+.favorite-team-row { border:1px solid var(--border); border-radius:var(--radius); padding:12px; background:var(--bg-inset); }
+.favorite-team-head { display:flex; gap:10px; align-items:center; margin-bottom:8px; }
+.favorite-team-fields { display:grid; grid-template-columns:1fr 1fr; gap:8px 12px; }
+.favorite-team-fields label { font-size:11px; color:var(--text-muted); }
+.favorite-team-fields input { margin-top:4px; width:100%; }
 details.advanced-section { margin-top: 8px; }
 details.advanced-section summary { font-size: 14px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; padding-bottom: 6px; border-bottom: 1px solid var(--border); cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; user-select: none; }
 details.advanced-section summary::-webkit-details-marker { display: none; }
@@ -22,6 +28,7 @@ details.advanced-section .setting-group { margin-top: 12px; margin-bottom: 0; }
 details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); opacity: 0.7; border-bottom: none; padding-bottom: 4px; margin-bottom: 8px; margin-left: 2px; }
 @media (max-width: 640px) {
   .setting-row { grid-template-columns: 1fr; gap: 6px; }
+  .favorite-team-fields { grid-template-columns:1fr; }
 }
 {% endblock %}
 
@@ -44,6 +51,7 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
 const GROUPS = {
   'Server': ['server_url', 'channels_dvr_ip', 'channels_source_name', 'timezone'],
   'Lanes': ['num_lanes', 'expand_all_playables'],
+  'Favorite-Team Broadcaster': ['prefer_favorite_team_broadcaster', 'favorite_teams'],
   'Pipeline': ['days_ahead', 'padding_minutes', 'max_event_minutes'],
   'Auto Refresh': ['auto_refresh_enabled', 'auto_refresh_time'],
   'Scrapers': ['kayo_enabled', 'fanatiz_enabled', 'bein_enabled', 'nesn_enabled', 'victory_enabled', 'gotham_enabled', 'espn_enabled'],
@@ -116,6 +124,7 @@ function renderSettings() {
 }
 
 function renderInput(key, s, val) {
+  if (key === 'favorite_teams') return renderFavoriteTeams(val);
   if (s.type === 'bool') {
     return `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
       <input type="checkbox" name="${key}" id="s_${key}" ${val ? 'checked' : ''} style="width:16px;height:16px;accent-color:var(--accent)">
@@ -132,11 +141,81 @@ function renderInput(key, s, val) {
   return `<input type="text" name="${key}" id="s_${key}" value="${escHtml(String(val||''))}">`;
 }
 
+function normalizeTeamRows(value) {
+  return Array.isArray(value) ? value.map(team => ({
+    team: String(team?.team || ''),
+    aliases: Array.isArray(team?.aliases) ? team.aliases : [],
+    preferred_terms: Array.isArray(team?.preferred_terms) ? team.preferred_terms : [],
+    avoid_terms: Array.isArray(team?.avoid_terms) ? team.avoid_terms : [],
+    enabled: team?.enabled !== false,
+  })) : [];
+}
+
+function renderFavoriteTeams(value) {
+  const teams = normalizeTeamRows(value);
+  const rows = teams.map((team, index) => `
+    <div class="favorite-team-row" data-team-index="${index}">
+      <div class="favorite-team-head">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px">
+          <input class="team-enabled" type="checkbox" ${team.enabled ? 'checked' : ''} style="width:16px;height:16px;accent-color:var(--accent)"> Enabled
+        </label>
+        <button class="btn btn-secondary" type="button" style="margin-left:auto;padding:4px 8px" onclick="removeFavoriteTeam(${index})">Remove</button>
+      </div>
+      <div class="favorite-team-fields">
+        <label>Team name<input class="team-name" type="text" value="${escHtml(team.team)}" placeholder="Example City Team"></label>
+        <label>Aliases (comma-separated)<input class="team-aliases" type="text" value="${escHtml(team.aliases.join(', '))}" placeholder="Team, ECT"></label>
+        <label>Preferred broadcaster/feed terms<input class="team-preferred" type="text" value="${escHtml(team.preferred_terms.join(', '))}" placeholder="Local Sports Network"></label>
+        <label>Avoid terms<input class="team-avoid" type="text" value="${escHtml(team.avoid_terms.join(', '))}" placeholder="Opponent Network"></label>
+      </div>
+    </div>`).join('');
+  return `<div id="favorite-team-editor" class="favorite-team-editor">
+    ${rows || '<div class="setting-hint">No favorite teams configured. Existing ranking is unchanged.</div>'}
+    <div><button class="btn btn-secondary" type="button" onclick="addFavoriteTeam()">Add Favorite Team</button></div>
+  </div>`;
+}
+
+function splitTerms(value) {
+  return String(value || '').split(',').map(x => x.trim()).filter(Boolean);
+}
+
+function collectFavoriteTeams() {
+  return [...document.querySelectorAll('.favorite-team-row')].map(row => ({
+    team: row.querySelector('.team-name').value.trim(),
+    aliases: splitTerms(row.querySelector('.team-aliases').value),
+    preferred_terms: splitTerms(row.querySelector('.team-preferred').value),
+    avoid_terms: splitTerms(row.querySelector('.team-avoid').value),
+    enabled: row.querySelector('.team-enabled').checked,
+  })).filter(team => team.team);
+}
+
+function rerenderFavoriteTeams(teams) {
+  const editor = document.getElementById('favorite-team-editor');
+  if (editor) editor.outerHTML = renderFavoriteTeams(teams);
+}
+
+function addFavoriteTeam() {
+  const teams = collectFavoriteTeams();
+  teams.push({team:'', aliases:[], preferred_terms:[], avoid_terms:[], enabled:true});
+  rerenderFavoriteTeams(teams);
+  const names = document.querySelectorAll('.team-name');
+  if (names.length) names[names.length - 1].focus();
+}
+
+function removeFavoriteTeam(index) {
+  const teams = collectFavoriteTeams();
+  teams.splice(index, 1);
+  rerenderFavoriteTeams(teams);
+}
+
 function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 function collectSettings() {
   const updates = {};
   for (const key of Object.keys(_schema)) {
+    if (key === 'favorite_teams') {
+      updates[key] = collectFavoriteTeams();
+      continue;
+    }
     const el = document.getElementById('s_' + key);
     if (!el) continue;
     const s = _schema[key];

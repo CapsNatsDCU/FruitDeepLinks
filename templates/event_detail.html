@@ -38,6 +38,7 @@ pre { background:var(--bg-inset); border:1px solid var(--border); border-radius:
           <th>Service</th>
           <th>Provider</th>
           <th>Priority</th>
+          <th>Team Preference</th>
           <th>Apple TV Scheme</th>
           <th>HTTP Deeplink</th>
           <th>ESPN Graph ID</th>
@@ -159,7 +160,8 @@ async function loadDetail() {
       bestSource = "HTTP";
     }
 
-    const isBest = bestDeeplink && bestDeeplinkForRow && bestDeeplink === bestDeeplinkForRow;
+    const isBest = (data.best?.playable_id && data.best.playable_id === p.playable_id) ||
+      (bestDeeplink && bestDeeplinkForRow && bestDeeplink === bestDeeplinkForRow);
     const bestStyle = isBest ? "background:#065f46;color:#a7f3d0;font-weight:600;" : "";
     const bestHtml = bestDeeplinkForRow
       ? `<div style="${bestStyle}padding:8px;border-radius:6px">
@@ -167,16 +169,26 @@ async function loadDetail() {
            <div class="small" style="margin-top:4px;${isBest?'color:#6ee7b7':''}">${bestSource}</div>
            ${isBest?'<div class="small" style="margin-top:4px;color:#6ee7b7">Selected by filter_integration</div>':''}
          </div>`
-      : '<span class="small">—</span>';
+      : (isBest && p.stream_id
+          ? '<div style="background:#065f46;color:#a7f3d0;font-weight:600;padding:8px;border-radius:6px"><div>Selected direct stream</div><div class="small" style="color:#6ee7b7">URL resolved securely at tune time</div></div>'
+          : '<span class="small">—</span>');
 
     const serviceHtml = p.logical_service
       ? `<div>${escH(p.display_name||p.logical_service)}</div><div class="mono small">${escH(p.logical_service)}</div>`
       : '<span class="small">—</span>';
 
+    const teamPref = p.team_preference || null;
+    const teamPrefHtml = teamPref
+      ? `<div class="mono" style="font-weight:700">${Number(teamPref.score||0) >= 0 ? '+' : ''}${Number(teamPref.score||0)}</div>
+         <div class="small">${(teamPref.matched_teams||[]).map(escH).join(', ')}</div>
+         ${(teamPref.reasons||[]).map(x=>`<div class="small">${Number(x.score||0) >= 0 ? '+' : ''}${Number(x.score||0)} ${escH(x.reason||'')}</div>`).join('')}`
+      : '<span class="small">Off / no event match</span>';
+
     tr.innerHTML = `
       <td>${serviceHtml}</td>
       <td class="mono">${escH(p.provider||"")}</td>
       <td class="mono">${escH(p.priority)}</td>
+      <td>${teamPrefHtml}</td>
       <td>${appleHtml}</td>
       <td>${httpHtml}</td>
       <td>${espnHtml}</td>
@@ -185,12 +197,18 @@ async function loadDetail() {
   }
 
   const best = data.best || null;
-  if (best?.deeplink) {
+  if (best) {
     const httpLine = best.http_deeplink_url ? `<div class="mono" style="margin-top:8px">HTTP: ${escH(best.http_deeplink_url)}</div>` : "";
     const espnLine = best.espn_graph_id ? `<div class="mono" style="margin-top:8px;color:var(--success)">ESPN Graph ID: ${escH(best.espn_graph_id)}</div>` : "";
+    const streamLine = best.stream_id ? `<div class="mono" style="margin-top:8px">Direct stream ID: ${escH(best.stream_id)}</div><div class="small">Authenticated URL is resolved only when the channel is tuned.</div>` : "";
+    const deeplinkLine = best.deeplink ? `<div class="mono" style="margin-top:8px;word-break:break-all">Deeplink: ${escH(best.deeplink)}</div>` : "";
     const srcBadge = best.deeplink_source
       ? `<span class="badge ${best.deeplink_source.includes('ESPN')?'good':'warn'}">${escH(best.deeplink_source)}</span>`
       : "";
+    const teamLines = best.team_preference?.reasons?.length
+      ? `<div style="margin-top:8px"><b>Team preference:</b> ${(best.team_preference.matched_teams||[]).map(escH).join(', ')}
+          ${best.team_preference.reasons.map(x=>`<div class="small mono">${Number(x.score||0) >= 0 ? '+' : ''}${Number(x.score||0)} ${escH(x.reason||'')}</div>`).join('')}</div>`
+      : '';
     document.getElementById("bestBox").innerHTML = `
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
         <span class="badge good">Selected</span>
@@ -199,8 +217,8 @@ async function loadDetail() {
         ${srcBadge}
       </div>
       <div class="small" style="margin-top:8px">Reason: ${escH(best.reason||"—")}</div>
-      <div class="mono" style="margin-top:8px;word-break:break-all">Deeplink: ${escH(best.deeplink)}</div>
-      ${httpLine}${espnLine}
+      ${teamLines}
+      ${deeplinkLine}${httpLine}${espnLine}${streamLine}
       ${best.deeplink_source?.includes('ESPN') ? '<div class="small" style="margin-top:8px;color:var(--success)">Using ESPN Watch Graph playback ID</div>' : ''}`;
   } else {
     document.getElementById("bestBox").innerHTML =

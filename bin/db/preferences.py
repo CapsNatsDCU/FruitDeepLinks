@@ -26,6 +26,8 @@ _DEFAULTS: Dict[str, Any] = {
     "amazon_penalty": True,
     "amazon_master_enabled": True,
     "language_preference": "en",
+    "prefer_favorite_team_broadcaster": False,
+    "favorite_teams": [],
 }
 
 
@@ -81,6 +83,28 @@ def load(conn: sqlite3.Connection) -> Dict[str, Any]:
     result["service_priorities"] = _json("service_priorities", {})
     result["amazon_penalty"] = _bool("amazon_penalty", True)
     result["amazon_master_enabled"] = _bool("amazon_master_enabled", True)
+
+    # Favorite-team settings live under the Settings-page prefix.  Also read
+    # unprefixed keys for compatibility with API/imported preference records.
+    def _setting_json(key: str, default):
+        prefixed = f"setting:{key}"
+        if prefixed in raw:
+            try:
+                return json.loads(raw[prefixed])
+            except Exception:
+                return default
+        return _json(key, default)
+
+    result["prefer_favorite_team_broadcaster"] = bool(
+        _setting_json("prefer_favorite_team_broadcaster", False)
+    )
+    try:
+        from team_preferences import normalize_favorite_teams
+        result["favorite_teams"] = normalize_favorite_teams(
+            _setting_json("favorite_teams", [])
+        )
+    except ImportError:
+        result["favorite_teams"] = []
 
     lang = raw.get("language_preference", "en")
     if isinstance(lang, str) and lang.startswith('"'):
@@ -176,7 +200,7 @@ def load_auto_refresh(conn: sqlite3.Connection) -> Dict[str, Any]:
 
 # ---- App settings (replaces env vars for operational config) ----
 # Each entry: key -> (env_var_name, type_hint, default_value, label, description)
-# type_hint: 'str' | 'int' | 'bool'
+# type_hint: 'str' | 'int' | 'bool' | 'json'
 # Settings are stored in user_preferences with the key prefix "setting:"
 
 SETTINGS_DEFS: Dict[str, tuple] = {
@@ -214,6 +238,18 @@ SETTINGS_DEFS: Dict[str, tuple] = {
         "so you can pick manually. Significantly increases channel/lane count -- you may need "
         "to raise ADB lane counts per provider to avoid dropped duplicates. Requires a refresh "
         "to take effect.",
+    ),
+    "prefer_favorite_team_broadcaster": (
+        "PREFER_FAVORITE_TEAM_BROADCASTER", "bool", False,
+        "Prefer Favorite-Team Broadcaster",
+        "Rank a favorite team's own or configured local feed above otherwise valid alternatives. "
+        "This is a preference, not a filter; other playable feeds remain fallbacks.",
+    ),
+    "favorite_teams": (
+        "FAVORITE_TEAMS_JSON", "json", [],
+        "Favorite Teams",
+        "Team names, event aliases, preferred broadcaster/feed terms, and avoid terms. "
+        "All values are non-secret and matching is case-insensitive.",
     ),
     "lane_start_ch": (
         "FRUIT_LANE_START_CH", "int", 9000,
@@ -339,6 +375,9 @@ def _cast_setting(value: str, type_hint: str):
             return int(json.loads(value))
         except Exception:
             return int(value)
+    if type_hint == "json":
+        parsed = json.loads(value) if isinstance(value, str) else value
+        return parsed
     try:
         return json.loads(value)
     except Exception:
@@ -404,6 +443,9 @@ def save_settings(conn: sqlite3.Connection, updates: Dict[str, Any]) -> bool:
         for key, value in updates.items():
             if key not in SETTINGS_DEFS:
                 continue
+            if key == "favorite_teams":
+                from team_preferences import normalize_favorite_teams
+                value = normalize_favorite_teams(value)
             cur.execute(
                 "INSERT OR REPLACE INTO user_preferences (key, value, updated_utc) VALUES (?, ?, ?)",
                 (f"{_SETTING_KEY_PREFIX}{key}", json.dumps(value), now),

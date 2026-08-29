@@ -57,6 +57,15 @@ except ImportError:
     def get_canonical_service_code(service_code):
         return service_code
 
+try:
+    from team_preferences import normalize_favorite_teams, score_team_affinity
+except ImportError:
+    def normalize_favorite_teams(value):
+        return []
+
+    def score_team_affinity(event, playable, favorite_teams):
+        return {"score": 0, "matched_teams": [], "reasons": []}
+
 
 def get_default_service_priorities() -> Dict[str, int]:
     """
@@ -81,6 +90,8 @@ def load_user_preferences(conn: sqlite3.Connection) -> Dict[str, Any]:
       - amazon_penalty: JSON bool
       - amazon_master_enabled: JSON bool
       - language_preference: JSON string ("en", "es", "both")
+      - setting:prefer_favorite_team_broadcaster: JSON bool (default false)
+      - setting:favorite_teams: JSON list of non-secret team matching terms
 
     Returns a dict with sane defaults when the table/keys are missing.
     """
@@ -92,6 +103,8 @@ def load_user_preferences(conn: sqlite3.Connection) -> Dict[str, Any]:
         "amazon_penalty": True,
         "amazon_master_enabled": True,
         "language_preference": "en",
+        "prefer_favorite_team_broadcaster": False,
+        "favorite_teams": [],
     }
 
     try:
@@ -170,6 +183,27 @@ def load_user_preferences(conn: sqlite3.Connection) -> Dict[str, Any]:
                     result["language_preference"] = parsed
             except Exception:
                 result["language_preference"] = defaults["language_preference"]
+
+        # Favorite-team settings are surfaced on /settings and therefore use
+        # the setting: prefix. Accept unprefixed keys as a compatibility path.
+        def setting_value(key):
+            return raw.get(f"setting:{key}", raw.get(key))
+
+        v = setting_value("prefer_favorite_team_broadcaster")
+        if v is not None:
+            try:
+                parsed = json.loads(v) if isinstance(v, str) else v
+                result["prefer_favorite_team_broadcaster"] = bool(parsed)
+            except Exception:
+                pass
+
+        v = setting_value("favorite_teams")
+        if v is not None:
+            try:
+                parsed = json.loads(v) if isinstance(v, str) else v
+                result["favorite_teams"] = normalize_favorite_teams(parsed)
+            except Exception:
+                result["favorite_teams"] = []
 
         return result
 
@@ -311,7 +345,9 @@ def get_filtered_playables(
     priority_map: Optional[Dict[str, int]] = None,
     amazon_penalty: bool = True,
     language_preference: str = "en",
-    amazon_master_enabled: bool = True
+    amazon_master_enabled: bool = True,
+    prefer_favorite_team_broadcaster: Optional[bool] = None,
+    favorite_teams: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Get playables for an event, filtered by enabled services using logical service mapping
@@ -324,6 +360,8 @@ def get_filtered_playables(
         amazon_penalty: If True, deprioritize Amazon when alternatives exist
         language_preference: Language preference - "en", "es", or "both"
         amazon_master_enabled: If False, ALL Amazon services are disabled regardless of enabled_services
+        prefer_favorite_team_broadcaster: Optional override for the DB-backed global toggle
+        favorite_teams: Optional override for DB-backed team preference entries
 
     Returns:
         List of playable dicts, filtered and sorted by priority
@@ -353,7 +391,11 @@ def get_filtered_playables(
             "playable_url", "title", "content_id", "priority", "service_name",
             "espn_graph_id", "logical_service", "locale",
         ]
-        optional_cols = [c for c in ("locale_fallback", "feed_name") if c in available_cols]
+        optional_cols = [c for c in (
+            "locale_fallback", "feed_name", "feed_type", "http_deeplink_url",
+            "stream_metadata_json", "category_name", "subcategory_name", "network",
+            "stream_id", "stream_extension",
+        ) if c in available_cols]
         select_cols = base_cols + optional_cols
 
         cur.execute(
@@ -372,6 +414,7 @@ def get_filtered_playables(
             playable: Dict[str, Any] = dict(zip(select_cols, row))
             playable.setdefault("locale_fallback", 0)
             playable.setdefault("feed_name", None)
+            playable.setdefault("feed_type", None)
             playable["event_id"] = event_id
 
             # Language filtering for ESPN feeds.
@@ -486,7 +529,9 @@ def get_filtered_playables(
             else:
                 return 4
 
-        # Sort by user priorities (if provided) or fallback to system priorities
+        # Sort by user priorities (if provided) or fallback to system priorities.
+        # This establishes the complete pre-feature order first. A stable team
+        # preference sort below can then use every existing rule as its tie-break.
         if priority_map:
             playables.sort(
                 key=lambda p: (
@@ -504,11 +549,52 @@ def get_filtered_playables(
                 )
             )
 
+        if prefer_favorite_team_broadcaster is None or favorite_teams is None:
+            stored = load_user_preferences(conn)
+            if prefer_favorite_team_broadcaster is None:
+                prefer_favorite_team_broadcaster = stored.get(
+                    "prefer_favorite_team_broadcaster", False
+                )
+            if favorite_teams is None:
+                favorite_teams = stored.get("favorite_teams", [])
+
+        if prefer_favorite_team_broadcaster and favorite_teams:
+            event = _load_event_for_team_matching(conn, event_id)
+            for playable in playables:
+                playable["team_preference"] = score_team_affinity(
+                    event, playable, favorite_teams
+                )
+            # Python's sort is stable: equal affinity scores retain the exact
+            # provider/service/ESPN/DB ordering computed above.
+            playables.sort(
+                key=lambda p: -int(p["team_preference"].get("score", 0))
+            )
+
         return playables
 
     except Exception as e:
         print(f"Warning: Could not load playables for {event_id}: {e}")
         return []
+
+
+def _load_event_for_team_matching(
+    conn: sqlite3.Connection, event_id: str
+) -> Dict[str, Any]:
+    """Load available event metadata without assuming a particular migration."""
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(events)")
+        columns = [row[1] for row in cur.fetchall()]
+        if not columns:
+            return {"id": event_id}
+        cur.execute(
+            f"SELECT {', '.join(columns)} FROM events WHERE id = ? LIMIT 1",
+            (event_id,),
+        )
+        row = cur.fetchone()
+        return dict(zip(columns, row)) if row else {"id": event_id}
+    except Exception:
+        return {"id": event_id}
 
 
 def get_espn_watchgraph_deeplink(
@@ -569,7 +655,10 @@ def get_best_playable_for_event(
     conn: sqlite3.Connection, event_id: str, enabled_services: List[str],
     priority_map: Optional[Dict[str, int]] = None,
     amazon_penalty: bool = True,
-    language_preference: str = "en"
+    language_preference: str = "en",
+    amazon_master_enabled: bool = True,
+    prefer_favorite_team_broadcaster: Optional[bool] = None,
+    favorite_teams: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Get the best playable dict for an event based on user preferences.
@@ -579,7 +668,9 @@ def get_best_playable_for_event(
         deeplink_* fields, etc.), or None if nothing suitable.
     """
     playables = get_filtered_playables(
-        conn, event_id, enabled_services, priority_map, amazon_penalty, language_preference
+        conn, event_id, enabled_services, priority_map, amazon_penalty,
+        language_preference, amazon_master_enabled,
+        prefer_favorite_team_broadcaster, favorite_teams,
     )
     if not playables:
         return None
@@ -632,7 +723,10 @@ def get_best_deeplink_for_event(
     conn: sqlite3.Connection, event_id: str, enabled_services: List[str],
     priority_map: Optional[Dict[str, int]] = None,
     amazon_penalty: bool = True,
-    language_preference: str = "en"
+    language_preference: str = "en",
+    amazon_master_enabled: bool = True,
+    prefer_favorite_team_broadcaster: Optional[bool] = None,
+    favorite_teams: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[str]:
     """
     Get the best deeplink for an event based on user preferences
@@ -649,7 +743,9 @@ def get_best_deeplink_for_event(
         Best deeplink URL, or None if no suitable playables
     """
     best = get_best_playable_for_event(
-        conn, event_id, enabled_services, priority_map, amazon_penalty, language_preference
+        conn, event_id, enabled_services, priority_map, amazon_penalty,
+        language_preference, amazon_master_enabled,
+        prefer_favorite_team_broadcaster, favorite_teams,
     )
     if not best:
         return None
@@ -662,6 +758,8 @@ def get_all_deeplinks_for_event(
     amazon_penalty: bool = True,
     language_preference: str = "en",
     amazon_master_enabled: bool = True,
+    prefer_favorite_team_broadcaster: Optional[bool] = None,
+    favorite_teams: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Return every filtered playable for an event, each with its resolved deeplink
@@ -679,6 +777,7 @@ def get_all_deeplinks_for_event(
     playables = get_filtered_playables(
         conn, event_id, enabled_services, priority_map, amazon_penalty,
         language_preference, amazon_master_enabled,
+        prefer_favorite_team_broadcaster, favorite_teams,
     )
     out: List[Dict[str, Any]] = []
     for p in playables:
@@ -837,4 +936,3 @@ if __name__ == "__main__":
     }
 
     print(f"Should include women's basketball: {should_include_event(event2, prefs)}")
-

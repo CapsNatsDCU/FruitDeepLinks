@@ -278,6 +278,8 @@ def build_lanes_with_placeholders(
     language_preference: str = 'en'
     priority_map: Dict[str, int] = {}
     amazon_penalty: bool = True
+    prefer_favorite_team_broadcaster: bool = False
+    favorite_teams: List[Dict[str, Any]] = []
     if FILTERING_AVAILABLE:
         try:
             prefs = load_user_preferences(conn)
@@ -291,11 +293,17 @@ def build_lanes_with_placeholders(
             # already passes these (see fruit_export_hybrid.py).
             priority_map = prefs.get("service_priorities", {})
             amazon_penalty = prefs.get("amazon_penalty", True)
+            prefer_favorite_team_broadcaster = prefs.get(
+                "prefer_favorite_team_broadcaster", False
+            )
+            favorite_teams = prefs.get("favorite_teams", [])
         except Exception:
             enabled_services = []
             language_preference = 'en'
             priority_map = {}
             amazon_penalty = True
+            prefer_favorite_team_broadcaster = False
+            favorite_teams = []
 
     # Precompute best playables per event (when filter integration is available)
     playable_cache: Dict[str, Optional[Dict[str, Any]]] = {}
@@ -308,7 +316,9 @@ def build_lanes_with_placeholders(
                         conn, ev.event_id, enabled_services,
                         priority_map=priority_map,
                         amazon_penalty=amazon_penalty,
-                        language_preference=language_preference
+                        language_preference=language_preference,
+                        prefer_favorite_team_broadcaster=prefer_favorite_team_broadcaster,
+                        favorite_teams=favorite_teams,
                     )
                 except Exception:
                     best = None

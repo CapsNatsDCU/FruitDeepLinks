@@ -623,6 +623,10 @@ def get_provider_playable_link(
                     amazon_penalty=prefs.get("amazon_penalty", True),
                     amazon_master_enabled=prefs.get("amazon_master_enabled", True),
                     language_preference=prefs.get("language_preference", "en"),
+                    prefer_favorite_team_broadcaster=prefs.get(
+                        "prefer_favorite_team_broadcaster", False
+                    ),
+                    favorite_teams=prefs.get("favorite_teams", []),
                 )
                 mapped_services = set(mapped)
                 preferred = next(
@@ -807,7 +811,19 @@ def get_event_link_info(
             except Exception:
                 pass
             try:
-                deeplink_url = get_best_deeplink_for_event(conn, event_id, enabled) or None
+                deeplink_url = get_best_deeplink_for_event(
+                    conn,
+                    event_id,
+                    enabled,
+                    priority_map=prefs.get("service_priorities", {}),
+                    amazon_penalty=prefs.get("amazon_penalty", True),
+                    language_preference=prefs.get("language_preference", "en"),
+                    amazon_master_enabled=prefs.get("amazon_master_enabled", True),
+                    prefer_favorite_team_broadcaster=prefs.get(
+                        "prefer_favorite_team_broadcaster", False
+                    ),
+                    favorite_teams=prefs.get("favorite_teams", []),
+                ) or None
             except Exception:
                 deeplink_url = None
             if not deeplink_url:

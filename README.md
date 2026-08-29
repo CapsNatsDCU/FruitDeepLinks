@@ -161,6 +161,7 @@ Visit `/settings` to configure the server without editing environment variables:
 |---|---|
 | **Server** | Server URL, Channels DVR IP, Channels source name |
 | **Lanes** | Number of virtual lanes |
+| **Favorite-Team Broadcaster** | Optional ranking toggle and structured favorite-team entries |
 | **Pipeline** | Days ahead, padding minutes |
 | **Auto Refresh** | Enable/disable, daily refresh time |
 | **Scrapers** | Per-scraper on/off toggles |
@@ -187,6 +188,58 @@ Xtream API calls use the normal Python HTTP client first. If the provider
 rejects that request or returns an unusable response, the adapter retries with
 `curl -4 -sS -L`. Neither transport's credential-bearing URL or error text is
 written to application logs.
+
+### Favorite-team broadcaster preference
+
+The optional **Prefer Favorite-Team Broadcaster** setting changes how
+FruitDeepLinks ranks multiple playable feeds for the same event. It does not
+filter feeds. If the preferred feed is missing or ineligible, the next playable
+in the existing service/provider ranking remains available and wins instead.
+The setting defaults to **off**, so existing users and users with no enabled
+favorite-team entries keep the pre-feature ordering exactly.
+
+Add one or more entries under **Settings → Favorite-Team Broadcaster**. Each
+entry supports:
+
+- a display/canonical team name;
+- comma-separated event aliases;
+- preferred broadcaster or feed terms;
+- explicit avoid terms; and
+- an enabled/disabled state.
+
+For example, a Washington Capitals entry can use `Capitals, WSH` as aliases
+and `WASHINGTON CAPITALS, MONUMENTAL` as preferred terms. These are only
+configuration examples; no teams or networks are hard-coded into the ranker.
+Settings are stored as non-secret JSON in the existing `user_preferences`
+table under `setting:favorite_teams`. The equivalent shape is:
+
+```json
+[
+  {
+    "team": "Example City Comets",
+    "aliases": ["Comets", "ECC"],
+    "preferred_terms": ["COMETS BROADCAST", "LOCAL SPORTS NETWORK"],
+    "avoid_terms": ["RIVAL FEED"],
+    "enabled": true
+  }
+]
+```
+
+Matching is case-insensitive and token/phrase based, not a raw substring
+search. Event titles and available team/sport/provider metadata identify which
+favorite teams are involved. Feed scoring uses service/provider/title,
+`feed_name`/`feed_type`, network/category fields, and Xtream's non-secret
+`stream_metadata_json` (including original stream and category names).
+
+The team-affinity score is applied ahead of the existing deterministic ranking,
+which remains the tie-breaker: `+100` favorite-team feed, `+70` configured
+preferred term, `+40` an unambiguous favorite home/away feed, `+10` neutral or
+national feed, `-30` opponent-specific feed, and `-50` explicit avoid term.
+Categories are additive. When two configured favorite teams play each other,
+either named team feed can receive the same bonus and the existing ordering
+breaks the tie. Event Inspector shows the score and reason for the selected
+feed and other scored playables. Xtream credentials are never read from or
+written to these preferences.
 
 ---
 

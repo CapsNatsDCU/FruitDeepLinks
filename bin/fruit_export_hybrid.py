@@ -539,6 +539,8 @@ def build_direct_xmltv(
     amazon_penalty = preferences.get("amazon_penalty", True)
     language_preference = preferences.get("language_preference", "en")
     amazon_master_enabled = preferences.get("amazon_master_enabled", True)
+    prefer_team = preferences.get("prefer_favorite_team_broadcaster", False)
+    favorite_teams = preferences.get("favorite_teams", [])
     expand_all = bool(get_setting(conn, "expand_all_playables", False))
     max_event_minutes = int(get_setting(conn, "max_event_minutes", 0) or 0)
 
@@ -558,7 +560,7 @@ def build_direct_xmltv(
         if expand_all and FILTERING_AVAILABLE:
             all_playables = get_all_deeplinks_for_event(
                 conn, event_id, enabled_services, priority_map, amazon_penalty,
-                language_preference, amazon_master_enabled,
+                language_preference, amazon_master_enabled, prefer_team, favorite_teams,
             )
             if not all_playables:
                 continue
@@ -583,10 +585,14 @@ def build_direct_xmltv(
         provider = None
         if FILTERING_AVAILABLE:
             best_playable = get_best_playable_for_event(
-                conn, event_id, enabled_services, priority_map, amazon_penalty, language_preference
+                conn, event_id, enabled_services, priority_map, amazon_penalty,
+                language_preference, amazon_master_enabled, prefer_team, favorite_teams,
             )
             if best_playable:
-                deeplink_url = get_best_deeplink_for_event(conn, event_id, enabled_services, priority_map, amazon_penalty, language_preference)
+                deeplink_url = get_best_deeplink_for_event(
+                    conn, event_id, enabled_services, priority_map, amazon_penalty,
+                    language_preference, amazon_master_enabled, prefer_team, favorite_teams,
+                )
                 provider = get_base_service_label(best_playable, fallback=None)
 
         if not deeplink_url and FILTERING_AVAILABLE:
@@ -637,6 +643,8 @@ def build_direct_m3u(
     amazon_penalty = preferences.get("amazon_penalty", True)
     language_preference = preferences.get("language_preference", "en")
     amazon_master_enabled = preferences.get("amazon_master_enabled", True)
+    prefer_team = preferences.get("prefer_favorite_team_broadcaster", False)
+    favorite_teams = preferences.get("favorite_teams", [])
     expand_all = bool(get_setting(conn, "expand_all_playables", False))
 
     skipped_no_deeplink = 0
@@ -675,7 +683,7 @@ def build_direct_m3u(
             if expand_all and FILTERING_AVAILABLE:
                 all_playables = get_all_deeplinks_for_event(
                     conn, event_id, enabled_services, priority_map, amazon_penalty,
-                    language_preference, amazon_master_enabled,
+                    language_preference, amazon_master_enabled, prefer_team, favorite_teams,
                 )
                 if not all_playables:
                     bump("no_url_for_any_service")
@@ -721,7 +729,8 @@ def build_direct_m3u(
             # collapsed to the same generic "ESPN+" regardless of which one
             # actually won.
             best_playable = get_best_playable_for_event(
-                conn, event_id, enabled_services, priority_map, amazon_penalty, language_preference
+                conn, event_id, enabled_services, priority_map, amazon_penalty,
+                language_preference, amazon_master_enabled, prefer_team, favorite_teams,
             ) if FILTERING_AVAILABLE else None
 
             if FILTERING_AVAILABLE and p_rows:
@@ -742,7 +751,10 @@ def build_direct_m3u(
                 # (including one excluded by the user's filters) for the correctly
                 # selected one. Removed rather than fixed: get_filtered_playables()
                 # already does everything the second pass was trying to do.
-                deeplink_url = get_best_deeplink_for_event(conn, event_id, enabled_services, priority_map, amazon_penalty, language_preference)
+                deeplink_url = get_best_deeplink_for_event(
+                    conn, event_id, enabled_services, priority_map, amazon_penalty,
+                    language_preference, amazon_master_enabled, prefer_team, favorite_teams,
+                )
 
             if not deeplink_url:
                 has_playables = bool(p_rows)
@@ -948,4 +960,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main() or 0)
-
