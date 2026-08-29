@@ -558,17 +558,21 @@ def get_filtered_playables(
             if favorite_teams is None:
                 favorite_teams = stored.get("favorite_teams", [])
 
-        if prefer_favorite_team_broadcaster and favorite_teams:
+        if favorite_teams:
             event = _load_event_for_team_matching(conn, event_id)
             for playable in playables:
                 playable["team_preference"] = score_team_affinity(
                     event, playable, favorite_teams
                 )
-            # Python's sort is stable: equal affinity scores retain the exact
-            # provider/service/ESPN/DB ordering computed above.
-            playables.sort(
-                key=lambda p: -int(p["team_preference"].get("score", 0))
-            )
+                playable["team_preference"]["applied"] = bool(
+                    prefer_favorite_team_broadcaster
+                )
+            if prefer_favorite_team_broadcaster:
+                # Python's sort is stable: equal affinity scores retain the exact
+                # provider/service/ESPN/DB ordering computed above.
+                playables.sort(
+                    key=lambda p: -int(p["team_preference"].get("score", 0))
+                )
 
         return playables
 

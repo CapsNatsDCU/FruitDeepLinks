@@ -240,13 +240,13 @@ SETTINGS_DEFS: Dict[str, tuple] = {
         "to take effect.",
     ),
     "prefer_favorite_team_broadcaster": (
-        "PREFER_FAVORITE_TEAM_BROADCASTER", "bool", False,
+        None, "bool", False,
         "Prefer Favorite-Team Broadcaster",
         "Rank a favorite team's own or configured local feed above otherwise valid alternatives. "
         "This is a preference, not a filter; other playable feeds remain fallbacks.",
     ),
     "favorite_teams": (
-        "FAVORITE_TEAMS_JSON", "json", [],
+        None, "json", [],
         "Favorite Teams",
         "Team names, event aliases, preferred broadcaster/feed terms, and avoid terms. "
         "All values are non-secret and matching is case-insensitive.",
@@ -407,7 +407,7 @@ def get_setting(conn: sqlite3.Connection, key: str, fallback=None):
 
     if defn:
         env_var, type_hint, default, *_ = defn
-        env_val = os.getenv(env_var)
+        env_val = os.getenv(env_var) if env_var else None
         if env_val is not None:
             try:
                 return _cast_setting(env_val, type_hint)

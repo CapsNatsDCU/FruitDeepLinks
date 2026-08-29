@@ -24,7 +24,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Blueprint, Response, jsonify, request, stream_with_context
+from flask import Blueprint, Response, jsonify, make_response, request, stream_with_context
 
 from db.connection import db_exists, get_conn, get_conn_or_none, resolve_db_path
 from db.preferences import get_settings_schema, load_all_settings, save_settings
@@ -34,6 +34,20 @@ from server.config import cfg
 from server.logging_setup import get_recent_logs, log
 from server.refresh import refresh_status, start_apply_filters_thread, start_refresh_thread
 from server.services.filters import get_auto_refresh, save_auto_refresh
+from server.services.favorite_teams import (
+    StoredFavoriteTeamsMalformed,
+    create_team,
+    delete_team,
+    export_favorite_team_settings,
+    import_favorite_team_settings,
+    load_favorite_team_settings,
+    preview_team_match,
+    reset_favorite_team_settings,
+    set_global_enabled,
+    set_team_enabled,
+    update_team,
+)
+from team_preferences import TeamPreferenceValidationError, validate_favorite_teams
 
 try:
     from version_info import PROJECT_URL, get_version
@@ -295,19 +309,15 @@ def api_settings():
             return jsonify({"status": "error", "message": "Expected JSON object"}), 400
 
         if "favorite_teams" in updates:
-            if not isinstance(updates["favorite_teams"], list):
+            try:
+                updates["favorite_teams"] = validate_favorite_teams(
+                    updates["favorite_teams"]
+                )
+            except TeamPreferenceValidationError as exc:
                 return jsonify({
                     "status": "error",
-                    "message": "favorite_teams must be a JSON array",
-                }), 400
-            invalid = [
-                index for index, item in enumerate(updates["favorite_teams"])
-                if not isinstance(item, dict) or not str(item.get("team") or "").strip()
-            ]
-            if invalid:
-                return jsonify({
-                    "status": "error",
-                    "message": "Each favorite team must be an object with a non-empty team name",
+                    "message": str(exc),
+                    "errors": exc.errors,
                 }), 400
 
         if save_settings(conn, updates):
@@ -321,3 +331,114 @@ def api_settings():
                     log(f"Failed to apply timezone immediately: {e}", "WARNING")
             return jsonify({"status": "success", "updated": list(updates.keys())})
         return jsonify({"status": "error", "message": "Failed to save settings"}), 500
+
+
+def _ensure_settings_database() -> None:
+    if not db_exists():
+        resolve_db_path().parent.mkdir(parents=True, exist_ok=True)
+        sqlite3.connect(str(resolve_db_path())).close()
+
+
+def _favorite_error_response(exc: Exception):
+    if isinstance(exc, TeamPreferenceValidationError):
+        return jsonify({"status": "error", "message": str(exc), "errors": exc.errors}), 400
+    if isinstance(exc, StoredFavoriteTeamsMalformed):
+        return jsonify({
+            "status": "error",
+            "message": str(exc),
+            "recovery_required": True,
+        }), 409
+    if isinstance(exc, IndexError):
+        return jsonify({"status": "error", "message": str(exc)}), 404
+    log(f"Favorite-team settings operation failed: {type(exc).__name__}", "ERROR")
+    return jsonify({"status": "error", "message": "Favorite-team settings operation failed"}), 500
+
+
+@bp.route("/api/settings/favorite-teams", methods=["GET", "POST", "PATCH", "DELETE"])
+def api_favorite_teams():
+    if request.method == "GET":
+        with get_conn_or_none() as conn:
+            state = load_favorite_team_settings(conn) if conn else {
+                "enabled": False, "teams": [], "malformed": False,
+                "errors": [], "has_saved_value": False,
+            }
+        if state.get("malformed"):
+            log("Favorite-team settings contain malformed non-secret JSON", "WARNING")
+        return jsonify({"status": "success", **state})
+
+    _ensure_settings_database()
+    try:
+        with get_conn() as conn:
+            if request.method == "POST":
+                result = create_team(conn, request.get_json(silent=True))
+                return jsonify({"status": "success", **result}), 201
+            if request.method == "PATCH":
+                payload = request.get_json(silent=True)
+                state = set_global_enabled(
+                    conn, payload.get("enabled") if isinstance(payload, dict) else None
+                )
+                return jsonify({"status": "success", **state})
+            state = reset_favorite_team_settings(conn)
+            return jsonify({"status": "success", **state})
+    except Exception as exc:
+        return _favorite_error_response(exc)
+
+
+@bp.route("/api/settings/favorite-teams/<int:index>", methods=["PUT", "PATCH", "DELETE"])
+def api_favorite_team_item(index):
+    _ensure_settings_database()
+    try:
+        with get_conn() as conn:
+            if request.method == "PUT":
+                result = update_team(conn, index, request.get_json(silent=True))
+            elif request.method == "PATCH":
+                payload = request.get_json(silent=True)
+                result = set_team_enabled(
+                    conn, index,
+                    payload.get("enabled") if isinstance(payload, dict) else None,
+                )
+            else:
+                result = delete_team(conn, index)
+        return jsonify({"status": "success", **result})
+    except Exception as exc:
+        return _favorite_error_response(exc)
+
+
+@bp.route("/api/settings/favorite-teams/preview", methods=["POST"])
+def api_favorite_team_preview():
+    if not db_exists():
+        return jsonify({"status": "error", "message": "Configure a favorite team first"}), 400
+    try:
+        with get_conn() as conn:
+            result = preview_team_match(conn, request.get_json(silent=True))
+        return jsonify({"status": "success", **result})
+    except Exception as exc:
+        return _favorite_error_response(exc)
+
+
+@bp.route("/api/settings/favorite-teams/export", methods=["GET"])
+def api_favorite_team_export():
+    try:
+        with get_conn_or_none() as conn:
+            payload = export_favorite_team_settings(conn) if conn else {
+                "schema_version": 1, "enabled": False, "teams": [],
+            }
+        response = make_response(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+        response.headers["Content-Type"] = "application/json; charset=utf-8"
+        response.headers["Content-Disposition"] = (
+            'attachment; filename="fruitdeeplinks-favorite-teams.json"'
+        )
+        return response
+    except Exception as exc:
+        return _favorite_error_response(exc)
+
+
+@bp.route("/api/settings/favorite-teams/import", methods=["POST"])
+def api_favorite_team_import():
+    _ensure_settings_database()
+    try:
+        with get_conn() as conn:
+            state = import_favorite_team_settings(conn, request.get_json(silent=True))
+        return jsonify({"status": "success", **state})
+    except Exception as exc:
+        return _favorite_error_response(exc)

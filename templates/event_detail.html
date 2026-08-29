@@ -37,8 +37,10 @@ pre { background:var(--bg-inset); border:1px solid var(--border); border-radius:
         <thead><tr>
           <th>Service</th>
           <th>Provider</th>
-          <th>Priority</th>
+          <th>DB Priority</th>
+          <th>Service Priority</th>
           <th>Team Preference</th>
+          <th>Final Rank</th>
           <th>Apple TV Scheme</th>
           <th>HTTP Deeplink</th>
           <th>ESPN Graph ID</th>
@@ -174,21 +176,24 @@ async function loadDetail() {
           : '<span class="small">—</span>');
 
     const serviceHtml = p.logical_service
-      ? `<div>${escH(p.display_name||p.logical_service)}</div><div class="mono small">${escH(p.logical_service)}</div>`
+      ? `<div>${p.selected ? '<span class="badge good">✓ Selected</span> ' : ''}${escH(p.display_name||p.logical_service)}</div><div class="mono small">${escH(p.logical_service)}</div>`
       : '<span class="small">—</span>';
 
     const teamPref = p.team_preference || null;
     const teamPrefHtml = teamPref
       ? `<div class="mono" style="font-weight:700">${Number(teamPref.score||0) >= 0 ? '+' : ''}${Number(teamPref.score||0)}</div>
          <div class="small">${(teamPref.matched_teams||[]).map(escH).join(', ')}</div>
-         ${(teamPref.reasons||[]).map(x=>`<div class="small">${Number(x.score||0) >= 0 ? '+' : ''}${Number(x.score||0)} ${escH(x.reason||'')}</div>`).join('')}`
+         ${(teamPref.reasons||[]).map(x=>`<div class="small">${Number(x.score||0) >= 0 ? '+' : ''}${Number(x.score||0)} ${escH(x.reason||'')}</div>`).join('')}
+         ${teamPref.applied ? '' : '<div class="small">Not applied: global preference is off</div>'}`
       : '<span class="small">Off / no event match</span>';
 
     tr.innerHTML = `
       <td>${serviceHtml}</td>
       <td class="mono">${escH(p.provider||"")}</td>
       <td class="mono">${escH(p.priority)}</td>
+      <td class="mono">${p.existing_service_priority ?? '—'}</td>
       <td>${teamPrefHtml}</td>
+      <td>${p.ranking_position ? `<span class="badge ${p.selected ? 'good' : ''}">#${p.ranking_position}${p.selected ? ' selected' : ''}</span>` : '<span class="small">Filtered out</span>'}</td>
       <td>${appleHtml}</td>
       <td>${httpHtml}</td>
       <td>${espnHtml}</td>
@@ -209,6 +214,9 @@ async function loadDetail() {
       ? `<div style="margin-top:8px"><b>Team preference:</b> ${(best.team_preference.matched_teams||[]).map(escH).join(', ')}
           ${best.team_preference.reasons.map(x=>`<div class="small mono">${Number(x.score||0) >= 0 ? '+' : ''}${Number(x.score||0)} ${escH(x.reason||'')}</div>`).join('')}</div>`
       : '';
+    const favoriteMatch = best.team_preference?.event_matches?.length
+      ? `<div style="margin-top:8px"><b>Favorite team match:</b> ${best.team_preference.event_matches.map(x=>`${escH(x.team)} via <span class="mono">${escH(x.matched_term)}</span>`).join(', ')}</div>`
+      : '';
     document.getElementById("bestBox").innerHTML = `
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
         <span class="badge good">Selected</span>
@@ -217,6 +225,8 @@ async function loadDetail() {
         ${srcBadge}
       </div>
       <div class="small" style="margin-top:8px">Reason: ${escH(best.reason||"—")}</div>
+      <div class="small" style="margin-top:8px">Existing service priority: ${best.existing_service_priority ?? '—'} · Final rank: #${best.ranking_position || 1}</div>
+      ${favoriteMatch}
       ${teamLines}
       ${deeplinkLine}${httpLine}${espnLine}${streamLine}
       ${best.deeplink_source?.includes('ESPN') ? '<div class="small" style="margin-top:8px;color:var(--success)">Using ESPN Watch Graph playback ID</div>' : ''}`;

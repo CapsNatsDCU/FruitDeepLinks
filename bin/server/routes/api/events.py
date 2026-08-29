@@ -341,10 +341,23 @@ def _compute_best(conn, event_id, playables) -> dict | None:
                 ranked_by_id = {
                     p.get("playable_id"): p for p in filtered if p.get("playable_id")
                 }
+                rank_by_id = {
+                    p.get("playable_id"): position
+                    for position, p in enumerate(filtered, start=1)
+                    if p.get("playable_id")
+                }
                 for raw_playable in playables:
                     ranked = ranked_by_id.get(raw_playable.get("playable_id"))
-                    if ranked and ranked.get("team_preference") is not None:
-                        raw_playable["team_preference"] = ranked["team_preference"]
+                    if ranked:
+                        raw_playable["ranking_position"] = rank_by_id.get(
+                            raw_playable.get("playable_id")
+                        )
+                        raw_playable["selected"] = raw_playable["ranking_position"] == 1
+                        raw_playable["existing_service_priority"] = priority_map.get(
+                            ranked.get("logical_service"), 50
+                        )
+                        if ranked.get("team_preference") is not None:
+                            raw_playable["team_preference"] = ranked["team_preference"]
         except Exception:
             pass
 
@@ -360,7 +373,11 @@ def _compute_best(conn, event_id, playables) -> dict | None:
             code = top.get("logical_service") or top.get("provider") or ""
             team_preference = top.get("team_preference")
             reason = "Top of filtered playables order"
-            if team_preference and team_preference.get("reasons"):
+            if (
+                team_preference
+                and team_preference.get("applied")
+                and team_preference.get("reasons")
+            ):
                 details = "; ".join(
                     f"{item.get('score', 0):+d} {item.get('reason', '')}"
                     for item in team_preference["reasons"]
@@ -378,6 +395,10 @@ def _compute_best(conn, event_id, playables) -> dict | None:
                 "deeplink_source": src,
                 "reason": reason,
                 "team_preference": team_preference,
+                "ranking_position": 1,
+                "existing_service_priority": priority_map.get(
+                    top.get("logical_service"), 50
+                ),
             }
         if deeplink:
             match = next(

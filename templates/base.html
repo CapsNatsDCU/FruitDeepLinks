@@ -429,7 +429,8 @@ function showConfirm(title, body) {
     document.getElementById('confirm-modal-body').textContent = body;
     document.getElementById('confirm-modal').classList.add('open');
     document.getElementById('confirm-modal-ok').onclick = () => {
-      closeConfirmModal();
+      document.getElementById('confirm-modal').classList.remove('open');
+      _confirmResolve = null;
       resolve(true);
     };
   });

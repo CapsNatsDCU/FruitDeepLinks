@@ -23,6 +23,14 @@ AVOID_TERM_SCORE = -50
 _MATCHUP_RE = re.compile(r"\s+(vs\.?|versus|at|@)\s+|\s+[-\u2013\u2014]\s+", re.I)
 
 
+class TeamPreferenceValidationError(ValueError):
+    """User-correctable validation failure for favorite-team settings."""
+
+    def __init__(self, errors: list[str]):
+        self.errors = errors
+        super().__init__("; ".join(errors))
+
+
 def _normalize_text(value: Any) -> str:
     text = unicodedata.normalize("NFKD", str(value or "")).casefold()
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
@@ -54,6 +62,104 @@ def _string_list(value: Any) -> list[str]:
     return result
 
 
+def _strict_string_list(value: Any, field: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise TeamPreferenceValidationError([f"{field} must be an array of strings"])
+    errors: list[str] = []
+    result: list[str] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            errors.append(f"{field}[{index}] must be a string")
+            continue
+        text = item.strip()
+        if not text:
+            errors.append(f"{field}[{index}] cannot be blank")
+            continue
+        marker = _normalize_text(text)
+        if marker and marker not in seen:
+            seen.add(marker)
+            result.append(text)
+    if errors:
+        raise TeamPreferenceValidationError(errors)
+    return result
+
+
+def validate_team_preference(
+    value: Any,
+    *,
+    include_display_name_alias: bool = False,
+) -> dict[str, Any]:
+    """Validate and normalize one canonical team entry."""
+    if not isinstance(value, Mapping):
+        raise TeamPreferenceValidationError(["team entry must be an object"])
+    team_value = value.get("team", value.get("name"))
+    if not isinstance(team_value, str) or not team_value.strip():
+        raise TeamPreferenceValidationError(["team name cannot be blank"])
+    team = team_value.strip()
+    aliases = _strict_string_list(value.get("aliases"), "aliases")
+    preferred_terms = _strict_string_list(
+        value.get("preferred_terms", value.get("preferred_broadcaster_terms")),
+        "preferred_terms",
+    )
+    avoid_terms = _strict_string_list(
+        value.get("avoid_terms", value.get("disfavored_terms")),
+        "avoid_terms",
+    )
+    enabled = value.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise TeamPreferenceValidationError(["enabled must be true or false"])
+
+    if include_display_name_alias and not any(
+        _normalize_text(alias) == _normalize_text(team) for alias in aliases
+    ):
+        aliases.insert(0, team)
+
+    return {
+        "team": team,
+        "aliases": aliases,
+        "preferred_terms": preferred_terms,
+        "avoid_terms": avoid_terms,
+        "enabled": enabled,
+    }
+
+
+def validate_favorite_teams(
+    value: Any,
+    *,
+    include_display_name_alias: bool = False,
+) -> list[dict[str, Any]]:
+    """Validate a full canonical team list, including duplicate team names."""
+    if not isinstance(value, list):
+        raise TeamPreferenceValidationError(["favorite teams must be a JSON array"])
+    teams: list[dict[str, Any]] = []
+    errors: list[str] = []
+    seen_names: dict[str, int] = {}
+    for index, item in enumerate(value):
+        try:
+            team = validate_team_preference(
+                item,
+                include_display_name_alias=include_display_name_alias,
+            )
+        except TeamPreferenceValidationError as exc:
+            errors.extend(f"teams[{index}]: {error}" for error in exc.errors)
+            continue
+        marker = _normalize_text(team["team"])
+        if marker in seen_names:
+            errors.append(
+                f'teams[{index}]: duplicate team name "{team["team"]}" '
+                f'(already used at index {seen_names[marker]})'
+            )
+        else:
+            seen_names[marker] = index
+            teams.append(team)
+    if errors:
+        raise TeamPreferenceValidationError(errors)
+    return teams
+
+
 def normalize_favorite_teams(value: Any) -> list[dict[str, Any]]:
     """Return the supported, non-secret team preference shape.
 
@@ -69,12 +175,20 @@ def normalize_favorite_teams(value: Any) -> list[dict[str, Any]]:
         return []
 
     teams: list[dict[str, Any]] = []
+    seen_teams: set[str] = set()
     for item in value:
         if not isinstance(item, Mapping):
             continue
         team = str(item.get("team") or item.get("name") or "").strip()
         if not team:
             continue
+        marker = _normalize_text(team)
+        if marker in seen_teams:
+            continue
+        seen_teams.add(marker)
+        enabled_value = item.get("enabled", True)
+        if isinstance(enabled_value, str):
+            enabled_value = enabled_value.strip().casefold() not in ("false", "0", "no", "off", "")
         teams.append({
             "team": team,
             "aliases": _string_list(item.get("aliases")),
@@ -84,7 +198,7 @@ def normalize_favorite_teams(value: Any) -> list[dict[str, Any]]:
             "avoid_terms": _string_list(
                 item.get("avoid_terms", item.get("disfavored_terms"))
             ),
-            "enabled": bool(item.get("enabled", True)),
+            "enabled": bool(enabled_value),
         })
     return teams
 
@@ -130,8 +244,8 @@ def _split_matchup(title: str) -> tuple[list[str], str | None]:
     return [left, right], separator
 
 
-def find_favorite_teams(event: Mapping[str, Any], favorite_teams: Any) -> list[dict[str, Any]]:
-    """Find enabled configured teams involved in an event."""
+def match_favorite_teams(event: Mapping[str, Any], favorite_teams: Any) -> list[dict[str, Any]]:
+    """Return enabled event matches with the exact configured term that matched."""
     teams = [team for team in normalize_favorite_teams(favorite_teams) if team["enabled"]]
     if not teams:
         return []
@@ -149,10 +263,20 @@ def find_favorite_teams(event: Mapping[str, Any], favorite_teams: Any) -> list[d
         event_fields,
         ("classification_json", "genres_json", "content_segments_json", "raw_attributes_json"),
     )
-    return [
-        team for team in teams
-        if any(_contains_term(event_text, term) for term in _team_terms(team))
-    ]
+    matches: list[dict[str, Any]] = []
+    for team in teams:
+        matched_term = next(
+            (term for term in _team_terms(team) if _contains_term(event_text, term)),
+            None,
+        )
+        if matched_term:
+            matches.append({"team": team, "matched_term": matched_term})
+    return matches
+
+
+def find_favorite_teams(event: Mapping[str, Any], favorite_teams: Any) -> list[dict[str, Any]]:
+    """Find enabled configured teams involved in an event."""
+    return [match["team"] for match in match_favorite_teams(event, favorite_teams)]
 
 
 def _participant_terms(participant: str) -> list[str]:
@@ -169,10 +293,15 @@ def score_team_affinity(
     favorite_teams: Any,
 ) -> dict[str, Any]:
     """Score one playable for an event and return an inspector-friendly explanation."""
-    matched_teams = find_favorite_teams(event, favorite_teams)
+    event_matches = match_favorite_teams(event, favorite_teams)
+    matched_teams = [match["team"] for match in event_matches]
     result: dict[str, Any] = {
         "score": 0,
         "matched_teams": [team["team"] for team in matched_teams],
+        "event_matches": [
+            {"team": match["team"]["team"], "matched_term": match["matched_term"]}
+            for match in event_matches
+        ],
         "reasons": [],
     }
     if not matched_teams:

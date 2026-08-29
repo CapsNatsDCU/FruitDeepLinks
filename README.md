@@ -161,7 +161,7 @@ Visit `/settings` to configure the server without editing environment variables:
 |---|---|
 | **Server** | Server URL, Channels DVR IP, Channels source name |
 | **Lanes** | Number of virtual lanes |
-| **Favorite-Team Broadcaster** | Optional ranking toggle and structured favorite-team entries |
+| **Favorite Teams & Broadcasters** | Ranking toggle, team cards, match preview, and backup/restore |
 | **Pipeline** | Days ahead, padding minutes |
 | **Auto Refresh** | Enable/disable, daily refresh time |
 | **Scrapers** | Per-scraper on/off toggles |
@@ -198,11 +198,12 @@ in the existing service/provider ranking remains available and wins instead.
 The setting defaults to **off**, so existing users and users with no enabled
 favorite-team entries keep the pre-feature ordering exactly.
 
-Add one or more entries under **Settings → Favorite-Team Broadcaster**. Each
-entry supports:
+Add one or more entries under **Settings → Favorite Teams & Broadcasters**.
+The responsive card editor works without editing JSON, environment variables,
+or SQLite. Each entry supports:
 
 - a display/canonical team name;
-- comma-separated event aliases;
+- one-per-line event aliases;
 - preferred broadcaster or feed terms;
 - explicit avoid terms; and
 - an enabled/disabled state.
@@ -211,18 +212,24 @@ For example, a Washington Capitals entry can use `Capitals, WSH` as aliases
 and `WASHINGTON CAPITALS, MONUMENTAL` as preferred terms. These are only
 configuration examples; no teams or networks are hard-coded into the ranker.
 Settings are stored as non-secret JSON in the existing `user_preferences`
-table under `setting:favorite_teams`. The equivalent shape is:
+table under `setting:favorite_teams`; the global switch uses
+`setting:prefer_favorite_team_broadcaster`. There is deliberately no
+environment-variable fallback for either value. The exported backup shape is:
 
 ```json
-[
-  {
-    "team": "Example City Comets",
-    "aliases": ["Comets", "ECC"],
-    "preferred_terms": ["COMETS BROADCAST", "LOCAL SPORTS NETWORK"],
-    "avoid_terms": ["RIVAL FEED"],
-    "enabled": true
-  }
-]
+{
+  "schema_version": 1,
+  "enabled": true,
+  "teams": [
+    {
+      "team": "Example City Comets",
+      "aliases": ["Example City Comets", "Comets", "ECC"],
+      "preferred_terms": ["COMETS BROADCAST", "LOCAL SPORTS NETWORK"],
+      "avoid_terms": ["RIVAL FEED"],
+      "enabled": true
+    }
+  ]
+}
 ```
 
 Matching is case-insensitive and token/phrase based, not a raw substring
@@ -240,6 +247,22 @@ either named team feed can receive the same bonus and the existing ordering
 breaks the tie. Event Inspector shows the score and reason for the selected
 feed and other scored playables. Xtream credentials are never read from or
 written to these preferences.
+
+Use **Edit / Test** on a team card to rename it, change its terms, or run a
+match preview with an event title and feed/broadcaster name. The preview calls
+the same server-side matcher and scorer used by actual playable selection and
+shows the matched event term, total score, and scoring reasons. Event Inspector
+uses those same explanations and shows the selected playable, existing service
+priority, team score, and final rank.
+
+**Export JSON** downloads only the global toggle and favorite-team data. To
+restore or move it, choose **Import JSON**; imports are normalized and validated
+before replacing the current favorite-team configuration. Names and values are
+trimmed, repeated values are de-duplicated case-insensitively, and duplicate or
+blank team names are rejected. **Reset Favorite Team Preferences** requires
+confirmation and clears only this feature. If old stored JSON is malformed, the
+page shows a recovery warning without overwriting it; import a valid backup or
+explicitly reset to recover.
 
 ---
 

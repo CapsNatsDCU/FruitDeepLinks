@@ -13,12 +13,35 @@
 .setting-hint { font-size: 11px; color: var(--text-muted); margin-top: 3px; line-height: 1.4; }
 .setting-env  { font-size: 10px; color: #475569; font-family: var(--mono); margin-top: 2px; }
 .save-bar { position: sticky; bottom: 0; background: var(--bg-page); border-top: 1px solid var(--border); padding: 12px 0; display: flex; align-items: center; gap: 12px; }
-.favorite-team-editor { display:flex; flex-direction:column; gap:10px; }
-.favorite-team-row { border:1px solid var(--border); border-radius:var(--radius); padding:12px; background:var(--bg-inset); }
-.favorite-team-head { display:flex; gap:10px; align-items:center; margin-bottom:8px; }
-.favorite-team-fields { display:grid; grid-template-columns:1fr 1fr; gap:8px 12px; }
-.favorite-team-fields label { font-size:11px; color:var(--text-muted); }
-.favorite-team-fields input { margin-top:4px; width:100%; }
+.favorite-settings { margin-bottom:16px; }
+.favorite-intro { color:var(--text-muted); font-size:13px; line-height:1.5; max-width:850px; }
+.favorite-toggle { display:flex; gap:10px; align-items:flex-start; padding:12px; margin:14px 0; background:var(--bg-inset); border:1px solid var(--border); border-radius:var(--radius); }
+.favorite-toggle input { width:18px; height:18px; margin-top:2px; accent-color:var(--accent); }
+.favorite-toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:12px 0; }
+.favorite-list { display:flex; flex-direction:column; gap:10px; }
+.favorite-empty { padding:20px; text-align:center; color:var(--text-muted); border:1px dashed var(--border); border-radius:var(--radius); }
+.team-card { border:1px solid var(--border); border-radius:var(--radius); background:var(--bg-inset); overflow:hidden; }
+.team-card-header { display:flex; align-items:center; gap:10px; padding:12px; }
+.team-card-title { min-width:0; flex:1; }
+.team-card-title strong { display:block; overflow-wrap:anywhere; }
+.team-card-actions { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
+.team-status { display:inline-flex; padding:2px 7px; border:1px solid var(--border); border-radius:999px; font-size:11px; margin-top:4px; }
+.team-status.enabled { border-color:#22c55e; color:var(--success); }
+.chips { display:flex; flex-wrap:wrap; gap:4px; }
+.chip { background:var(--bg-card); border:1px solid var(--border); border-radius:4px; padding:2px 6px; font-size:11px; font-family:var(--mono); }
+.team-panel { border-top:1px solid var(--border); padding:14px; }
+.team-form-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.team-form-grid .full { grid-column:1/-1; }
+.team-form-grid label { display:block; color:var(--text-dim); font-size:12px; font-weight:600; }
+.team-form-grid input, .team-form-grid textarea { width:100%; margin-top:5px; }
+.team-form-grid textarea { min-height:92px; resize:vertical; font-family:var(--mono); font-size:12px; }
+.field-help { display:block; color:var(--text-muted); font-size:11px; line-height:1.4; margin-top:4px; font-weight:400; }
+.team-form-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+.favorite-alert { display:none; padding:10px 12px; margin:10px 0; border:1px solid var(--danger); border-radius:var(--radius); color:var(--danger); background:rgba(239,68,68,.08); font-size:12px; }
+.favorite-alert.visible { display:block; }
+.preview-box { margin-top:14px; padding-top:12px; border-top:1px solid var(--border); }
+.preview-result { margin-top:8px; padding:10px; border-radius:var(--radius); background:var(--bg-card); border:1px solid var(--border); font-size:12px; }
+.preview-score { font-family:var(--mono); font-size:18px; font-weight:700; }
 details.advanced-section { margin-top: 8px; }
 details.advanced-section summary { font-size: 14px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; padding-bottom: 6px; border-bottom: 1px solid var(--border); cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; user-select: none; }
 details.advanced-section summary::-webkit-details-marker { display: none; }
@@ -28,11 +51,35 @@ details.advanced-section .setting-group { margin-top: 12px; margin-bottom: 0; }
 details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); opacity: 0.7; border-bottom: none; padding-bottom: 4px; margin-bottom: 8px; margin-left: 2px; }
 @media (max-width: 640px) {
   .setting-row { grid-template-columns: 1fr; gap: 6px; }
-  .favorite-team-fields { grid-template-columns:1fr; }
+  .team-card-header { align-items:flex-start; flex-direction:column; }
+  .team-card-actions { justify-content:flex-start; width:100%; }
+  .team-card-actions .btn { flex:1; min-width:90px; }
+  .team-form-grid { grid-template-columns:1fr; }
+  .team-form-grid .full { grid-column:auto; }
+  .favorite-toolbar .btn { flex:1; }
 }
 {% endblock %}
 
 {% block content %}
+<section class="card favorite-settings" aria-labelledby="favorite-settings-title">
+  <h2 id="favorite-settings-title">Favorite Teams &amp; Broadcasters</h2>
+  <p class="favorite-intro">When multiple streams are available for the same event, FruitDeepLinks can prefer feeds associated with your favorite team or broadcaster. These preferences affect ranking only; other streams remain available as fallbacks.</p>
+  <label class="favorite-toggle" for="favorite-global-enabled">
+    <input id="favorite-global-enabled" type="checkbox" onchange="setFavoriteGlobalEnabled(this.checked)">
+    <span><strong>Prefer favorite-team broadcasters</strong><span class="field-help">Turn this off to keep the configuration without changing normal playable ranking.</span></span>
+  </label>
+  <div class="favorite-toolbar">
+    <button class="btn" type="button" onclick="showAddTeamForm()">Add Favorite Team</button>
+    <a class="btn btn-secondary" href="/api/settings/favorite-teams/export" download>Export JSON</a>
+    <button class="btn btn-secondary" type="button" onclick="document.getElementById('favorite-import-file').click()">Import JSON</button>
+    <input id="favorite-import-file" type="file" accept="application/json,.json" hidden onchange="importFavoriteTeams(this.files[0]);this.value=''">
+    <button class="btn btn-secondary" type="button" onclick="resetFavoriteTeams()">Reset Favorite Team Preferences</button>
+  </div>
+  <div id="favorite-error" class="favorite-alert" role="alert"></div>
+  <div id="favorite-add-panel" hidden></div>
+  <div id="favorite-list" class="favorite-list" aria-live="polite"><span class="status-muted">Loading favorite teams…</span></div>
+</section>
+
 <form id="settings-form">
 <div class="card" id="settings-card">
   <div id="settings-body"><span class="status-muted">Loading settings...</span></div>
@@ -41,7 +88,7 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
 
 <div class="save-bar">
   <button class="btn" onclick="saveSettings()" id="btn-save">Save Settings</button>
-  <button class="btn btn-secondary" onclick="loadSettings()">Discard Changes</button>
+  <button class="btn btn-secondary" onclick="loadSettings()" type="button">Discard Changes</button>
   <span id="save-status" style="font-size:13px;color:var(--text-muted)"></span>
 </div>
 {% endblock %}
@@ -51,7 +98,6 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
 const GROUPS = {
   'Server': ['server_url', 'channels_dvr_ip', 'channels_source_name', 'timezone'],
   'Lanes': ['num_lanes', 'expand_all_playables'],
-  'Favorite-Team Broadcaster': ['prefer_favorite_team_broadcaster', 'favorite_teams'],
   'Pipeline': ['days_ahead', 'padding_minutes', 'max_event_minutes'],
   'Auto Refresh': ['auto_refresh_enabled', 'auto_refresh_time'],
   'Scrapers': ['kayo_enabled', 'fanatiz_enabled', 'bein_enabled', 'nesn_enabled', 'victory_enabled', 'gotham_enabled', 'espn_enabled'],
@@ -65,6 +111,7 @@ const ADVANCED = {
 
 let _schema = {};
 let _current = {};
+let _favoriteState = {enabled:false, teams:[], malformed:false, errors:[]};
 
 async function loadSettings() {
   try {
@@ -95,7 +142,7 @@ function renderGroup(groupName, keys) {
       <div>
         <div class="setting-label">${s.label}</div>
         <div class="setting-hint">${s.description}</div>
-        <div class="setting-env">env: ${s.env_var}</div>
+        ${s.env_var ? `<div class="setting-env">env: ${s.env_var}</div>` : ''}
       </div>
       <div>${renderInput(key, s, val)}</div>
     </div>`;
@@ -124,7 +171,6 @@ function renderSettings() {
 }
 
 function renderInput(key, s, val) {
-  if (key === 'favorite_teams') return renderFavoriteTeams(val);
   if (s.type === 'bool') {
     return `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
       <input type="checkbox" name="${key}" id="s_${key}" ${val ? 'checked' : ''} style="width:16px;height:16px;accent-color:var(--accent)">
@@ -141,70 +187,276 @@ function renderInput(key, s, val) {
   return `<input type="text" name="${key}" id="s_${key}" value="${escHtml(String(val||''))}">`;
 }
 
-function normalizeTeamRows(value) {
-  return Array.isArray(value) ? value.map(team => ({
-    team: String(team?.team || ''),
-    aliases: Array.isArray(team?.aliases) ? team.aliases : [],
-    preferred_terms: Array.isArray(team?.preferred_terms) ? team.preferred_terms : [],
-    avoid_terms: Array.isArray(team?.avoid_terms) ? team.avoid_terms : [],
-    enabled: team?.enabled !== false,
-  })) : [];
+function favoriteError(message = '') {
+  const box = document.getElementById('favorite-error');
+  box.textContent = message;
+  box.classList.toggle('visible', !!message);
 }
 
-function renderFavoriteTeams(value) {
-  const teams = normalizeTeamRows(value);
-  const rows = teams.map((team, index) => `
-    <div class="favorite-team-row" data-team-index="${index}">
-      <div class="favorite-team-head">
-        <label style="display:flex;align-items:center;gap:6px;font-size:12px">
-          <input class="team-enabled" type="checkbox" ${team.enabled ? 'checked' : ''} style="width:16px;height:16px;accent-color:var(--accent)"> Enabled
-        </label>
-        <button class="btn btn-secondary" type="button" style="margin-left:auto;padding:4px 8px" onclick="removeFavoriteTeam(${index})">Remove</button>
-      </div>
-      <div class="favorite-team-fields">
-        <label>Team name<input class="team-name" type="text" value="${escHtml(team.team)}" placeholder="Example City Team"></label>
-        <label>Aliases (comma-separated)<input class="team-aliases" type="text" value="${escHtml(team.aliases.join(', '))}" placeholder="Team, ECT"></label>
-        <label>Preferred broadcaster/feed terms<input class="team-preferred" type="text" value="${escHtml(team.preferred_terms.join(', '))}" placeholder="Local Sports Network"></label>
-        <label>Avoid terms<input class="team-avoid" type="text" value="${escHtml(team.avoid_terms.join(', '))}" placeholder="Opponent Network"></label>
-      </div>
-    </div>`).join('');
-  return `<div id="favorite-team-editor" class="favorite-team-editor">
-    ${rows || '<div class="setting-hint">No favorite teams configured. Existing ranking is unchanged.</div>'}
-    <div><button class="btn btn-secondary" type="button" onclick="addFavoriteTeam()">Add Favorite Team</button></div>
+async function favoriteRequest(url, options = {}) {
+  const res = await fetch(url, options);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.message || `Request failed (${res.status})`);
+  return data;
+}
+
+function applyFavoriteState(data) {
+  _favoriteState = {
+    enabled: data?.enabled === true,
+    teams: Array.isArray(data?.teams) ? data.teams : [],
+    malformed: data?.malformed === true,
+    errors: Array.isArray(data?.errors) ? data.errors : [],
+  };
+  document.getElementById('favorite-global-enabled').checked = _favoriteState.enabled;
+  renderFavoriteTeamList();
+}
+
+async function loadFavoriteTeams() {
+  try {
+    const data = await favoriteRequest('/api/settings/favorite-teams');
+    applyFavoriteState(data);
+    favoriteError(_favoriteState.malformed ? _favoriteState.errors.join(' ') : '');
+  } catch (err) {
+    favoriteError(`Could not load favorite teams: ${err.message}`);
+    document.getElementById('favorite-list').innerHTML = '<div class="favorite-empty">Favorite teams could not be loaded.</div>';
+  }
+}
+
+function linesToValues(value) {
+  const seen = new Set();
+  const result = [];
+  for (const line of String(value || '').split(/\r?\n/)) {
+    const cleaned = line.trim();
+    const marker = cleaned.toLocaleLowerCase();
+    if (cleaned && !seen.has(marker)) {
+      seen.add(marker);
+      result.push(cleaned);
+    }
+  }
+  return result;
+}
+
+function teamFormHtml(team, key, isNew = false) {
+  const name = team?.team || '';
+  const aliases = Array.isArray(team?.aliases) ? team.aliases.join('\n') : '';
+  const preferred = Array.isArray(team?.preferred_terms) ? team.preferred_terms.join('\n') : '';
+  const avoid = Array.isArray(team?.avoid_terms) ? team.avoid_terms.join('\n') : '';
+  const prefix = `team-${key}`;
+  return `<div class="team-form-grid">
+    <label class="full" for="${prefix}-name">Team display name <span aria-hidden="true">*</span>
+      <input id="${prefix}-name" type="text" required value="${escHtml(name)}" placeholder="Example City Comets">
+      <span class="field-help">Required. The exact display name is added as an alias for new teams.</span>
+    </label>
+    <label for="${prefix}-aliases">Aliases
+      <textarea id="${prefix}-aliases" placeholder="Comets&#10;Example City Comets&#10;ECC">${escHtml(aliases)}</textarea>
+      <span class="field-help">One value per line. Aliases identify the team in event titles and metadata.</span>
+    </label>
+    <label for="${prefix}-preferred">Preferred broadcaster/feed terms
+      <textarea id="${prefix}-preferred" placeholder="Local Sports Network&#10;Comets Broadcast">${escHtml(preferred)}</textarea>
+      <span class="field-help">One per line. Use terms that appear in stream, channel, broadcaster, or feed names.</span>
+    </label>
+    <label class="full" for="${prefix}-avoid">Avoid/disfavored feed terms
+      <textarea id="${prefix}-avoid" placeholder="Rival Broadcast">${escHtml(avoid)}</textarea>
+      <span class="field-help">One per line. Avoid terms lower ranking but do not block playback.</span>
+    </label>
+  </div>
+  <div class="team-form-actions">
+    <button class="btn" type="button" onclick="${isNew ? 'createFavoriteTeam()' : `saveFavoriteTeam(${key})`}">Save</button>
+    <button class="btn btn-secondary" type="button" onclick="${isNew ? 'cancelAddTeam()' : 'renderFavoriteTeamList()'}">Cancel</button>
   </div>`;
 }
 
-function splitTerms(value) {
-  return String(value || '').split(',').map(x => x.trim()).filter(Boolean);
+function renderFavoriteTeamList() {
+  const list = document.getElementById('favorite-list');
+  if (_favoriteState.malformed) {
+    list.innerHTML = '<div class="favorite-empty">The saved configuration needs recovery. Import a valid backup or reset only the favorite-team preferences.</div>';
+    return;
+  }
+  if (!_favoriteState.teams.length) {
+    list.innerHTML = '<div class="favorite-empty"><strong>No favorite teams configured.</strong><br>Add any team to start preferring its feeds while retaining normal fallbacks.</div>';
+    return;
+  }
+  list.innerHTML = _favoriteState.teams.map((team, index) => {
+    const status = team.enabled ? 'Enabled' : 'Disabled';
+    const aliases = (team.aliases || []).slice(0, 4).map(alias => `<span class="chip">${escHtml(alias)}</span>`).join('');
+    return `<article class="team-card" data-team-index="${index}">
+      <div class="team-card-header">
+        <div class="team-card-title">
+          <strong>${escHtml(team.team)}</strong>
+          <span class="team-status ${team.enabled ? 'enabled' : ''}">${status}</span>
+          ${aliases ? `<div class="chips" style="margin-top:6px">${aliases}</div>` : ''}
+        </div>
+        <div class="team-card-actions">
+          <button class="btn btn-secondary" type="button" aria-expanded="false" aria-controls="team-panel-${index}" onclick="toggleTeamPanel(${index}, this)">Edit / Test</button>
+          <button class="btn btn-secondary" type="button" onclick="setFavoriteTeamEnabled(${index}, ${team.enabled ? 'false' : 'true'})">${team.enabled ? 'Disable' : 'Enable'}</button>
+          <button class="btn btn-secondary" type="button" aria-label="Delete ${escHtml(team.team)}" onclick="deleteFavoriteTeam(${index})">Delete</button>
+        </div>
+      </div>
+      <div id="team-panel-${index}" class="team-panel" hidden>
+        ${teamFormHtml(team, index)}
+        <div class="preview-box">
+          <strong>Test Match</strong>
+          <span class="field-help">Uses the same backend matching and scoring code as playable selection.</span>
+          <div class="team-form-grid" style="margin-top:8px">
+            <label for="preview-event-${index}">Event title<input id="preview-event-${index}" type="text" placeholder="Comets at Rangers"></label>
+            <label for="preview-feed-${index}">Feed / broadcaster name<input id="preview-feed-${index}" type="text" placeholder="US: EXAMPLE CITY COMETS"></label>
+          </div>
+          <button class="btn btn-secondary" type="button" style="margin-top:8px" onclick="previewFavoriteTeam(${index})">Run Test Match</button>
+          <div id="preview-result-${index}" aria-live="polite"></div>
+        </div>
+      </div>
+    </article>`;
+  }).join('');
 }
 
-function collectFavoriteTeams() {
-  return [...document.querySelectorAll('.favorite-team-row')].map(row => ({
-    team: row.querySelector('.team-name').value.trim(),
-    aliases: splitTerms(row.querySelector('.team-aliases').value),
-    preferred_terms: splitTerms(row.querySelector('.team-preferred').value),
-    avoid_terms: splitTerms(row.querySelector('.team-avoid').value),
-    enabled: row.querySelector('.team-enabled').checked,
-  })).filter(team => team.team);
+function toggleTeamPanel(index, button) {
+  const panel = document.getElementById(`team-panel-${index}`);
+  const opening = panel.hidden;
+  panel.hidden = !opening;
+  button.setAttribute('aria-expanded', opening ? 'true' : 'false');
+  if (opening) document.getElementById(`team-${index}-name`).focus();
 }
 
-function rerenderFavoriteTeams(teams) {
-  const editor = document.getElementById('favorite-team-editor');
-  if (editor) editor.outerHTML = renderFavoriteTeams(teams);
+function showAddTeamForm() {
+  if (_favoriteState.malformed) {
+    favoriteError('Import valid favorite-team settings or reset them before adding a team.');
+    return;
+  }
+  const panel = document.getElementById('favorite-add-panel');
+  panel.hidden = false;
+  panel.innerHTML = `<div class="team-card"><div class="team-panel" style="border-top:0"><h3 style="margin-top:0">Add Favorite Team</h3>${teamFormHtml({}, 'new', true)}</div></div>`;
+  document.getElementById('team-new-name').focus();
 }
 
-function addFavoriteTeam() {
-  const teams = collectFavoriteTeams();
-  teams.push({team:'', aliases:[], preferred_terms:[], avoid_terms:[], enabled:true});
-  rerenderFavoriteTeams(teams);
-  const names = document.querySelectorAll('.team-name');
-  if (names.length) names[names.length - 1].focus();
+function cancelAddTeam() {
+  const panel = document.getElementById('favorite-add-panel');
+  panel.hidden = true;
+  panel.innerHTML = '';
 }
 
-function removeFavoriteTeam(index) {
-  const teams = collectFavoriteTeams();
-  teams.splice(index, 1);
-  rerenderFavoriteTeams(teams);
+function readTeamForm(key, enabled = true) {
+  return {
+    team: document.getElementById(`team-${key}-name`).value.trim(),
+    aliases: linesToValues(document.getElementById(`team-${key}-aliases`).value),
+    preferred_terms: linesToValues(document.getElementById(`team-${key}-preferred`).value),
+    avoid_terms: linesToValues(document.getElementById(`team-${key}-avoid`).value),
+    enabled,
+  };
+}
+
+async function createFavoriteTeam() {
+  try {
+    const data = await favoriteRequest('/api/settings/favorite-teams', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(readTeamForm('new', true)),
+    });
+    applyFavoriteState(data.settings);
+    cancelAddTeam();
+    favoriteError('');
+    showToast(`Added ${data.team.team}`, 'success');
+  } catch (err) { favoriteError(err.message); showToast('Favorite team was not added', 'error'); }
+}
+
+async function saveFavoriteTeam(index) {
+  try {
+    const current = _favoriteState.teams[index];
+    const data = await favoriteRequest(`/api/settings/favorite-teams/${index}`, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(readTeamForm(index, current.enabled)),
+    });
+    applyFavoriteState(data.settings);
+    favoriteError('');
+    showToast(`Updated ${data.team.team}`, 'success');
+  } catch (err) { favoriteError(err.message); showToast('Favorite team was not updated', 'error'); }
+}
+
+async function setFavoriteTeamEnabled(index, enabled) {
+  try {
+    const data = await favoriteRequest(`/api/settings/favorite-teams/${index}`, {
+      method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled}),
+    });
+    applyFavoriteState(data.settings);
+    favoriteError('');
+    showToast(`${data.team.team} ${enabled ? 'enabled' : 'disabled'}`, 'success');
+  } catch (err) { favoriteError(err.message); showToast('Team status was not changed', 'error'); }
+}
+
+async function setFavoriteGlobalEnabled(enabled) {
+  try {
+    const data = await favoriteRequest('/api/settings/favorite-teams', {
+      method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled}),
+    });
+    applyFavoriteState(data);
+    favoriteError(_favoriteState.malformed ? _favoriteState.errors.join(' ') : '');
+    showToast(`Favorite-team broadcaster preference ${enabled ? 'enabled' : 'disabled'}`, 'success');
+  } catch (err) {
+    document.getElementById('favorite-global-enabled').checked = !enabled;
+    favoriteError(err.message);
+    showToast('Global preference was not changed', 'error');
+  }
+}
+
+async function deleteFavoriteTeam(index) {
+  const team = _favoriteState.teams[index];
+  if (!team) return;
+  const ok = await showConfirm(`Delete “${team.team}”?`, 'This removes the preference only and does not delete any events or recordings.');
+  if (!ok) return;
+  try {
+    const data = await favoriteRequest(`/api/settings/favorite-teams/${index}`, {method:'DELETE'});
+    applyFavoriteState(data.settings);
+    favoriteError('');
+    showToast(`Deleted ${team.team}`, 'success');
+  } catch (err) { favoriteError(err.message); showToast('Favorite team was not deleted', 'error'); }
+}
+
+async function resetFavoriteTeams() {
+  const ok = await showConfirm('Reset Favorite Team Preferences?', 'This clears only favorite teams and their ranking toggle. No other settings, events, or recordings are changed.');
+  if (!ok) return;
+  try {
+    const data = await favoriteRequest('/api/settings/favorite-teams', {method:'DELETE'});
+    applyFavoriteState(data);
+    cancelAddTeam();
+    favoriteError('');
+    showToast('Favorite-team preferences reset', 'success');
+  } catch (err) { favoriteError(err.message); showToast('Reset failed', 'error'); }
+}
+
+async function importFavoriteTeams(file) {
+  if (!file) return;
+  try {
+    const payload = JSON.parse(await file.text());
+    const data = await favoriteRequest('/api/settings/favorite-teams/import', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload),
+    });
+    applyFavoriteState(data);
+    favoriteError('');
+    showToast(`Imported ${data.teams.length} favorite team${data.teams.length === 1 ? '' : 's'}`, 'success');
+  } catch (err) { favoriteError(`Import failed: ${err.message}`); showToast('Import failed', 'error'); }
+}
+
+async function previewFavoriteTeam(index) {
+  const result = document.getElementById(`preview-result-${index}`);
+  result.innerHTML = '<div class="preview-result">Testing…</div>';
+  try {
+    const data = await favoriteRequest('/api/settings/favorite-teams/preview', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        team_index:index,
+        event_title:document.getElementById(`preview-event-${index}`).value,
+        feed_name:document.getElementById(`preview-feed-${index}`).value,
+      }),
+    });
+    const pref = data.team_preference || {};
+    const score = Number(pref.score || 0);
+    const eventMatches = (pref.event_matches || []).map(match => `<div>Matched favorite team: <strong>${escHtml(match.team)}</strong><br>Matched event term: <span class="mono">${escHtml(match.matched_term)}</span></div>`).join('');
+    const reasons = (pref.reasons || []).map(reason => `<li><span class="mono">${Number(reason.score||0) >= 0 ? '+' : ''}${Number(reason.score||0)}</span> ${escHtml(reason.reason)}</li>`).join('');
+    result.innerHTML = `<div class="preview-result">
+      ${eventMatches || '<div>No enabled favorite team matched the event title.</div>'}
+      <div style="margin-top:8px">Team preference score:</div><div class="preview-score">${score >= 0 ? '+' : ''}${score}</div>
+      ${reasons ? `<ul>${reasons}</ul>` : '<div>No feed-specific preference reason matched.</div>'}
+      ${data.global_enabled ? '' : '<div class="field-help">The global preference is currently off, so this score is only a preview.</div>'}
+    </div>`;
+  } catch (err) { result.innerHTML = `<div class="favorite-alert visible" role="alert">${escHtml(err.message)}</div>`; }
 }
 
 function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -212,10 +464,6 @@ function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replac
 function collectSettings() {
   const updates = {};
   for (const key of Object.keys(_schema)) {
-    if (key === 'favorite_teams') {
-      updates[key] = collectFavoriteTeams();
-      continue;
-    }
     const el = document.getElementById('s_' + key);
     if (!el) continue;
     const s = _schema[key];
@@ -267,5 +515,6 @@ document.addEventListener('change', e => {
 });
 
 loadSettings();
+loadFavoriteTeams();
 </script>
 {% endblock %}
