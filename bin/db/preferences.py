@@ -297,6 +297,31 @@ SETTINGS_DEFS: Dict[str, tuple] = {
         "ESPN Watch Graph",
         "Scrape ESPN Watch Graph API for Fire TV deeplink enrichment.",
     ),
+    "xtream_enabled": (
+        "XTREAM_ENABLED", "bool", False,
+        "Xtream IPTV",
+        "Ingest sports events from the configured Xtream categories. Credentials remain environment-only.",
+    ),
+    "xtream_server_url": (
+        "XTREAM_SERVER_URL", "str", "",
+        "Xtream Server URL",
+        "Base URL of the Xtream-compatible provider. Do not include credentials.",
+    ),
+    "xtream_category_ids": (
+        "XTREAM_CATEGORY_IDS", "str", "",
+        "Xtream Category IDs",
+        "Comma-separated category IDs to ingest. An empty value imports nothing.",
+    ),
+    "xtream_timezone": (
+        "XTREAM_TIMEZONE", "str", "UTC",
+        "Xtream Event Timezone",
+        "IANA timezone used only for provider timestamps or names that include a full date but no offset.",
+    ),
+    "xtream_default_duration_minutes": (
+        "XTREAM_DEFAULT_DURATION_MINUTES", "int", 180,
+        "Xtream Default Duration",
+        "Duration in minutes when a reliable start exists but no end is supplied; stored metadata marks it inferred.",
+    ),
 }
 
 _SETTING_KEY_PREFIX = "setting:"

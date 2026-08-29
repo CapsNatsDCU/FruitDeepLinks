@@ -491,7 +491,7 @@ def main(argv=None):
     print("=" * 60)
 
     # Total steps in this pipeline (updated for beIN Sports)
-    total_steps = 15  # Was 13, now 15 (added beIN scrape + import)
+    total_steps = 16  # Includes optional Xtream fetch/import before lane planning
     emit_progress(
         "refresh_start",
         total_steps=total_steps,
@@ -823,6 +823,24 @@ def main(argv=None):
             return 1
     else:
         print(f"\n[7-nesn/{total_steps}] NESN data not found at {nesn_json}, skipping ingest")
+
+    # Step 7-xtream: Fetch selected Xtream categories and import them directly
+    # into the normalized events/playables model. This is intentionally
+    # non-fatal: a provider outage or credential problem must not prevent the
+    # existing sources from proceeding to lane planning and export.
+    xtream_enabled = bool(_get_db_setting("xtream_enabled", False))
+    if os.getenv("XTREAM_ENABLED", "").lower() in ("0", "false", "no"):
+        xtream_enabled = False
+    if enabled_services and "xtream" not in enabled_services:
+        xtream_enabled = False
+    if skip_scrape or not xtream_enabled:
+        reason = "SKIPPED" if skip_scrape else "DISABLED"
+        print(f"\n[7-xtream/{total_steps}] Ingesting Xtream IPTV events. {reason}")
+    else:
+        run_step("7-xtream", total_steps, "Ingesting configured Xtream IPTV categories", [
+            "python3", "xtream_ingest.py",
+            "--db", str(DB_PATH),
+        ], allow_fail=True)
 
     # Step 7a: Scrape Victory+ events
     # Victory+ uses guest authentication (no user credentials required)

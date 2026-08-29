@@ -310,37 +310,23 @@ curl -i "$BASE/api/lane/4/launch?deeplink_format=http&amp;allow_fallback=1"</pre
 chrome://CC_SERVER:CC_PORT/stream?url=http%3A%2F%2FYOUR_FRUIT_SERVER%2Fapi%2Flane%2F1%2Flaunch%3Fdeeplink_format%3Dhttp</pre>
 </div>
 
-<!-- CDVR DETECTOR -->
-<h2 class="section-header" id="detector">CDVR Detector (Auto-Launch)</h2>
+<!-- DIRECT LANE STREAM -->
+<h2 class="section-header" id="detector">Direct Lane Stream</h2>
 
 <div class="card" style="margin-bottom:14px">
   <h2>Lane HLS Stream</h2>
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/lane/&lt;lane_number&gt;/stream.m3u8</code></div>
-  <p class="description">Serves HLS video stream for CDVR virtual lanes. Automatically triggers deeplink detection in background when a client tunes in.</p>
+  <p class="description">Tunes the current virtual-lane event when its selected playable is a direct stream. Xtream lanes return an HTTP redirect to the provider stream; the server does not transcode video.</p>
   <div class="params">
-    <div><span class="param-name">Platform Detection</span>: Auto-detects tvOS/Fire TV/Android TV and uses appropriate deeplink format</div>
-    <div><span class="param-name">Cooldown</span>: 5-minute cooldown per lane (configurable via LANE_COOLDOWN_MINUTES)</div>
-    <div><span class="param-name">Requires</span>: CDVR_DVR_PATH environment variable must be set to enable detector</div>
+    <div><span class="param-name">Response</span>: <code>302</code> for an active direct stream; <code>404</code> for placeholders and deeplink-only playables</div>
+    <div><span class="param-name">Security</span>: Xtream credentials are reconstructed from environment variables at tune time and are not written to M3U or XMLTV files</div>
   </div>
   <pre># M3U entry points to this endpoint
 #EXTINF:-1 tvg-id="lane.1" channel-number="9000",Fruit Lane 1
 http://your-ip:6655/lane/1/stream.m3u8
 
-# Manually test HLS stream
-curl "$BASE/lane/1/stream.m3u8"</pre>
-</div>
-
-<div class="card" style="margin-bottom:14px">
-  <h2>Detector Status</h2>
-  <p class="description">Check detector logs in real-time:</p>
-  <pre># Watch detector activity
-docker logs -f fruitdeeplinks | grep DETECTOR
-
-# Common log patterns:
-# [INFO] DETECTOR_START lane=5
-# [INFO] Detector: matched lane=5 client=192.168.1.100 ch='Fruit Lane 5'
-# [INFO] Detector: client platform=tvos, using deeplink_format=scheme
-# [INFO] Detector: lane 5 cooldown set for 5 min</pre>
+# Inspect the redirect without downloading video
+curl -I "$BASE/lane/1/stream.m3u8"</pre>
 </div>
 
 <!-- FILTERS -->

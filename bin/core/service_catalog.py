@@ -139,6 +139,9 @@ DISPLAY_NAMES: dict[str, str] = {
     "marquee": "Marquee Sports Network",
     "tubi": "Tubi",
 
+    # Direct IPTV
+    "xtream": "Xtream IPTV",
+
     # Generic web
     "https": "Web - Other",
     "http": "Web - Other",
@@ -211,6 +214,7 @@ INTERNAL_PRIORITY: dict[str, int] = {
     "gotham": 20,
     "marquee": 20,
     "tubi": 20,
+    "xtream": 24,
     "vixapp": 21,
     "aiv_vix_premium": 21,
     "aiv_vix": 21,
@@ -310,6 +314,7 @@ DEFAULT_USER_PRIORITY: dict[str, int] = {
     "nflctv": 52,
     "nflmobile": 50,
     "marquee": 50,
+    "xtream": 45,
 
     # Tier 5: Amazon services (10-29)
     "aiv_free": 28,

@@ -27,6 +27,7 @@ from server.services.lanes import (
     get_current_events_by_lane,
     get_event_link_columns,
     get_event_link_info,
+    get_lane_direct_stream,
     get_playable_id_for_event,
     get_provider_lane_stats,
     get_provider_playable_link,
@@ -139,6 +140,32 @@ def api_delete_provider_lane(provider_code):
 
 
 # ---- Virtual lane deeplink / launch ----
+
+@bp.route("/lane/<int:lane_number>/stream.m3u8", methods=["GET", "HEAD"])
+def lane_direct_stream(lane_number):
+    """Tune a virtual lane to its selected direct IPTV stream, if any."""
+    at_ts = request.args.get("at") or _dt.utcnow().isoformat(timespec="seconds")
+    if not db_exists():
+        return Response("", mimetype="text/plain"), 404
+    try:
+        with get_conn() as conn:
+            playable = get_lane_direct_stream(conn, lane_number, at_ts)
+    except Exception:
+        playable = None
+    if not playable or not playable.get("stream_url"):
+        return Response("", mimetype="text/plain"), 404
+
+    # Never log the authenticated target URL. The Location header is supplied
+    # only to the tuning client that requested this lane.
+    log(
+        f"LANE_STREAM lane={lane_number} provider={playable.get('provider')} direct_redirect",
+        "INFO",
+    )
+    response = redirect(playable["stream_url"], code=302)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 @bp.route("/api/lane/<int:lane_number>/deeplink")
 def api_lane_deeplink(lane_number):

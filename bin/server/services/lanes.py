@@ -380,6 +380,77 @@ def _compute_suggested_lanes(conn: sqlite3.Connection, logical_services: list) -
 
 # ---- Lane query helpers (extracted from monolith) ----
 
+def get_lane_direct_stream(
+    conn: sqlite3.Connection,
+    lane_number: int,
+    at_ts: str,
+    environ=None,
+) -> Optional[dict]:
+    """Resolve the direct stream selected for the active lane slot.
+
+    Direct streams are deliberately resolved separately from app deeplinks.
+    Xtream rows store only a stream identity; credentials are read from the
+    process environment and used to reconstruct the URL at tune time.
+    """
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(playables)")
+        columns = {row[1] for row in cur.fetchall()}
+        if not {"event_id", "playable_id", "provider"}.issubset(columns):
+            return None
+
+        select = ["p.event_id", "p.playable_id", "p.provider"]
+        for column in ("logical_service", "stream_url", "stream_id", "stream_extension"):
+            if column in columns:
+                select.append(f"p.{column}")
+        cur.execute(
+            f"""
+            SELECT {', '.join(select)}
+              FROM lane_events le
+              JOIN playables p
+                ON p.event_id = le.event_id
+               AND p.playable_id = le.chosen_playable_id
+             WHERE le.lane_id = ?
+               AND COALESCE(le.is_placeholder, 0) = 0
+               AND datetime(le.start_utc) <= datetime(?)
+               AND datetime(le.end_utc) > datetime(?)
+             ORDER BY datetime(le.start_utc) DESC
+             LIMIT 1
+            """,
+            (lane_number, at_ts, at_ts),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        keys = [item.split(".")[-1] for item in select]
+        playable = dict(row) if isinstance(row, sqlite3.Row) else dict(zip(keys, row))
+
+        direct_url = str(playable.get("stream_url") or "").strip()
+        if direct_url:
+            if direct_url.startswith(("http://", "https://")):
+                playable["stream_url"] = direct_url
+                return playable
+            return None
+
+        if (playable.get("provider") or "").lower() != "xtream":
+            return None
+        if not playable.get("stream_id"):
+            return None
+
+        from xtream_ingest import build_stream_url, load_config
+        config = load_config(conn, environ)
+        if not config.enabled:
+            return None
+        playable["stream_url"] = build_stream_url(
+            config,
+            playable["stream_id"],
+            playable.get("stream_extension") or "ts",
+        )
+        return playable
+    except Exception:
+        # Fail closed without surfacing requests/configuration values.
+        return None
+
 def get_event_link_columns(conn: sqlite3.Connection):
     """Inspect events table; return (uid_col, primary_deeplink_col, full_deeplink_col)."""
     cur = conn.cursor()

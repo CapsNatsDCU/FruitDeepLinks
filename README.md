@@ -88,6 +88,15 @@ NESN_ENABLED=false
 VICTORY_ENABLED=false
 GOTHAM_ENABLED=false
 ESPN_ENABLED=true          # ESPN Watch Graph enrichment
+
+# Optional Xtream IPTV ingestion. Never commit real credentials.
+XTREAM_ENABLED=false
+XTREAM_SERVER_URL=http://iptv-provider.example:8080
+XTREAM_USERNAME=your-username
+XTREAM_PASSWORD=your-password
+XTREAM_CATEGORY_IDS=123,456       # required; the full catalogue is never imported
+XTREAM_TIMEZONE=America/New_York  # for dated names/timestamps without an offset
+XTREAM_DEFAULT_DURATION_MINUTES=180
 ```
 
 > **Tip:** After first launch, visit `/settings` to configure everything from the UI — server URL, DVR IP, refresh schedule, lane counts, and scraper toggles. Settings saved there persist across restarts and take precedence over env vars (except scraper env vars, which remain a hard override).
@@ -155,9 +164,18 @@ Visit `/settings` to configure the server without editing environment variables:
 | **Pipeline** | Days ahead, padding minutes |
 | **Auto Refresh** | Enable/disable, daily refresh time |
 | **Scrapers** | Per-scraper on/off toggles |
+| **Xtream IPTV** | Enable, server URL, selected category IDs, event timezone, inferred duration |
 | **Advanced** | Lane/direct channel start numbers, headless mode, log level |
 
 Changes take effect immediately and persist across container restarts.
+
+Xtream username and password are intentionally environment-only: they are not
+returned by the settings API or stored in SQLite. The server URL and non-secret
+ingestion controls can be managed on the Settings page. Xtream entries are
+imported only when their metadata or name contains a reliable start date and
+time. A name containing only a time (for example, `7:00 PM`) is skipped rather
+than being assigned an invented date. If a reliable start has no end, the
+configured default duration is used and the event metadata marks it inferred.
 
 ---
 
@@ -231,6 +249,7 @@ Per-provider: `/out/adb_lanes_aiv.m3u`, `/out/adb_lanes_aiv_apple.m3u`, etc.
 | **Gotham Sports (MSG/YES)** | Knicks, Rangers, Islanders, Devils, Yankees, Nets |
 | **NESN** | Red Sox, Bruins |
 | **Victory+** | WHL, LOVB, niche sports |
+| **Xtream IPTV** | Configured live sports/event categories with reliable schedule times |
 
 > Experimental services: event data scrapes successfully; deeplink patterns still being refined. Community feedback welcome.
 
@@ -240,9 +259,9 @@ Per-provider: `/out/adb_lanes_aiv.m3u`, `/out/adb_lanes_aiv_apple.m3u`, etc.
 
 ### Component Overview
 
-1. **Scrapers** — Apple TV Sports API (Selenium + HTTP hybrid), ESPN Watch Graph API, Kayo, Fanatiz, beIN, NESN, Victory+, Gotham, Amazon GTI mapping
+1. **Scrapers** — Apple TV Sports API (Selenium + HTTP hybrid), ESPN Watch Graph API, Kayo, Fanatiz, beIN, NESN, Victory+, Gotham, configured Xtream categories, Amazon GTI mapping
 
-2. **Pipeline** (`daily_refresh.py`) — 15-step orchestrator: scrape → migrate → import → enrich → build lanes → export; runs on schedule or manually via dashboard
+2. **Pipeline** (`daily_refresh.py`) — orchestrates scrape → migrate → import → enrich → build lanes → export; runs on schedule or manually via dashboard
 
 3. **Filter Engine** — user-configurable service preferences, sport/league selection, multi-service priority resolution, Amazon channel expansion
 
@@ -256,6 +275,7 @@ Per-provider: `/out/adb_lanes_aiv.m3u`, `/out/adb_lanes_aiv_apple.m3u`, etc.
 Apple TV Sports API ──┐
 Kayo / Fanatiz / beIN ├──> Scrapers ──> SQLite (fruit_events.db)
 NESN / Victory+ / etc ┘                       │
+Xtream selected categories ────────────> normalized events + direct playables
 ESPN Watch Graph API ─────────────────> Enrich playables
 Amazon GTI mapping ───────────────────> amazon_channels table
                                                │

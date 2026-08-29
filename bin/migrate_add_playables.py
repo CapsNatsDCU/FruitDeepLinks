@@ -24,9 +24,16 @@ def create_playables_table(conn: sqlite3.Connection):
             event_id TEXT NOT NULL,
             playable_id TEXT NOT NULL,
             provider TEXT,
+            service_name TEXT,
+            logical_service TEXT,
             deeplink_play TEXT,
             deeplink_open TEXT,
+            http_deeplink_url TEXT,
             playable_url TEXT,
+            stream_url TEXT,
+            stream_id TEXT,
+            stream_extension TEXT,
+            stream_metadata_json TEXT,
             title TEXT,
             content_id TEXT,
             priority INTEGER DEFAULT 0,
@@ -45,6 +52,27 @@ def create_playables_table(conn: sqlite3.Connection):
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_playables_provider 
         ON playables(provider)
+    """)
+
+    # Existing installs may predate direct-stream support. Keep the migration
+    # idempotent and additive; app deeplinks and IPTV streams remain distinct.
+    existing = _get_table_columns(conn, "playables")
+    additions = {
+        "service_name": "TEXT",
+        "logical_service": "TEXT",
+        "http_deeplink_url": "TEXT",
+        "stream_url": "TEXT",
+        "stream_id": "TEXT",
+        "stream_extension": "TEXT",
+        "stream_metadata_json": "TEXT",
+    }
+    for name, declaration in additions.items():
+        if name not in existing:
+            cur.execute(f"ALTER TABLE playables ADD COLUMN {name} {declaration}")
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_playables_stream_id
+        ON playables(provider, stream_id)
     """)
 
     conn.commit()

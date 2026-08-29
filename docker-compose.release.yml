@@ -51,6 +51,15 @@ services:
       # Scraper behavior
       - HEADLESS=${HEADLESS:-true}
       - NO_NETWORK=${NO_NETWORK:-false}
+      # Xtream IPTV (optional). Username/password remain environment-only and
+      # are never persisted by the application.
+      - XTREAM_ENABLED=${XTREAM_ENABLED:-false}
+      - XTREAM_SERVER_URL=${XTREAM_SERVER_URL:-}
+      - XTREAM_USERNAME=${XTREAM_USERNAME:-}
+      - XTREAM_PASSWORD=${XTREAM_PASSWORD:-}
+      - XTREAM_CATEGORY_IDS=${XTREAM_CATEGORY_IDS:-}
+      - XTREAM_TIMEZONE=${XTREAM_TIMEZONE:-UTC}
+      - XTREAM_DEFAULT_DURATION_MINUTES=${XTREAM_DEFAULT_DURATION_MINUTES:-180}
       # Auto-refresh
       - AUTO_REFRESH_ENABLED=${AUTO_REFRESH_ENABLED:-true}
       - AUTO_REFRESH_TIME=${AUTO_REFRESH_TIME:-02:30}
