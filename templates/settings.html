@@ -42,6 +42,26 @@
 .preview-box { margin-top:14px; padding-top:12px; border-top:1px solid var(--border); }
 .preview-result { margin-top:8px; padding:10px; border-radius:var(--radius); background:var(--bg-card); border:1px solid var(--border); font-size:12px; }
 .preview-score { font-family:var(--mono); font-size:18px; font-weight:700; }
+.persistent-intro { color:var(--text-muted); font-size:13px; line-height:1.5; max-width:900px; }
+.persistent-toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:end; margin:14px 0; }
+.persistent-toolbar label { flex:1; min-width:180px; }
+.persistent-browser { margin:12px 0 18px; padding:14px; background:var(--bg-inset); border:1px solid var(--border); border-radius:var(--radius); }
+.persistent-results, .persistent-list { display:flex; flex-direction:column; gap:8px; }
+.persistent-row { display:grid; grid-template-columns:44px minmax(0,1fr) auto; gap:10px; align-items:center; padding:10px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg-inset); }
+.persistent-row img { width:40px; height:40px; border-radius:5px; object-fit:contain; background:var(--bg-card); }
+.persistent-row-main { min-width:0; overflow-wrap:anywhere; }
+.persistent-row-meta { color:var(--text-muted); font-size:11px; margin-top:3px; }
+.persistent-actions { display:flex; flex-wrap:wrap; gap:6px; justify-content:flex-end; }
+.persistent-status { display:inline-flex; padding:2px 7px; border-radius:999px; font-size:11px; border:1px solid var(--border); }
+.persistent-status.available { color:var(--success); border-color:#22c55e; }
+.persistent-status.unavailable, .persistent-status.needs_attention { color:var(--warning); border-color:#f59e0b; }
+.persistent-form { margin:8px 0; padding:14px; border:1px solid var(--accent); border-radius:var(--radius); background:var(--bg-inset); }
+.persistent-form-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.persistent-form-grid .full { grid-column:1/-1; }
+.persistent-form-grid label { display:block; }
+.persistent-form-grid input, .persistent-form-grid textarea, .persistent-form-grid select { margin-top:4px; }
+.persistent-form-grid textarea { min-height:70px; resize:vertical; }
+.persistent-links { display:flex; gap:14px; flex-wrap:wrap; margin-top:10px; font-size:12px; }
 details.advanced-section { margin-top: 8px; }
 details.advanced-section summary { font-size: 14px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; padding-bottom: 6px; border-bottom: 1px solid var(--border); cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; user-select: none; }
 details.advanced-section summary::-webkit-details-marker { display: none; }
@@ -57,6 +77,12 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
   .team-form-grid { grid-template-columns:1fr; }
   .team-form-grid .full { grid-column:auto; }
   .favorite-toolbar .btn { flex:1; }
+  .persistent-row { grid-template-columns:36px minmax(0,1fr); }
+  .persistent-row img { width:32px; height:32px; }
+  .persistent-actions { grid-column:1/-1; justify-content:flex-start; }
+  .persistent-actions .btn { flex:1; justify-content:center; min-width:80px; }
+  .persistent-form-grid { grid-template-columns:1fr; }
+  .persistent-form-grid .full { grid-column:auto; }
 }
 {% endblock %}
 
@@ -78,6 +104,37 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
   <div id="favorite-error" class="favorite-alert" role="alert"></div>
   <div id="favorite-add-panel" hidden></div>
   <div id="favorite-list" class="favorite-list" aria-live="polite"><span class="status-muted">Loading favorite teams…</span></div>
+</section>
+
+<section class="card" style="margin-bottom:16px" aria-labelledby="persistent-title">
+  <h2 id="persistent-title">Persistent Channels</h2>
+  <p class="persistent-intro">Add Xtream channels that stay available even when they do not contain scheduled event names. Only categories listed in Xtream settings can be browsed; provider credentials remain environment-only.</p>
+  <div class="persistent-links">
+    <a href="/m3u/persistent">Persistent M3U</a>
+    <a href="/xmltv/persistent">Persistent XMLTV</a>
+  </div>
+  <div class="persistent-toolbar">
+    <button class="btn" type="button" id="persistent-browse-button" onclick="openPersistentBrowser()">Browse Xtream Channels</button>
+    <button class="btn btn-secondary" type="button" onclick="loadPersistentChannels()">Refresh List</button>
+  </div>
+  <div id="persistent-error" class="favorite-alert" role="alert"></div>
+  <div id="persistent-browser" class="persistent-browser" hidden>
+    <div class="persistent-toolbar" style="margin-top:0">
+      <label>Configured category
+        <select id="persistent-category"></select>
+      </label>
+      <label>Search by stream name
+        <input id="persistent-search" type="text" placeholder="Washington" onkeydown="if(event.key==='Enter'){event.preventDefault();searchPersistentStreams(1)}">
+      </label>
+      <button class="btn" type="button" onclick="searchPersistentStreams(1)">Search</button>
+      <button class="btn btn-secondary" type="button" onclick="closePersistentBrowser()">Close</button>
+    </div>
+    <div id="persistent-results" class="persistent-results"><span class="status-muted">Choose a category and search its channels.</span></div>
+    <div id="persistent-pagination" class="persistent-toolbar" style="margin-bottom:0"></div>
+  </div>
+  <div id="persistent-editor"></div>
+  <h3 style="font-size:14px;margin:16px 0 10px">Configured Channels</h3>
+  <div id="persistent-list" class="persistent-list" aria-live="polite"><span class="status-muted">Loading persistent channels…</span></div>
 </section>
 
 <form id="settings-form">
@@ -112,6 +169,209 @@ const ADVANCED = {
 let _schema = {};
 let _current = {};
 let _favoriteState = {enabled:false, teams:[], malformed:false, errors:[]};
+let _persistentChannels = [];
+let _persistentResults = [];
+let _persistentPage = 1;
+
+function persistentError(message = '') {
+  const box = document.getElementById('persistent-error');
+  box.textContent = message;
+  box.classList.toggle('visible', !!message);
+}
+
+async function persistentRequest(url, options = {}) {
+  const res = await fetch(url, options);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.message || `Request failed (${res.status})`);
+  return data;
+}
+
+async function loadPersistentChannels() {
+  try {
+    const data = await persistentRequest('/api/xtream/persistent-channels');
+    _persistentChannels = Array.isArray(data.channels) ? data.channels : [];
+    renderPersistentChannels();
+    persistentError('');
+  } catch (err) {
+    persistentError(`Could not load persistent channels: ${err.message}`);
+    document.getElementById('persistent-list').innerHTML = '<div class="favorite-empty">Persistent channels could not be loaded.</div>';
+  }
+}
+
+function persistentStatusLabel(channel) {
+  if (!channel.enabled) return 'Disabled';
+  return ({available:'Available', unavailable:'Unavailable', needs_attention:'Needs attention', unknown:'Not checked'})[channel.availability_status] || 'Not checked';
+}
+
+function renderPersistentChannels() {
+  const list = document.getElementById('persistent-list');
+  if (!_persistentChannels.length) {
+    list.innerHTML = '<div class="favorite-empty"><strong>No persistent channels configured.</strong><br>Browse a configured Xtream category to add one.</div>';
+    return;
+  }
+  list.innerHTML = _persistentChannels.map(channel => `<article class="persistent-row">
+    ${channel.logo ? `<img src="${escHtml(String(channel.logo))}" alt="">` : '<div aria-hidden="true"></div>'}
+    <div class="persistent-row-main">
+      <strong>${escHtml(channel.channel_number)} | ${escHtml(channel.display_name)}</strong>
+      <div style="margin-top:4px"><span class="persistent-status ${escHtml(channel.availability_status)}">${persistentStatusLabel(channel)}</span></div>
+      <div class="persistent-row-meta">${escHtml(channel.category_name || channel.category_id)} · stream_id ${escHtml(channel.stream_id)}${channel.favorite_team ? ` · Team: ${escHtml(channel.favorite_team)}` : ''}</div>
+      ${channel.unavailable_reason ? `<div class="persistent-row-meta" style="color:var(--warning)">${escHtml(channel.unavailable_reason)}</div>` : ''}
+    </div>
+    <div class="persistent-actions">
+      <button class="btn btn-secondary" type="button" onclick="showPersistentEdit(${channel.id})">Edit</button>
+      <button class="btn btn-secondary" type="button" onclick="setPersistentEnabled(${channel.id}, ${channel.enabled ? 'false' : 'true'})">${channel.enabled ? 'Disable' : 'Enable'}</button>
+      <button class="btn btn-danger" type="button" onclick="deletePersistentChannel(${channel.id})">Delete</button>
+    </div>
+  </article>`).join('');
+}
+
+async function openPersistentBrowser() {
+  const browser = document.getElementById('persistent-browser');
+  browser.hidden = false;
+  document.getElementById('persistent-results').innerHTML = '<span class="status-muted">Loading configured categories…</span>';
+  try {
+    const data = await persistentRequest('/api/xtream/categories');
+    const select = document.getElementById('persistent-category');
+    select.innerHTML = (data.categories || []).map(category => `<option value="${escHtml(category.category_id)}" ${category.available ? '' : 'disabled'}>${escHtml(category.category_name)}${category.available ? '' : ' (unavailable)'}</option>`).join('');
+    if (!select.options.length) {
+      document.getElementById('persistent-results').innerHTML = '<div class="favorite-empty">No Xtream categories are configured. Save category IDs in Xtream settings first.</div>';
+      return;
+    }
+    document.getElementById('persistent-results').innerHTML = '<span class="status-muted">Enter a search or browse the selected category.</span>';
+    document.getElementById('persistent-search').focus();
+  } catch (err) {
+    persistentError(`Could not browse Xtream categories: ${err.message}`);
+    document.getElementById('persistent-results').innerHTML = '<div class="favorite-empty">Category browsing is unavailable.</div>';
+  }
+}
+
+function closePersistentBrowser() {
+  document.getElementById('persistent-browser').hidden = true;
+  document.getElementById('persistent-editor').innerHTML = '';
+}
+
+async function searchPersistentStreams(page = 1) {
+  const categoryId = document.getElementById('persistent-category').value;
+  if (!categoryId) return;
+  const query = document.getElementById('persistent-search').value.trim();
+  const results = document.getElementById('persistent-results');
+  results.innerHTML = '<span class="status-muted">Loading channels from this category…</span>';
+  try {
+    const params = new URLSearchParams({q:query, page:String(page), page_size:'25'});
+    const data = await persistentRequest(`/api/xtream/categories/${encodeURIComponent(categoryId)}/streams?${params}`);
+    _persistentResults = Array.isArray(data.items) ? data.items : [];
+    _persistentPage = data.page || 1;
+    results.innerHTML = _persistentResults.length ? _persistentResults.map((stream, index) => `<div class="persistent-row">
+      ${stream.stream_icon ? `<img src="${escHtml(String(stream.stream_icon))}" alt="">` : '<div aria-hidden="true"></div>'}
+      <div class="persistent-row-main"><strong>${escHtml(stream.name)}</strong><div class="persistent-row-meta">stream_id ${escHtml(stream.stream_id)}${stream.epg_channel_id ? ` · EPG ${escHtml(String(stream.epg_channel_id))}` : ''}</div></div>
+      <div class="persistent-actions"><button class="btn" type="button" onclick="showPersistentAdd(${index})">Add Channel</button></div>
+    </div>`).join('') : '<div class="favorite-empty">No matching channels in this category.</div>';
+    const pages = Math.max(1, Math.ceil((data.total || 0) / (data.page_size || 25)));
+    document.getElementById('persistent-pagination').innerHTML = `<span class="status-muted">${data.total || 0} result${data.total === 1 ? '' : 's'} · page ${_persistentPage} of ${pages}</span>
+      <button class="btn btn-secondary" type="button" ${_persistentPage <= 1 ? 'disabled' : ''} onclick="searchPersistentStreams(${_persistentPage - 1})">Previous</button>
+      <button class="btn btn-secondary" type="button" ${_persistentPage >= pages ? 'disabled' : ''} onclick="searchPersistentStreams(${_persistentPage + 1})">Next</button>`;
+  } catch (err) {
+    persistentError(`Could not browse streams: ${err.message}`);
+    results.innerHTML = '<div class="favorite-empty">Stream browsing is unavailable.</div>';
+  }
+}
+
+function nextPersistentNumber() {
+  const used = _persistentChannels.map(c => Number(c.channel_number)).filter(Number.isFinite);
+  return String(used.length ? Math.floor(Math.max(...used)) + 1 : 1);
+}
+
+function favoriteTeamOptions(selected = '') {
+  const names = (_favoriteState.teams || []).map(team => team.team);
+  return `<option value="">No team association</option>${names.map(name => `<option value="${escHtml(name)}" ${name === selected ? 'selected' : ''}>${escHtml(name)}</option>`).join('')}`;
+}
+
+function persistentFormHtml(values, mode) {
+  return `<div class="persistent-form"><h3 style="margin:0 0 10px">${mode === 'add' ? 'Add Persistent Channel' : 'Edit Persistent Channel'}</h3>
+    <div class="persistent-form-grid">
+      <label class="full">Display name<input id="persistent-form-name" type="text" value="${escHtml(values.display_name || '')}" required></label>
+      <label>Channel number<input id="persistent-form-number" type="text" inputmode="decimal" value="${escHtml(values.channel_number || '')}" required></label>
+      <label>Enabled<select id="persistent-form-enabled"><option value="true" ${values.enabled !== false ? 'selected' : ''}>Enabled</option><option value="false" ${values.enabled === false ? 'selected' : ''}>Disabled</option></select></label>
+      <label>Channel ID<input id="persistent-form-channel-id" type="text" value="${escHtml(values.channel_id || '')}" placeholder="Optional"></label>
+      <label>XMLTV / guide ID<input id="persistent-form-guide-id" type="text" value="${escHtml(values.guide_id || '')}" placeholder="Optional"></label>
+      <label class="full">Logo override<input id="persistent-form-logo" type="text" value="${escHtml(values.logo_override || '')}" placeholder="Optional image URL"></label>
+      <label class="full">Favorite team association<select id="persistent-form-team">${favoriteTeamOptions(values.favorite_team || '')}</select></label>
+      <label class="full">Notes<textarea id="persistent-form-notes" placeholder="Optional label or notes">${escHtml(values.notes || '')}</textarea></label>
+    </div>
+    <div class="team-form-actions"><button class="btn" type="button" onclick="savePersistentForm('${mode}', ${values.id || 'null'})">Save Channel</button><button class="btn btn-secondary" type="button" onclick="document.getElementById('persistent-editor').innerHTML=''">Cancel</button></div>
+  </div>`;
+}
+
+function showPersistentAdd(index) {
+  const stream = _persistentResults[index];
+  if (!stream) return;
+  const category = document.getElementById('persistent-category');
+  const editor = document.getElementById('persistent-editor');
+  editor.dataset.streamIndex = String(index);
+  editor.dataset.categoryId = category.value;
+  editor.innerHTML = persistentFormHtml({display_name:stream.name, channel_number:nextPersistentNumber(), enabled:true, guide_id:stream.epg_channel_id || ''}, 'add');
+  editor.scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+function showPersistentEdit(id) {
+  const channel = _persistentChannels.find(item => item.id === id);
+  if (!channel) return;
+  document.getElementById('persistent-editor').innerHTML = persistentFormHtml(channel, 'edit');
+  document.getElementById('persistent-editor').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+function readPersistentForm() {
+  return {
+    display_name:document.getElementById('persistent-form-name').value.trim(),
+    channel_number:document.getElementById('persistent-form-number').value.trim(),
+    enabled:document.getElementById('persistent-form-enabled').value === 'true',
+    channel_id:document.getElementById('persistent-form-channel-id').value.trim(),
+    guide_id:document.getElementById('persistent-form-guide-id').value.trim(),
+    logo_override:document.getElementById('persistent-form-logo').value.trim(),
+    favorite_team:document.getElementById('persistent-form-team').value,
+    notes:document.getElementById('persistent-form-notes').value.trim(),
+  };
+}
+
+async function savePersistentForm(mode, id) {
+  const payload = readPersistentForm();
+  let url = '/api/xtream/persistent-channels';
+  let method = 'POST';
+  if (mode === 'add') {
+    const editor = document.getElementById('persistent-editor');
+    const stream = _persistentResults[Number(editor.dataset.streamIndex)];
+    payload.category_id = editor.dataset.categoryId;
+    payload.stream_id = stream.stream_id;
+  } else {
+    url += `/${id}`;
+    method = 'PATCH';
+  }
+  try {
+    const data = await persistentRequest(url, {method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    document.getElementById('persistent-editor').innerHTML = '';
+    await loadPersistentChannels();
+    showToast(`${data.channel.display_name} saved`, 'success');
+  } catch (err) { persistentError(err.message); showToast('Persistent channel was not saved', 'error'); }
+}
+
+async function setPersistentEnabled(id, enabled) {
+  try {
+    await persistentRequest(`/api/xtream/persistent-channels/${id}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled})});
+    await loadPersistentChannels();
+    showToast(`Persistent channel ${enabled ? 'enabled' : 'disabled'}`, 'success');
+  } catch (err) { persistentError(err.message); }
+}
+
+async function deletePersistentChannel(id) {
+  const channel = _persistentChannels.find(item => item.id === id);
+  if (!channel) return;
+  if (!await showConfirm(`Delete “${channel.display_name}”?`, 'This removes only the persistent-channel configuration.')) return;
+  try {
+    await persistentRequest(`/api/xtream/persistent-channels/${id}`, {method:'DELETE'});
+    await loadPersistentChannels();
+    showToast('Persistent channel deleted', 'success');
+  } catch (err) { persistentError(err.message); }
+}
 
 async function loadSettings() {
   try {
@@ -516,5 +776,6 @@ document.addEventListener('change', e => {
 
 loadSettings();
 loadFavoriteTeams();
+loadPersistentChannels();
 </script>
 {% endblock %}

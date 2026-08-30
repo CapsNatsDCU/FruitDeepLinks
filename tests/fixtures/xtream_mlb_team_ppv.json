@@ -1,0 +1,27 @@
+{
+  "category": {
+    "category_id": "410",
+    "category_name": "MLB TEAM PPV"
+  },
+  "streams": [
+    {
+      "stream_id": 1904224,
+      "name": "US: MLB WASHINGTON NATIONALS ᴿᴬᵂ",
+      "stream_icon": "https://images.example/nationals.png",
+      "epg_channel_id": "mlb.nationals",
+      "container_extension": "ts"
+    },
+    {
+      "stream_id": 1904209,
+      "name": "US: MLB MIAMI MARLINS ᴿᴬᵂ",
+      "stream_icon": "https://images.example/marlins.png",
+      "container_extension": "ts"
+    },
+    {
+      "stream_id": 1904217,
+      "name": "US: MLB PHILADELPHIA PHILLIES ᴿᴬᵂ",
+      "stream_icon": "https://images.example/phillies.png",
+      "container_extension": "ts"
+    }
+  ]
+}

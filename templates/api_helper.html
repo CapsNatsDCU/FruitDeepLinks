@@ -63,6 +63,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--bg-inset); colo
   <h2>XMLTV & M3U Downloads</h2>
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/xmltv/direct</code> Direct channels XMLTV guide</div>
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/m3u/direct</code> Direct channels M3U playlist</div>
+  <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/xmltv/persistent</code> Persistent Xtream channel XMLTV</div>
+  <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/m3u/persistent</code> Persistent Xtream channel M3U</div>
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/xmltv/lanes</code> Virtual lanes XMLTV guide</div>
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/m3u/lanes</code> Virtual lanes M3U playlist</div>
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/m3u/adb</code> ADB lanes M3U — <code>?profile=fire</code> (default) or <code>?profile=apple</code></div>
@@ -70,6 +72,10 @@ code { font-family:var(--mono); font-size:12px; background:var(--bg-inset); colo
   <pre># Download direct channels
 curl -o direct.xml "$BASE/xmltv/direct"
 curl -o direct.m3u "$BASE/m3u/direct"
+
+# Download persistent Xtream channels
+curl -o persistent.xml "$BASE/xmltv/persistent"
+curl -o persistent.m3u "$BASE/m3u/persistent"
 
 # Download virtual lanes
 curl -o lanes.xml "$BASE/xmltv/lanes"
@@ -88,6 +94,18 @@ curl -o adb_lanes.xml "$BASE/out/adb_lanes.xml"
 # Download provider-specific ADB lanes (fire and apple variants)
 curl -o aiv.m3u       "$BASE/out/adb_lanes_aiv.m3u"
 curl -o aiv_apple.m3u "$BASE/out/adb_lanes_aiv_apple.m3u"</pre>
+</div>
+
+<div class="card" style="margin-bottom:14px">
+  <h2>Persistent Xtream Channels</h2>
+  <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/api/xtream/categories</code> Configured browseable categories</div>
+  <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/api/xtream/categories/&lt;category_id&gt;/streams?q=&amp;page=</code> Search one configured category</div>
+  <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/api/xtream/persistent-channels</code> List saved channels</div>
+  <div class="endpoint-line"><span class="tag tag-post">POST</span><code>/api/xtream/persistent-channels</code> Add a provider-verified stream</div>
+  <div class="endpoint-line"><span class="tag tag-post">PATCH</span><code>/api/xtream/persistent-channels/&lt;id&gt;</code> Edit or enable/disable a channel</div>
+  <div class="endpoint-line"><span class="tag tag-danger">DELETE</span><code>/api/xtream/persistent-channels/&lt;id&gt;</code> Delete a saved channel</div>
+  <div class="endpoint-line"><span class="tag tag-get">GET/HEAD</span><code>/xtream/channel/&lt;id&gt;/stream</code> Non-cacheable tune redirect</div>
+  <p class="description">The browse API fetches only categories configured in Xtream settings and only the category explicitly opened. Credentials remain environment-only and never appear in API output, SQLite rows, M3U, XMLTV, or normal logs.</p>
 </div>
 
 <!-- ADB LANES API -->

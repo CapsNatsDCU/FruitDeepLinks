@@ -663,6 +663,14 @@ def main(argv=None):
         "--db", str(DB_PATH),
     ]):
         return 1
+
+    # Persistent Xtream channels are configuration, not event data. This
+    # idempotent migration preserves rows across refreshes and provider outages.
+    if not run_step("4x", total_steps, "Ensuring persistent Xtream channel schema", [
+        "python3", "migrate_add_xtream_persistent_channels.py",
+        "--db", str(DB_PATH),
+    ]):
+        return 1
     
     # Step 5b: Ensure espn_graph_id column exists in playables table
     # (Non-fatal migration that enables ESPN enrichment to store FireTV deeplinks)

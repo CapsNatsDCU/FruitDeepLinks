@@ -646,7 +646,7 @@ def _upsert(conn: sqlite3.Connection, table: str, columns: tuple[str, ...],
 
 def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
                    streams_by_category: Mapping[str, list[dict]], config: XtreamConfig,
-                   now: Optional[datetime] = None) -> dict[str, int]:
+                   now: Optional[datetime] = None) -> dict[str, Any]:
     """Normalize and atomically upsert a fully-fetched Xtream snapshot."""
     ensure_schema(conn)
     selected = set(config.category_ids)
@@ -708,13 +708,19 @@ def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
         conn.rollback()
         raise
 
-    return {
+    result: dict[str, Any] = {
         "observed_upstream": len(observed_playable_ids),
         "normalized": len(normalized_playable_ids),
         "imported": imported,
         "skipped_unparseable": skipped,
         "stale_removed": len(stale_rows),
     }
+    # Persistent rows use the same category snapshot but remain separate from
+    # dynamic events/playables. A reconciliation problem must never delete a
+    # saved channel or affect non-Xtream data.
+    from server.services.xtream_persistent import reconcile_channels
+    result.update(reconcile_channels(conn, streams_by_category, category_names))
+    return result
 
 
 def fetch_snapshot(client: XtreamClient, config: XtreamConfig) -> tuple[list[dict], dict[str, list[dict]]]:
@@ -729,7 +735,7 @@ def fetch_snapshot(client: XtreamClient, config: XtreamConfig) -> tuple[list[dic
 
 
 def run(db_path: Path, environ: Optional[Mapping[str, str]] = None,
-        client_factory=XtreamClient) -> dict[str, int]:
+        client_factory=XtreamClient) -> dict[str, Any]:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     try:
@@ -751,13 +757,22 @@ def main(argv=None) -> int:
         # XtreamError messages are deliberately credential-free.
         print(f"Xtream ingest failed: {exc}")
         return 1
+    for item in result.get("persistent_reconciliations", []):
+        print(
+            "Xtream persistent channel reconciled: "
+            f"id={item['id']} stream_id={item['old_stream_id']}->{item['new_stream_id']}"
+        )
     print(
         "Xtream ingest complete: "
-        f"observed_upstream={result['observed_upstream']} "
-        f"normalized={result['normalized']} "
+        f"dynamic_observed={result['observed_upstream']} "
+        f"dynamic_normalized={result['normalized']} "
         f"imported={result['imported']} "
         f"skipped_unparseable={result['skipped_unparseable']} "
-        f"stale_removed={result['stale_removed']}"
+        f"stale_removed={result['stale_removed']} "
+        f"persistent_configured={result['persistent_configured']} "
+        f"persistent_available={result['persistent_available']} "
+        f"persistent_reconciled={result['persistent_reconciled']} "
+        f"persistent_unavailable={result['persistent_unavailable']}"
     )
     return 0
 

@@ -162,6 +162,7 @@ Visit `/settings` to configure the server without editing environment variables:
 | **Server** | Server URL, Channels DVR IP, Channels source name |
 | **Lanes** | Number of virtual lanes |
 | **Favorite Teams & Broadcasters** | Ranking toggle, team cards, match preview, and backup/restore |
+| **Persistent Channels** | Browse configured Xtream categories; add, edit, disable, or delete stable channels |
 | **Pipeline** | Days ahead, padding minutes |
 | **Auto Refresh** | Enable/disable, daily refresh time |
 | **Scrapers** | Per-scraper on/off toggles |
@@ -188,6 +189,35 @@ Xtream API calls use the normal Python HTTP client first. If the provider
 rejects that request or returns an unusable response, the adapter retries with
 `curl -4 -sS -L`. Neither transport's credential-bearing URL or error text is
 written to application logs.
+
+### Persistent Xtream channels
+
+The **Persistent Channels** card on `/settings` is for stable team and network
+feeds whose names do not contain an event date. Click **Browse Xtream
+Channels**, choose one of the category IDs already configured under **Xtream
+IPTV**, search by name, and add the result. Users never need to type a stream
+ID. Each saved channel has a display name, unique channel number, optional
+channel/guide IDs, logo override, favorite-team association, notes, and an
+enabled switch.
+
+Add the persistent source to Channels DVR with:
+
+- **M3U URL:** `http://your-server-ip:6655/m3u/persistent`
+- **XMLTV URL:** `http://your-server-ip:6655/xmltv/persistent`
+
+Playlist entries point to
+`/xtream/channel/<persistent-channel-id>/stream`; they never contain provider
+credentials. At tune time FruitDeepLinks reads `XTREAM_USERNAME` and
+`XTREAM_PASSWORD` from the environment, reconstructs the provider URL, and
+returns a non-cacheable redirect. Persistent XMLTV includes channel records
+only when no schedule is available; it does not invent programmes.
+
+During each enabled Xtream refresh, persistent channels are checked against
+their saved category. A missing stream ID is automatically replaced only when
+exactly one normalized upstream name matches the saved original name. Zero
+matches marks the channel unavailable; multiple matches mark it as needing
+attention. The saved row is retained in both cases. Dynamic event ingestion
+continues independently and still rejects date-free stream names.
 
 ### Favorite-team broadcaster preference
 
@@ -362,7 +392,8 @@ Per-provider: `/out/adb_lanes_aiv.m3u`, `/out/adb_lanes_aiv_apple.m3u`, etc.
 Apple TV Sports API ──┐
 Kayo / Fanatiz / beIN ├──> Scrapers ──> SQLite (fruit_events.db)
 NESN / Victory+ / etc ┘                       │
-Xtream selected categories ────────────> normalized events + direct playables
+Xtream selected categories ───────┬────> normalized events + direct playables
+                                  └────> persistent channel reconciliation
 ESPN Watch Graph API ─────────────────> Enrich playables
 Amazon GTI mapping ───────────────────> amazon_channels table
                                                │
@@ -371,7 +402,7 @@ Amazon GTI mapping ───────────────────> am
                                        Export Scripts
                                                │
                          ┌─────────────────────┼─────────────────────┐
-                    direct.m3u/.xml    lanes.m3u/.xml    adb_lanes.m3u/.xml
+                 direct.m3u/.xml  lanes.m3u/.xml  adb_lanes.m3u/.xml  persistent M3U/XMLTV
                          │                     │                     │
                   Channels DVR          Channels DVR            ADBTuner
                          │
