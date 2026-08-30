@@ -297,7 +297,8 @@ SETTINGS_DEFS: Dict[str, tuple] = {
         "Auto-Refresh Time (HH:MM)",
         "Daily refresh time in 24-hour format (local server time).",
     ),
-    # Scraper toggles — env var is a hard override; DB setting is the UI control
+    # Scraper toggles — a saved Settings value wins; env vars provide an
+    # initial/default value only until the user explicitly saves a choice.
     "kayo_enabled": (
         "KAYO_ENABLED", "bool", True,
         "Kayo Sports",

@@ -37,7 +37,7 @@ FruitDeepLinks creates virtual TV channels in Channels DVR with deeplinks that l
 - **Settings page** (`/settings`) — configure server URL, DVR IP, lane counts, refresh schedule, and per-scraper toggles directly in the UI; no `.env` edits required
 - **Service catalog** (`core/service_catalog.py`) — single source of truth for all display names, internal priorities, and user-facing defaults
 - **DB access layer** (`db/`) — `get_conn()` context manager, `preferences.py` CRUD, `stats.py` for the dashboard
-- **Per-scraper on/off toggles** — disable Kayo, Fanatiz, beIN, NESN, Victory+, Gotham, or ESPN individually from the Settings page; env vars still work as hard overrides
+- **Per-scraper on/off toggles** — disable Kayo, Fanatiz, beIN, NESN, Victory+, Gotham, or ESPN individually from the Settings page; saved UI values take precedence over environment defaults
 - **Structured progress tracking** — refresh pipeline emits structured JSON markers for real-time step tracking in the dashboard
 
 ### Previously Added
@@ -99,7 +99,7 @@ XTREAM_TIMEZONE=America/New_York  # for dated names/timestamps without an offset
 XTREAM_DEFAULT_DURATION_MINUTES=180
 ```
 
-> **Tip:** After first launch, visit `/settings` to configure everything from the UI — server URL, DVR IP, refresh schedule, lane counts, and scraper toggles. Settings saved there persist across restarts and take precedence over env vars (except scraper env vars, which remain a hard override).
+> **Tip:** After first launch, visit `/settings` to configure everything from the UI — server URL, DVR IP, refresh schedule, lane counts, and scraper toggles. Settings saved there persist across restarts and take precedence over environment defaults.
 
 ### 3. Deploy and open the dashboard
 
@@ -509,7 +509,7 @@ Database size: ~20 MB
 - [x] Flask v2 app factory with blueprint routing
 - [x] Settings page — full UI config, no .env required
 - [x] Service catalog — single source of truth for all service metadata
-- [x] Per-scraper on/off toggles (UI + env var hard override)
+- [x] Per-scraper on/off toggles (saved UI value, then env/default fallback)
 - [x] ADB lanes with Apple/Fire TV device profiles
 - [x] Amazon Channel integration (GTI → channel code mapping)
 - [x] ESPN Watch Graph enrichment for Fire TV deeplinks

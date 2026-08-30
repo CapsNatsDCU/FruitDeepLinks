@@ -34,6 +34,25 @@ DATA_DIR.mkdir(exist_ok=True)
 APPLE_IMPORT_STAMP_PATH = DATA_DIR / ".apple_import_stamp.json"
 PROGRESS_PREFIX = "__FDL_PROGRESS__"
 
+# Provider toggles are resolved once at refresh start. The Settings UI value is
+# authoritative when it has been saved; db.preferences.get_setting supplies the
+# environment/default fallback only when no saved value exists.
+PROVIDER_SPECS = {
+    "kayo": ("Kayo", "kayo_enabled", ("kayo_web", "kayo")),
+    "fanatiz": ("Fanatiz", "fanatiz_enabled", ("fanatiz_web", "fanatiz")),
+    "bein": ("beIN", "bein_enabled", ("bein",)),
+    "nesn": ("NESN", "nesn_enabled", ("nesn", "nesn_web")),
+    "victory": ("Victory+", "victory_enabled", ("victory",)),
+    "gotham": ("Gotham", "gotham_enabled", ("gotham",)),
+    "espn": (
+        "ESPN",
+        "espn_enabled",
+        ("espn_plus", "espn_linear", "espn_unlimited", "espn_mlb_network", "espn_mlb_tv"),
+    ),
+    "xtream": ("Xtream IPTV", "xtream_enabled", ("xtream",)),
+}
+STANDARD_PROVIDER_KEYS = tuple(key for key in PROVIDER_SPECS if key != "xtream")
+
 
 def emit_progress(event: str, **fields):
     payload = {"event": event, **fields}
@@ -394,42 +413,47 @@ def _get_db_setting(key: str, fallback=None):
         return fallback
 
 
-def _get_scraper_setting_from_db(env_var: str):
-    """Return the DB-stored bool for a scraper toggle, or None if not set."""
-    key = f"setting:{env_var.lower()}"
-    try:
-        conn = sqlite3.connect(str(DB_PATH), timeout=5)
-        cur = conn.cursor()
-        cur.execute("SELECT value FROM user_preferences WHERE key = ?", (key,))
-        row = cur.fetchone()
-        conn.close()
-        if row and row[0] is not None:
-            return bool(json.loads(row[0]))
-    except Exception:
-        pass
-    return None
+def _provider_enabled(setting_key: str, logical_services: tuple, enabled_services: list) -> bool:
+    """Resolve one provider from saved Settings, then env/default fallback.
 
-
-def _scraper_enabled(env_var: str, logical_services: list, enabled_services: list) -> bool:
-    """Decide whether a dedicated scraper should run.
-
-    Priority order:
-    1. Env var set to false/0/no  → disabled (explicit hard override)
-    2. DB/UI setting set to false → disabled (user toggled off in settings page)
-    3. enabled_services is non-empty AND none of the scraper's logical service
-       codes appear in it  → disabled (user filtered them all out)
-    4. Otherwise → enabled
+    A non-empty enabled-services filter remains an additional opt-out: a
+    provider is not fetched merely because its scraper toggle is on when all of
+    its services have been excluded from the user's active service list.
     """
-    env_val = os.getenv(env_var, "true").lower()
-    if env_val in ("0", "false", "no"):
+    if not bool(_get_db_setting(setting_key, False)):
         return False
-    db_val = _get_scraper_setting_from_db(env_var)
-    if db_val is not None and not db_val:
+    if enabled_services and not any(service in enabled_services for service in logical_services):
         return False
-    if enabled_services:  # non-empty means an explicit filter is active
-        if not any(s in enabled_services for s in logical_services):
-            return False
     return True
+
+
+def _build_provider_plan(enabled_services: list) -> dict:
+    providers = {
+        key: _provider_enabled(setting_key, logical_services, enabled_services)
+        for key, (_display, setting_key, logical_services) in PROVIDER_SPECS.items()
+    }
+    # Apple TV is the base catalogue for Amazon/Apple/ESPN-style playables. It
+    # has no independent UI toggle, so it must not silently repopulate an
+    # Xtream-only database when every standard provider has been disabled.
+    providers["apple_base"] = any(providers[key] for key in STANDARD_PROVIDER_KEYS)
+    providers["amazon_enrichment"] = providers["apple_base"]
+    return providers
+
+
+def _log_provider_plan(plan: dict) -> None:
+    enabled = [display for key, (display, *_rest) in PROVIDER_SPECS.items() if plan[key]]
+    disabled = [display for key, (display, *_rest) in PROVIDER_SPECS.items() if not plan[key]]
+    print("\nEnabled providers:")
+    for display in enabled:
+        print(display)
+    print("\nDisabled providers:")
+    for display in disabled:
+        print(display)
+    apple_state = "enabled" if plan["apple_base"] else "disabled (no standard providers enabled)"
+    amazon_state = "enabled" if plan["amazon_enrichment"] else "disabled (Apple TV base import disabled)"
+    print("\nBase imports/enrichments:")
+    print(f"Apple TV Sports: {apple_state}")
+    print(f"Amazon channel enrichment: {amazon_state}")
 
 
 def main(argv=None):
@@ -510,13 +534,15 @@ def main(argv=None):
     if enabled_services:
         print(f"[scraper-config] Active service filter: {len(enabled_services)} services enabled — "
               "dedicated scrapers for disabled services will be skipped.")
+    provider_plan = _build_provider_plan(enabled_services)
+    _log_provider_plan(provider_plan)
 
     # Fresh-install defensive step: bootstrap Apple UTS auth tokens if missing/invalid.
     # Prevents brand new installs from failing with:
     #   ERROR: No cached auth tokens found ... /app/data/apple_uts_auth.json
     skip_apple = False
     apple_bootstrap_enabled = os.getenv("APPLE_AUTH_BOOTSTRAP", "true").lower() not in ("0", "false", "no")
-    if (not skip_scrape) and apple_bootstrap_enabled and (not _is_nonempty_json_object(APPLE_AUTH_PATH)):
+    if (not skip_scrape) and provider_plan["apple_base"] and apple_bootstrap_enabled and (not _is_nonempty_json_object(APPLE_AUTH_PATH)):
         print("\n" + "=" * 60)
         print("Apple auth tokens not found (or invalid); bootstrapping via multi_scraper.py --headless")
         print(f"Target: {APPLE_AUTH_PATH}")
@@ -531,12 +557,13 @@ def main(argv=None):
 
 
     # Step 1: Scrape Apple TV Sports (into apple_events.db)
-    if skip_scrape or skip_apple:
+    if skip_scrape or skip_apple or not provider_plan["apple_base"]:
         print("\n" + "=" * 60)
-        print(f"[1/{total_steps}] Scraping Apple TV Sports. SKIPPED")
+        reason = "DISABLED" if not provider_plan["apple_base"] else "SKIPPED"
+        print(f"[1/{total_steps}] Scraping Apple TV Sports. {reason}")
         print("=" * 60)
         apple_db = DATA_DIR / "apple_events.db"
-        if skip_scrape and (not apple_db.exists()):
+        if skip_scrape and provider_plan["apple_base"] and (not apple_db.exists()):
             print(f"ERROR: --skip-scrape set but {apple_db} not found")
             return 1
     else:
@@ -562,10 +589,10 @@ def main(argv=None):
     # Step 2: Scrape Kayo Sports
     kayo_days = os.getenv("KAYO_DAYS", "7")
     kayo_json = OUT_DIR / "kayo_raw.json"
-    kayo_enabled = _scraper_enabled("KAYO_ENABLED", ["kayo_web", "kayo"], enabled_services)
+    kayo_enabled = provider_plan["kayo"]
 
     if skip_scrape or not kayo_enabled:
-        reason = "SKIPPED" if skip_scrape else "DISABLED (service not in enabled list)"
+        reason = "SKIPPED" if skip_scrape else "DISABLED (provider plan)"
         print("\n" + "=" * 60)
         print(f"[2/{total_steps}] Scraping Kayo Sports ({kayo_days} days). {reason}")
         print("=" * 60)
@@ -582,10 +609,10 @@ def main(argv=None):
     # Step 2a: Scrape Fanatiz Soccer
     # Note: No --days filter - Fanatiz returns ~1,300 future events (full season, ~10 months)
     fanatiz_json = OUT_DIR / "fanatiz_raw.json"
-    fanatiz_enabled = _scraper_enabled("FANATIZ_ENABLED", ["fanatiz_web", "fanatiz"], enabled_services)
+    fanatiz_enabled = provider_plan["fanatiz"]
 
     if skip_scrape or not fanatiz_enabled:
-        reason = "SKIPPED" if skip_scrape else "DISABLED (service not in enabled list)"
+        reason = "SKIPPED" if skip_scrape else "DISABLED (provider plan)"
         print("\n" + "=" * 60)
         print(f"[2a/{total_steps}] Scraping Fanatiz Soccer (all future events). {reason}")
         print("=" * 60)
@@ -600,10 +627,10 @@ def main(argv=None):
 
     # Step 2b: Scrape beIN Sports
     bein_json = OUT_DIR / "bein_snapshot.json"
-    bein_enabled = _scraper_enabled("BEIN_ENABLED", ["bein"], enabled_services)
+    bein_enabled = provider_plan["bein"]
 
     if skip_scrape or not bein_enabled:
-        reason = "SKIPPED" if skip_scrape else "DISABLED (service not in enabled list)"
+        reason = "SKIPPED" if skip_scrape else "DISABLED (provider plan)"
         print("\n" + "=" * 60)
         print(f"[2b/{total_steps}] Scraping beIN Sports EPG. {reason}")
         print("=" * 60)
@@ -619,10 +646,10 @@ def main(argv=None):
     # Step 2c: Scrape NESN (New England Sports Network)
     nesn_days = os.getenv("NESN_DAYS", "7")
     nesn_json = OUT_DIR / "nesn_raw.json"
-    nesn_enabled = _scraper_enabled("NESN_ENABLED", ["nesn"], enabled_services)
+    nesn_enabled = provider_plan["nesn"]
 
     if skip_scrape or not nesn_enabled:
-        reason = "SKIPPED" if skip_scrape else "DISABLED (service not in enabled list)"
+        reason = "SKIPPED" if skip_scrape else "DISABLED (provider plan)"
         print("\n" + "=" * 60)
         print(f"[2c/{total_steps}] Scraping NESN ({nesn_days} days). {reason}")
         print("=" * 60)
@@ -742,34 +769,43 @@ def main(argv=None):
     # NOTE: Step 6 can be slow (GZIP + JSON parse). If --skip-scrape was used and the Apple DB
     # hasn't changed since the last successful import, we skip this step to keep "Skip Scrape" fast.
 
-    if (skip_scrape or skip_apple) and (not force_apple_import) and _apple_import_is_fresh(APPLE_DB_PATH):
+    if not provider_plan["apple_base"]:
+        print("\n" + "=" * 60)
+        print(f"[6/{total_steps}] Importing Apple TV events to master database. DISABLED")
+        print("=" * 60)
+    elif (skip_scrape or skip_apple) and (not force_apple_import) and _apple_import_is_fresh(APPLE_DB_PATH):
         print("\n" + "=" * 60)
         print(f"[6/{total_steps}] Importing Apple TV events to master database. SKIPPED (apple_events.db unchanged)")
         print("=" * 60)
         print("Step 6 complete (skipped)")
     else:
-        if not run_step(6, total_steps, "Importing Apple TV events to master database", [
+        disabled_apple_sources = [key for key in STANDARD_PROVIDER_KEYS if not provider_plan[key]]
+        apple_import_cmd = [
             "python3", "-u", "fruit_import_appletv.py",
             "--apple-db", str(APPLE_DB_PATH),
             "--fruit-db", str(DB_PATH),
-        ]):
+        ]
+        if disabled_apple_sources:
+            apple_import_cmd.extend(["--disabled-sources", ",".join(disabled_apple_sources)])
+        if not run_step(6, total_steps, "Importing Apple TV events to master database", apple_import_cmd):
             return 1
         _write_apple_import_stamp(APPLE_DB_PATH)
     
     # Step 6a: Clean up old Apple TV events (keep database lean; not updated
     # in 5+ days means likely ended/cancelled and no longer being refreshed
     # by the scraper)
-    run_step("6a", total_steps, "Cleaning up old Apple TV events", [
-        "python3", "cleanup_stale_rows.py",
-        "--db", str(APPLE_DB_PATH),
-        "--table", "apple_events",
-        "--where", "last_updated < datetime('now', '-5 days')",
-        "--label", "Apple TV",
-    ], allow_fail=True)
+    if provider_plan["apple_base"] and APPLE_DB_PATH.exists():
+        run_step("6a", total_steps, "Cleaning up old Apple TV events", [
+            "python3", "cleanup_stale_rows.py",
+            "--db", str(APPLE_DB_PATH),
+            "--table", "apple_events",
+            "--where", "last_updated < datetime('now', '-5 days')",
+            "--label", "Apple TV",
+        ], allow_fail=True)
 
     # Step 6b: Optional DB maintenance (VACUUM Apple DB when bloated)
     db_maint_enabled = os.getenv("DB_MAINTENANCE", "true").lower() not in ("0", "false", "no")
-    if db_maint_enabled:
+    if db_maint_enabled and provider_plan["apple_base"] and APPLE_DB_PATH.exists():
         run_on_weekday = int(os.getenv("DB_VACUUM_WEEKDAY", "6"))  # 6 = Sunday
         min_free_pages = int(os.getenv("DB_VACUUM_MIN_FREE_PAGES", "5000"))
         min_free_ratio = float(os.getenv("DB_VACUUM_MIN_FREE_RATIO", "0.30"))
@@ -786,49 +822,57 @@ def main(argv=None):
 
     # Step 7: Import Kayo events
     kayo_json = OUT_DIR / "kayo_raw.json"
-    if kayo_json.exists():
+    if kayo_enabled and kayo_json.exists():
         if not run_step(7, total_steps, "Importing Kayo events to database", [
             "python3", "ingest_kayo.py",
             "--db", str(DB_PATH),
             "--kayo-json", str(kayo_json),
         ]):
             return 1
+    elif not kayo_enabled:
+        print(f"\n[7/{total_steps}] Kayo ingest disabled by provider plan")
     else:
         print(f"\n[7/{total_steps}] Kayo data not found at {kayo_json}, skipping ingest")
 
     # Step 7-fanatiz: Import Fanatiz events
     fanatiz_json = OUT_DIR / "fanatiz_raw.json"
-    if fanatiz_json.exists():
+    if fanatiz_enabled and fanatiz_json.exists():
         if not run_step("7-fanatiz", total_steps, "Importing Fanatiz events to database", [
             "python3", "ingest_fanatiz.py",
             "--db", str(DB_PATH),
             "--fanatiz-json", str(fanatiz_json),
         ]):
             return 1
+    elif not fanatiz_enabled:
+        print(f"\n[7-fanatiz/{total_steps}] Fanatiz ingest disabled by provider plan")
     else:
         print(f"\n[7-fanatiz/{total_steps}] Fanatiz data not found at {fanatiz_json}, skipping ingest")
 
     # Step 7-bein: Import beIN Sports events
     bein_json = OUT_DIR / "bein_snapshot.json"
-    if bein_json.exists():
+    if bein_enabled and bein_json.exists():
         if not run_step("7-bein", total_steps, "Importing beIN Sports events to database", [
             "python3", "bein_import.py",
             "--bein-json", str(bein_json),
             "--fruit-db", str(DB_PATH),
         ]):
             return 1
+    elif not bein_enabled:
+        print(f"\n[7-bein/{total_steps}] beIN ingest disabled by provider plan")
     else:
         print(f"\n[7-bein/{total_steps}] beIN data not found at {bein_json}, skipping ingest")
 
     # Step 7-nesn: Import NESN events
     nesn_json = OUT_DIR / "nesn_raw.json"
-    if nesn_json.exists():
+    if nesn_enabled and nesn_json.exists():
         if not run_step("7-nesn", total_steps, "Importing NESN events to database", [
             "python3", "ingest_nesn.py",
             "--db", str(DB_PATH),
             "--nesn-json", str(nesn_json),
         ]):
             return 1
+    elif not nesn_enabled:
+        print(f"\n[7-nesn/{total_steps}] NESN ingest disabled by provider plan")
     else:
         print(f"\n[7-nesn/{total_steps}] NESN data not found at {nesn_json}, skipping ingest")
 
@@ -836,11 +880,7 @@ def main(argv=None):
     # into the normalized events/playables model. This is intentionally
     # non-fatal: a provider outage or credential problem must not prevent the
     # existing sources from proceeding to lane planning and export.
-    xtream_enabled = bool(_get_db_setting("xtream_enabled", False))
-    if os.getenv("XTREAM_ENABLED", "").lower() in ("0", "false", "no"):
-        xtream_enabled = False
-    if enabled_services and "xtream" not in enabled_services:
-        xtream_enabled = False
+    xtream_enabled = provider_plan["xtream"]
     if skip_scrape or not xtream_enabled:
         reason = "SKIPPED" if skip_scrape else "DISABLED"
         print(f"\n[7-xtream/{total_steps}] Ingesting Xtream IPTV events. {reason}")
@@ -853,10 +893,10 @@ def main(argv=None):
     # Step 7a: Scrape Victory+ events
     # Victory+ uses guest authentication (no user credentials required)
     # Session is cached in the database, so authentication only happens once
-    victory_enabled = _scraper_enabled("VICTORY_ENABLED", ["victory"], enabled_services)
+    victory_enabled = provider_plan["victory"]
 
     if skip_scrape or not victory_enabled:
-        reason = "SKIPPED" if skip_scrape else "DISABLED (service not in enabled list)"
+        reason = "SKIPPED" if skip_scrape else "DISABLED (provider plan)"
         print("\n" + "=" * 60)
         print(f"[7a/{total_steps}] Scraping Victory+ events. {reason}")
         print("=" * 60)
@@ -874,15 +914,15 @@ def main(argv=None):
     # Step 7a-gotham: Scrape Gotham Sports (MSG/YES Network)
     # Self-contained scraper that handles both scraping and ingestion
     # NYC regional sports: Knicks, Rangers, Islanders, Devils, Yankees, Nets
-    gotham_enabled = _scraper_enabled("GOTHAM_ENABLED", ["gotham"], enabled_services)
+    gotham_enabled = provider_plan["gotham"]
 
     if skip_scrape or not gotham_enabled:
-        reason = "SKIPPED" if skip_scrape else "DISABLED (env var or service not in enabled list)"
+        reason = "SKIPPED" if skip_scrape else "DISABLED (provider plan)"
         print("\n" + "=" * 60)
         print(f"[7a-gotham/{total_steps}] Scraping Gotham Sports. {reason}")
         print("=" * 60)
         if not skip_scrape:
-            print("Set GOTHAM_ENABLED=true (or enable Gotham Sports in Filter & Settings) to enable")
+            print("Enable Gotham Sports in Settings (and in the service filter, when active) to run it")
     else:
         gotham_days = os.getenv("GOTHAM_DAYS", "7")
         gotham_zone = os.getenv("GOTHAM_ZONE", "zone-1")
@@ -901,12 +941,10 @@ def main(argv=None):
     # Step 7b: Scrape ESPN Watch Graph (skippable, runs after Apple TV import)
     espn_days = os.getenv("ESPN_DAYS", "7")
     espn_db = DATA_DIR / "espn_graph.db"
-    espn_scrape_enabled = _scraper_enabled(
-        "ESPN_ENABLED", ["espn_plus", "espn_linear", "espn_unlimited", "espn_mlb_network", "espn_mlb_tv"], enabled_services
-    )
+    espn_scrape_enabled = provider_plan["espn"]
 
     if skip_scrape or not espn_scrape_enabled:
-        reason = "SKIPPED" if skip_scrape else "DISABLED (service not in enabled list)"
+        reason = "SKIPPED" if skip_scrape else "DISABLED (provider plan)"
         print("\n" + "=" * 60)
         print(f"[7b/{total_steps}] Scraping ESPN Watch Graph ({espn_days} days). {reason}")
         print("=" * 60)
@@ -926,7 +964,7 @@ def main(argv=None):
     # Step 7b-cleanup: Clean up old ESPN Graph events (after scraping, before
     # enrichment). --cascade enables PRAGMA foreign_keys=ON so deleting an
     # event also removes its feeds (off by default per SQLite connection).
-    if espn_db.exists():
+    if espn_scrape_enabled and espn_db.exists():
         run_step("7b-cleanup", total_steps, "Cleaning up old ESPN Graph events", [
             "python3", "cleanup_stale_rows.py",
             "--db", str(espn_db),
@@ -937,7 +975,7 @@ def main(argv=None):
         ], allow_fail=True)
 
     # Step 7c: Enrich ESPN playables with Watch Graph IDs (conditional based on scraping)
-    if espn_db.exists():
+    if espn_scrape_enabled and espn_db.exists():
         print("\n" + "=" * 60)
         print(f"[7c/{total_steps}] Enriching ESPN playables with FireTV deeplinks")
         print("=" * 60)
@@ -964,11 +1002,14 @@ def main(argv=None):
     
     # Step 7d: Fix Spanish-only ESPN playables to use externalId
     # This fixes events where Apple TV only provides Spanish broadcasts
-    if not run_step("7d", total_steps, "Fixing Spanish-only ESPN playables", [
-        "python3", "fix_espn_spanish_only.py",
-        "--db", str(DB_PATH),
-    ]):
-        return 1
+    if espn_scrape_enabled:
+        if not run_step("7d", total_steps, "Fixing Spanish-only ESPN playables", [
+            "python3", "fix_espn_spanish_only.py",
+            "--db", str(DB_PATH),
+        ]):
+            return 1
+    else:
+        print(f"\n[7d/{total_steps}] Fixing Spanish-only ESPN playables. DISABLED")
 
     # Step 7e: Scrape Amazon channels (HTTP-first with Playwright fallback)
     # Identifies which Amazon subscription is required for each event.
@@ -986,11 +1027,15 @@ def main(argv=None):
     #   AMAZON_TIMEOUT_MS:  per-request timeout ms (default 30000)
     #   AMAZON_RETRIES:     retry count (default 1)
     #   FRUIT_AMAZON_DEBUG_CSV_KEEP: keep last N amazon_scrape_*.csv files in /app/data (default 3; 0 keeps all)
-    if skip_scrape:
+    if skip_scrape or not provider_plan["amazon_enrichment"]:
         print("\n" + "=" * 60)
-        print(f"[7e/{total_steps}] Scraping Amazon channels. SKIPPED")
+        reason = "DISABLED" if not provider_plan["amazon_enrichment"] else "SKIPPED"
+        print(f"[7e/{total_steps}] Scraping Amazon channels. {reason}")
         print("=" * 60)
-        print("Amazon scraper skipped (--skip-scrape flag)")
+        if skip_scrape:
+            print("Amazon scraper skipped (--skip-scrape flag)")
+        else:
+            print("Amazon enrichment disabled because the Apple TV base import is disabled")
     else:
         amazon_max = os.getenv("AMAZON_MAX", "350")  # safety cap (after horizon+cache)
         amazon_horizon_hours = os.getenv("AMAZON_HORIZON_HOURS", "168")

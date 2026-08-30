@@ -282,7 +282,7 @@ class XtreamParsingTest(unittest.TestCase):
         self.assertNotIn("user%20name", redacted)
         self.assertNotIn("p%40ss%2Fword", redacted)
 
-    def test_false_environment_value_is_a_hard_disable(self):
+    def test_saved_ui_value_overrides_false_environment_default(self):
         conn = sqlite3.connect(":memory:")
         self.addCleanup(conn.close)
         conn.execute("CREATE TABLE user_preferences (key TEXT PRIMARY KEY, value TEXT)")
@@ -294,7 +294,7 @@ class XtreamParsingTest(unittest.TestCase):
             "XTREAM_USERNAME": "user",
             "XTREAM_PASSWORD": "password",
         })
-        self.assertFalse(loaded.enabled)
+        self.assertTrue(loaded.enabled)
 
 
 class XtreamStaleHandlingTest(unittest.TestCase):

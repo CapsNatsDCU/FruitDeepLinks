@@ -189,11 +189,6 @@ def load_config(conn: Optional[sqlite3.Connection] = None,
         raise XtreamError("FRUIT_DAYS_AHEAD must be an integer") from exc
 
     enabled = _as_bool(setting("xtream_enabled", "XTREAM_ENABLED", False))
-    # Match the other scraper toggles: an explicit false environment value is
-    # a hard operational override even if the Settings page previously saved
-    # the scraper as enabled.
-    if env.get("XTREAM_ENABLED", "").strip().lower() in ("0", "false", "no", "off"):
-        enabled = False
 
     return XtreamConfig(
         enabled=enabled,

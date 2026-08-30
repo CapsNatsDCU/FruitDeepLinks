@@ -10,6 +10,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -34,6 +35,9 @@ PROVIDER_CHANNEL_RANGES = {
 }
 
 PROGRESS_EVERY = 250
+SUPPORTED_DISABLED_SOURCES = frozenset({
+    "kayo", "fanatiz", "bein", "nesn", "victory", "gotham", "espn",
+})
 
 
 def _log(msg: str) -> None:
@@ -755,6 +759,60 @@ def extract_playables(
 
     return result
 
+
+def _playable_source(playable: Tuple) -> Optional[str]:
+    """Map an Apple playable tuple to a provider toggle when applicable."""
+    provider = str(playable[2] or "").lower()
+    service_name = str(playable[3] or "").lower()
+    logical_service = str(playable[4] or "").lower()
+    tokens = set(re.sub(r"[^a-z0-9]+", " ", " ".join(
+        (provider, service_name, logical_service)
+    )).split())
+
+    if logical_service.startswith("espn_") or provider in {"sportscenter", "sportsonespn"} or "espn" in tokens:
+        return "espn"
+    if logical_service in {"bein", "aiv_bein"} or "bein" in tokens:
+        return "bein"
+    if logical_service in {"kayo", "kayo_web"} or "kayo" in tokens:
+        return "kayo"
+    if logical_service in {"fanatiz", "fanatiz_web"} or "fanatiz" in tokens:
+        return "fanatiz"
+    if logical_service in {"nesn", "nesn_web"} or "nesn" in tokens:
+        return "nesn"
+    if logical_service == "victory" or "victory" in tokens:
+        return "victory"
+    if logical_service == "gotham" or "gotham" in tokens:
+        return "gotham"
+    return None
+
+
+def filter_disabled_source_playables(playables: List[Tuple], disabled_sources: set[str]) -> List[Tuple]:
+    """Remove Apple-catalogue playables owned by disabled provider families."""
+    return [playable for playable in playables if _playable_source(playable) not in disabled_sources]
+
+
+def _purge_disabled_source_playables(
+    conn: sqlite3.Connection, event_id: str, disabled_sources: set[str]
+) -> None:
+    """Remove prior native/enriched rows after a provider is disabled."""
+    if not disabled_sources:
+        return
+    rows = conn.execute(
+        "SELECT rowid, event_id, playable_id, provider, service_name, logical_service "
+        "FROM playables WHERE event_id = ?",
+        (event_id,),
+    ).fetchall()
+    for rowid, row_event_id, playable_id, provider, service_name, logical_service in rows:
+        probe = (row_event_id, playable_id, provider, service_name, logical_service)
+        if _playable_source(probe) in disabled_sources:
+            conn.execute("DELETE FROM playables WHERE rowid = ?", (rowid,))
+
+
+def _delete_apple_event(conn: sqlite3.Connection, event_id: str) -> None:
+    conn.execute("DELETE FROM playables WHERE event_id = ?", (event_id,))
+    conn.execute("DELETE FROM event_images WHERE event_id = ?", (event_id,))
+    conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
+
 def upsert_playables(conn: sqlite3.Connection, event_id: str, playables: List[Tuple], dry: bool = False):
     """Insert or update playables for an event, dropping any no longer offered."""
     if dry:
@@ -836,7 +894,19 @@ def main():
     ap.add_argument("--fruit-db", help="SQLite DB path for FruitDeepLinks events (recommended)")
     ap.add_argument("--peacock-db", help="DEPRECATED: legacy SQLite DB path; use --fruit-db instead")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--disabled-sources",
+        default="",
+        help="Comma-separated provider families to exclude from Apple imports",
+    )
     args = ap.parse_args()
+
+    disabled_sources = {
+        item.strip().lower() for item in args.disabled_sources.split(",") if item.strip()
+    }
+    unknown_disabled_sources = disabled_sources - SUPPORTED_DISABLED_SOURCES
+    if unknown_disabled_sources:
+        ap.error(f"Unknown --disabled-sources value(s): {', '.join(sorted(unknown_disabled_sources))}")
 
     # Determine source: DB or JSON
     total = 0
@@ -899,19 +969,28 @@ def main():
             except (ValueError, AttributeError):
                 pass  # If parsing fails, import anyway
         
-        # Map to peacock schema (will normalize again internally, but that's ok)
+        # Map to the normalized schema and filter Apple-catalogue playables at
+        # import time. This prevents disabled provider families from entering
+        # the event database or later lane/export stages.
         mapped = map_apple_to_fruit(e, provider_prefix="appletv")
+        playables = extract_playables(normalized, mapped["id"], conn=conn)
+        filtered_playables = filter_disabled_source_playables(playables, disabled_sources)
+        if playables and not filtered_playables:
+            if not args.dry_run:
+                _delete_apple_event(conn, mapped["id"])
+            continue
+
         upsert_event(conn, mapped, dry=args.dry_run)
         
         # Extract images from normalized event
         imgs = extract_images(normalized, mapped["id"])
         upsert_images(conn, imgs, dry=args.dry_run)
         
-        # Extract playables from normalized event
-        playables = extract_playables(normalized, mapped["id"], conn=conn)
-        if playables:
-            playables_extracted += len(playables)
-        upsert_playables(conn, mapped["id"], playables, dry=args.dry_run)
+        if filtered_playables:
+            playables_extracted += len(filtered_playables)
+        upsert_playables(conn, mapped["id"], filtered_playables, dry=args.dry_run)
+        if not args.dry_run:
+            _purge_disabled_source_playables(conn, mapped["id"], disabled_sources)
         
         inserted += 1
 
