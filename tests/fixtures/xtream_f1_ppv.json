@@ -1,0 +1,31 @@
+{
+  "category": {
+    "category_id": "2253",
+    "category_name": "US| APPLE TV F1 PPV"
+  },
+  "streams": [
+    {
+      "stream_id": 3001,
+      "name": "NEXT | ITALY: RACE | Sun 06 Sep 07:50 EDT (US) | 8K EXCLUSIVE | US: APPLE TV F1 PPV 1",
+      "stream_icon": "https://images.example/f1.png",
+      "container_extension": "ts"
+    },
+    {
+      "stream_id": 3002,
+      "name": "NEXT | SPAIN: RACE | Sun 13 Sep 07:50 EDT (US) | 8K EXCLUSIVE | US: APPLE TV F1 PPV 2",
+      "stream_icon": "https://images.example/f1.png",
+      "container_extension": "ts"
+    },
+    {
+      "stream_id": 3005,
+      "name": "NEXT | SINGAPORE: SPRINT | Sat 10 Oct 04:15 EDT (US) | 8K EXCLUSIVE | US: APPLE TV F1 PPV 5",
+      "stream_icon": "https://images.example/f1.png",
+      "container_extension": "ts"
+    },
+    {
+      "stream_id": 3011,
+      "name": "- NO EVENT STREAMING - | 8K EXCLUSIVE | US: APPLE TV F1 PPV 11",
+      "container_extension": "ts"
+    }
+  ]
+}

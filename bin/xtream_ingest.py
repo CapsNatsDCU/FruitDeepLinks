@@ -36,6 +36,57 @@ LOGICAL_SERVICE = "xtream"
 DEFAULT_TIMEOUT_SECONDS = 20
 DEFAULT_DURATION_MINUTES = 180
 _SAFE_EXTENSION_RE = re.compile(r"^[A-Za-z0-9]{1,8}$")
+_PLACEHOLDER_LABELS = {
+    "NO EVENT",
+    "NO EVENT STREAMING",
+    "NO STREAM",
+    "OFFLINE",
+    "TBA",
+}
+_MOTORSPORT_MONTHS = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+_MOTORSPORT_DATE_RE = re.compile(
+    r"^(?:MON|TUE|WED|THU|FRI|SAT|SUN)\s+"
+    r"(?P<day>\d{1,2})\s+"
+    r"(?P<month>JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+"
+    r"(?P<hour>[01]?\d|2[0-3]):(?P<minute>[0-5]\d)\s+"
+    r"(?P<timezone>[A-Z]{2,5})(?:\s*\([^)]*\))?$",
+    re.IGNORECASE,
+)
+_MOTORSPORT_SESSIONS = {
+    "RACE": "Race",
+    "SPRINT": "Sprint",
+    "QUALIFY": "Qualifying",
+    "QUALIFYING": "Qualifying",
+    "PRACTICE": "Practice",
+    "PRACTICE 1": "Practice 1",
+    "PRACTICE 2": "Practice 2",
+    "PRACTICE 3": "Practice 3",
+    "FP1": "Practice 1",
+    "FP2": "Practice 2",
+    "FP3": "Practice 3",
+    "SPRINT QUALIFYING": "Sprint Qualifying",
+    "SPRINT SHOOTOUT": "Sprint Shootout",
+}
+_MOTORSPORT_DURATION_MINUTES = {
+    "Race": 240,
+    "Sprint": 120,
+    "Qualifying": 120,
+    "Practice": 120,
+    "Practice 1": 120,
+    "Practice 2": 120,
+    "Practice 3": 120,
+    "Sprint Qualifying": 120,
+    "Sprint Shootout": 120,
+}
+_SAFE_TIMEZONE_ABBREVIATIONS = {
+    "EDT": timezone(timedelta(hours=-4), name="EDT"),
+    "EST": timezone(timedelta(hours=-5), name="EST"),
+    "UTC": timezone.utc,
+    "GMT": timezone.utc,
+}
 
 
 class XtreamError(RuntimeError):
@@ -416,6 +467,133 @@ def _reference_in_zone(now: Optional[datetime], zone: ZoneInfo) -> datetime:
     return reference.astimezone(zone)
 
 
+def _infer_yearless_datetime(
+    month: int,
+    day: int,
+    hour: int,
+    minute: int,
+    second: int,
+    zone,
+    now: Optional[datetime],
+    event_window_days: int,
+) -> Optional[datetime]:
+    """Apply the shared previous/current/next-year window inference."""
+    reference = _reference_in_zone(now, zone)
+    candidates: list[datetime] = []
+    for year in (reference.year - 1, reference.year, reference.year + 1):
+        try:
+            candidates.append(datetime(year, month, day, hour, minute, second, tzinfo=zone))
+        except ValueError:
+            continue
+    if not candidates:
+        return None
+    closest = min(
+        candidates,
+        key=lambda candidate: (
+            abs((candidate - reference).total_seconds()),
+            0 if candidate >= reference else 1,
+        ),
+    )
+    if abs(closest - reference) > timedelta(days=max(1, event_window_days)):
+        return None
+    return closest.astimezone(timezone.utc)
+
+
+def is_placeholder_stream_name(name: Any) -> bool:
+    """Conservatively match exact pipe-delimited placeholder labels."""
+    for segment in str(name or "").split("|"):
+        normalized = re.sub(r"^[\s\-–—_]+|[\s\-–—_]+$", "", segment).upper()
+        normalized = " ".join(normalized.split())
+        if normalized in _PLACEHOLDER_LABELS:
+            return True
+    return False
+
+
+def normalize_motorsport_session(value: Any) -> Optional[str]:
+    normalized = " ".join(str(value or "").strip().upper().split())
+    return _MOTORSPORT_SESSIONS.get(normalized)
+
+
+def identify_motorsport_series(category_name: Any, stream_name: Any) -> Optional[dict[str, str]]:
+    """Identify only series supported by observed provider metadata."""
+    text = f"{category_name or ''} {stream_name or ''}"
+    if re.search(r"(?<![A-Z0-9])F\s*1(?![A-Z0-9])", text, re.IGNORECASE) or re.search(
+        r"\bFORMULA\s+(?:1|ONE)\b", text, re.IGNORECASE
+    ):
+        return {"series": "Formula 1", "series_code": "F1"}
+    return None
+
+
+def _display_words(value: str) -> str:
+    return " ".join(part.capitalize() for part in value.strip().split())
+
+
+def parse_motorsport_stream(
+    name: Any,
+    category_name: Any,
+    timezone_name: str = "UTC",
+    now: Optional[datetime] = None,
+    event_window_days: int = 7,
+) -> Optional[dict[str, Any]]:
+    """Parse the observed pipe-delimited F1 PPV event-name format.
+
+    The session/date helpers are series-neutral so future observed formats can
+    reuse them. For now, series identification intentionally supports only F1;
+    no FloRacing/NASCAR/etc. syntax is guessed without real samples.
+    """
+    text = str(name or "").strip()
+    if not text or is_placeholder_stream_name(text):
+        return None
+    series = identify_motorsport_series(category_name, text)
+    if series is None:
+        return None
+
+    segments = [segment.strip() for segment in text.split("|") if segment.strip()]
+    for index, segment in enumerate(segments):
+        date_match = _MOTORSPORT_DATE_RE.fullmatch(segment)
+        if not date_match or index == 0:
+            continue
+        event_segment = segments[index - 1]
+        if ":" not in event_segment:
+            continue
+        location_raw, session_raw = event_segment.rsplit(":", 1)
+        session = normalize_motorsport_session(session_raw)
+        location = _display_words(location_raw)
+        if not location or session is None:
+            continue
+
+        timezone_abbreviation = date_match.group("timezone").upper()
+        zone = _SAFE_TIMEZONE_ABBREVIATIONS.get(timezone_abbreviation)
+        timezone_source = "name_abbreviation"
+        if zone is None:
+            zone = _configured_zone(timezone_name)
+            timezone_source = "configured_timezone_fallback"
+        start = _infer_yearless_datetime(
+            _MOTORSPORT_MONTHS[date_match.group("month").upper()],
+            int(date_match.group("day")),
+            int(date_match.group("hour")),
+            int(date_match.group("minute")),
+            0,
+            zone,
+            now,
+            event_window_days,
+        )
+        if start is None:
+            return None
+        return {
+            **series,
+            "sport": "Motorsports",
+            "location": location,
+            "event_name": location,
+            "session_type": session,
+            "start": start,
+            "timezone_abbreviation": timezone_abbreviation,
+            "timezone_source": timezone_source,
+            "display_title": f"{series['series_code']} - {location} - {session}",
+        }
+    return None
+
+
 def parse_start_from_name(
     name: Any,
     timezone_name: str = "UTC",
@@ -450,24 +628,9 @@ def parse_start_from_name(
                 return None
             return parsed.astimezone(timezone.utc)
 
-        candidates: list[datetime] = []
-        for year in (reference.year - 1, reference.year, reference.year + 1):
-            try:
-                candidates.append(datetime(year, month, day, hour, minute, second, tzinfo=zone))
-            except ValueError:
-                continue
-        if not candidates:
-            return None
-        closest = min(
-            candidates,
-            key=lambda candidate: (
-                abs((candidate - reference).total_seconds()),
-                0 if candidate >= reference else 1,
-            ),
+        return _infer_yearless_datetime(
+            month, day, hour, minute, second, zone, reference, event_window_days
         )
-        if abs(closest - reference) > timedelta(days=max(1, event_window_days)):
-            return None
-        return closest.astimezone(timezone.utc)
     return None
 
 
@@ -487,12 +650,22 @@ def normalize_stream(stream: Mapping[str, Any], category_id: str,
     original_name = str(stream.get("name") or "").strip()
     if stream_id is None or not original_name:
         return None
+    if is_placeholder_stream_name(original_name):
+        return None
+
+    motorsport = parse_motorsport_stream(
+        original_name,
+        category_name,
+        config.timezone_name,
+        now=now,
+        event_window_days=config.event_window_days,
+    )
 
     start = _first_timestamp(
         stream,
         ("start_timestamp", "start_utc", "start_time", "event_start", "epg_start"),
         config.timezone_name,
-    ) or parse_start_from_name(
+    ) or (motorsport or {}).get("start") or parse_start_from_name(
         original_name,
         config.timezone_name,
         now=now,
@@ -508,7 +681,11 @@ def normalize_stream(stream: Mapping[str, Any], category_id: str,
     )
     duration_inferred = end is None or end <= start
     if duration_inferred:
-        end = start + timedelta(minutes=config.default_duration_minutes)
+        inferred_minutes = (
+            _MOTORSPORT_DURATION_MINUTES.get(motorsport["session_type"])
+            if motorsport else None
+        ) or config.default_duration_minutes
+        end = start + timedelta(minutes=inferred_minutes)
 
     seen = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
     event_id = stable_event_id(category_id, stream_id)
@@ -527,8 +704,36 @@ def normalize_stream(stream: Mapping[str, Any], category_id: str,
         "epg_channel_id": epg_channel_id,
         "container_extension": extension,
         "duration_inferred": duration_inferred,
-        "timing_source": "default_duration" if duration_inferred else "provider",
+        "timing_source": (
+            "motorsport_session_default" if duration_inferred and motorsport
+            else "default_duration" if duration_inferred else "provider"
+        ),
     }
+    if motorsport:
+        metadata.update({
+            "sport": "motorsports",
+            "series": motorsport["series"],
+            "series_code": motorsport["series_code"],
+            "event_name": motorsport["event_name"],
+            "location": motorsport["location"],
+            "session_type": motorsport["session_type"],
+            "timezone_abbreviation": motorsport["timezone_abbreviation"],
+            "timezone_source": motorsport["timezone_source"],
+        })
+    display_title = motorsport["display_title"] if motorsport else original_name
+    classifications = [
+        {"type": "provider_category", "value": category_name or str(category_id)}
+    ]
+    genres = ["Sports"]
+    if motorsport:
+        classifications.extend([
+            {"type": "sport", "value": motorsport["sport"]},
+            {"type": "league", "value": motorsport["series"]},
+            {"type": "motorsport_series", "value": motorsport["series"]},
+            {"type": "event_location", "value": motorsport["location"]},
+            {"type": "session_type", "value": motorsport["session_type"]},
+        ])
+        genres.append("Motorsports")
     start_ms = int(start.timestamp() * 1000)
     end_ms = int(end.timestamp() * 1000)
     runtime_secs = int((end - start).total_seconds())
@@ -537,17 +742,18 @@ def normalize_stream(stream: Mapping[str, Any], category_id: str,
             "id": event_id,
             "pvid": event_id,
             "slug": f"xtream-{stream_id}",
-            "title": original_name,
-            "title_brief": original_name,
-            "synopsis": f"Xtream live event from {category_name or 'configured category'}.",
-            "synopsis_brief": original_name,
+            "title": display_title,
+            "title_brief": display_title,
+            "synopsis": (
+                f"{motorsport['series']} {motorsport['location']} {motorsport['session_type']}."
+                if motorsport else f"Xtream live event from {category_name or 'configured category'}."
+            ),
+            "synopsis_brief": display_title,
             "channel_name": category_name or "Xtream",
             "channel_provider_id": str(category_id),
             "airing_type": "live",
-            "classification_json": json.dumps([
-                {"type": "provider_category", "value": category_name or str(category_id)}
-            ]),
-            "genres_json": json.dumps(["Sports"]),
+            "classification_json": json.dumps(classifications),
+            "genres_json": json.dumps(genres),
             "content_segments_json": "[]",
             "is_free": 0,
             "is_premium": 1,
@@ -576,7 +782,7 @@ def normalize_stream(stream: Mapping[str, Any], category_id: str,
             "stream_id": str(stream_id),
             "stream_extension": extension,
             "stream_metadata_json": json.dumps(metadata, separators=(",", ":")),
-            "title": original_name,
+            "title": display_title,
             "content_id": str(epg_channel_id or stream_id),
             "priority": 24,
             "created_utc": seen.isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -657,7 +863,7 @@ def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
     }
     observed_playable_ids: set[str] = set()
     normalized_playable_ids: set[str] = set()
-    imported = skipped = 0
+    imported = skipped = skipped_placeholder = 0
 
     try:
         conn.execute("BEGIN")
@@ -666,6 +872,9 @@ def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
                 stream_id = stream.get("stream_id")
                 if stream_id is not None:
                     observed_playable_ids.add(stable_playable_id(category_id, stream_id))
+                if is_placeholder_stream_name(stream.get("name")):
+                    skipped_placeholder += 1
+                    continue
                 normalized = normalize_stream(
                     stream, category_id, category_names.get(category_id, "Xtream"), config, now
                 )
@@ -712,6 +921,7 @@ def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
         "observed_upstream": len(observed_playable_ids),
         "normalized": len(normalized_playable_ids),
         "imported": imported,
+        "skipped_placeholder": skipped_placeholder,
         "skipped_unparseable": skipped,
         "stale_removed": len(stale_rows),
     }
@@ -764,9 +974,10 @@ def main(argv=None) -> int:
         )
     print(
         "Xtream ingest complete: "
-        f"dynamic_observed={result['observed_upstream']} "
-        f"dynamic_normalized={result['normalized']} "
+        f"observed_upstream={result['observed_upstream']} "
+        f"normalized={result['normalized']} "
         f"imported={result['imported']} "
+        f"skipped_placeholder={result['skipped_placeholder']} "
         f"skipped_unparseable={result['skipped_unparseable']} "
         f"stale_removed={result['stale_removed']} "
         f"persistent_configured={result['persistent_configured']} "

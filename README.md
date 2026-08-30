@@ -190,6 +190,29 @@ rejects that request or returns an unusable response, the adapter retries with
 `curl -4 -sS -L`. Neither transport's credential-bearing URL or error text is
 written to application logs.
 
+### Xtream motorsports events
+
+Configured Xtream categories can also supply scheduled Formula 1 sessions in a
+pipe-delimited form such as:
+
+```text
+NEXT | EXAMPLE GRAND PRIX: RACE | Sun 06 Sep 07:50 EDT (US) | UHD | F1 PPV 1
+```
+
+When the category or stream metadata identifies `F1`, `Formula 1`, or
+`Formula One`, FruitDeepLinks removes provider/quality noise and produces a
+title such as `F1 - Example Grand Prix - Race`. Race, Sprint, Qualifying,
+Practice/FP1–FP3, Sprint Qualifying, and Sprint Shootout sessions are
+recognized. `EDT` and `EST` are converted explicitly; unknown abbreviations
+fall back to `XTREAM_TIMEZONE`. Yearless dates use the same bounded
+previous/current/next-year inference as other Xtream events and must fall
+within `FRUIT_DAYS_AHEAD`.
+
+Placeholder slots such as `NO EVENT STREAMING`, `OFFLINE`, or `TBA` are
+counted separately and do not create events or playables. Add the relevant
+category to `XTREAM_CATEGORY_IDS`; FruitDeepLinks never scans the full provider
+catalogue by default.
+
 ### Persistent Xtream channels
 
 The **Persistent Channels** card on `/settings` is for stable team and network
