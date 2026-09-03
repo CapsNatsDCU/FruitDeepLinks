@@ -62,6 +62,11 @@ def events_page():
     return _render("events.html")
 
 
+@bp.route("/guide")
+def guide_page():
+    return _render("guide.html")
+
+
 @bp.route("/events/now")
 def events_now_redirect():
     return redirect("/events?live=1&has_playables=1")

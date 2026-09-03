@@ -379,6 +379,7 @@ tr:hover td { background: var(--bg-hover); }
   <a href="/filters" class="topnav-link {% if _current == '/filters' %}topnav-link-active{% endif %}">Filters</a>
   <a href="/settings" class="topnav-link {% if _current == '/settings' %}topnav-link-active{% endif %}">Settings</a>
   <a href="/events"  class="topnav-link {% if _current.startswith('/events') %}topnav-link-active{% endif %}">Event Inspector</a>
+  <a href="/guide"   class="topnav-link {% if _current == '/guide' %}topnav-link-active{% endif %}">Guide Preview</a>
   <a href="/adb"     class="topnav-link {% if _current == '/adb' %}topnav-link-active{% endif %}">ADB Config</a>
   <a href="/api"     class="topnav-link {% if _current == '/api' %}topnav-link-active{% endif %}">API Helper</a>
   {% block nav_extra %}{% endblock %}
