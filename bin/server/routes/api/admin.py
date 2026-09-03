@@ -27,7 +27,7 @@ from pathlib import Path
 from flask import Blueprint, Response, jsonify, make_response, request, stream_with_context
 
 from db.connection import db_exists, get_conn, get_conn_or_none, resolve_db_path
-from db.preferences import get_settings_schema, load_all_settings, save_settings
+from db.preferences import get_setting, get_settings_schema, load_all_settings, save_settings
 from db.stats import get_db_stats
 from server import scheduler as sched
 from server.config import cfg
@@ -71,6 +71,17 @@ def health():
 @bp.route("/api/status")
 def api_status():
     stats = get_db_stats()
+    operational = {"live_events": 0, "xtream_enabled": False, "xtream_categories": 0}
+    try:
+        with get_conn() as conn:
+            operational["live_events"] = conn.execute(
+                "SELECT COUNT(*) FROM events WHERE start_utc <= datetime('now') AND end_utc > datetime('now')"
+            ).fetchone()[0]
+            operational["xtream_enabled"] = bool(get_setting(conn, "xtream_enabled", False))
+            categories = str(get_setting(conn, "xtream_category_ids", "") or "")
+            operational["xtream_categories"] = len([value for value in categories.split(",") if value.strip()])
+    except Exception:
+        pass
 
     # Output files
     files = {}
@@ -105,6 +116,7 @@ def api_status():
     return jsonify({
         "status": "online",
         "database": stats,
+        "operational": operational,
         "files": files,
         "refresh": refresh_status,
         "auto_refresh": {

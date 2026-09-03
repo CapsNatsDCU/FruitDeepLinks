@@ -104,7 +104,7 @@ class XtreamConfig:
     default_duration_minutes: int = DEFAULT_DURATION_MINUTES
     event_window_days: int = 7
 
-    def validate(self) -> None:
+    def validate(self, *, require_categories: bool = True) -> None:
         if not self.enabled:
             raise XtreamError("Xtream ingestion is disabled")
         if not self.server_url:
@@ -113,7 +113,7 @@ class XtreamConfig:
             raise XtreamError("XTREAM_USERNAME is required")
         if not self.password:
             raise XtreamError("XTREAM_PASSWORD is required")
-        if not self.category_ids:
+        if require_categories and not self.category_ids:
             raise XtreamError(
                 "At least one Xtream category ID is required; refusing to import the full catalogue"
             )
@@ -236,7 +236,10 @@ class XtreamClient:
     def __init__(self, config: XtreamConfig, session=None,
                  timeout: int = DEFAULT_TIMEOUT_SECONDS,
                  subprocess_runner=None, curl_binary: str = "curl"):
-        config.validate()
+        # Category discovery is intentionally allowed before any categories have
+        # been selected. Ingestion and tune-time URL construction still call the
+        # normal validation path, which refuses an accidental full catalogue import.
+        config.validate(require_categories=False)
         self.config = config
         self.session = session or requests.Session()
         self.timeout = timeout
@@ -436,6 +439,22 @@ _NAME_TIME_PATTERNS = (
             re.IGNORECASE,
         ),
     ),
+    (
+        "textual_month_without_year",
+        re.compile(
+            rf"(?<![A-Z])(?:MON|TUE|WED|THU|FRI|SAT|SUN)?\.?\s*"
+            rf"(?P<month_name>JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|"
+            rf"JUN(?:E)?|JUL(?:Y)?|AUG(?:UST)?|SEP(?:TEMBER)?|OCT(?:OBER)?|"
+            rf"NOV(?:EMBER)?|DEC(?:EMBER)?)\s+(?P<day>\d{{1,2}})"
+            rf"{_NAME_SEPARATOR}{_NAME_TIME}",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+_STOP_TIMESTAMP_RE = re.compile(
+    r"\bstop\s*:\s*(?P<value>\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?)",
+    re.IGNORECASE,
 )
 
 
@@ -492,6 +511,20 @@ def _infer_yearless_datetime(
     if abs(closest - reference) > timedelta(days=max(1, event_window_days)):
         return None
     return closest.astimezone(timezone.utc)
+
+
+def _is_within_event_window(
+    value: datetime, now: Optional[datetime], event_window_days: int
+) -> bool:
+    """Use one bounded policy for provider timestamps and name-derived dates."""
+    reference = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return abs(value - reference) <= timedelta(days=max(1, event_window_days))
+
+
+def parse_stop_from_name(name: Any, timezone_name: str = "UTC") -> Optional[datetime]:
+    """Read an explicit provider ``stop:`` timestamp embedded in a stream name."""
+    match = _STOP_TIMESTAMP_RE.search(str(name or ""))
+    return parse_timestamp(match.group("value"), timezone_name) if match else None
 
 
 def is_placeholder_stream_name(name: Any) -> bool:
@@ -610,18 +643,21 @@ def parse_start_from_name(
         match = pattern.search(text)
         if not match:
             continue
-        month = int(match.group("month"))
+        month = int(match.group("month")) if match.groupdict().get("month") else _MOTORSPORT_MONTHS[
+            match.group("month_name")[:3].upper()
+        ]
         day = int(match.group("day"))
         hour, minute, second = _time_from_name_match(match)
 
-        if date_kind != "us_without_year":
+        if date_kind not in {"us_without_year", "textual_month_without_year"}:
             try:
                 parsed = datetime(
                     int(match.group("year")), month, day, hour, minute, second, tzinfo=zone
                 )
             except ValueError:
                 return None
-            return parsed.astimezone(timezone.utc)
+            parsed_utc = parsed.astimezone(timezone.utc)
+            return parsed_utc if _is_within_event_window(parsed_utc, now, event_window_days) else None
 
         return _infer_yearless_datetime(
             month, day, hour, minute, second, zone, reference, event_window_days
@@ -666,14 +702,14 @@ def normalize_stream(stream: Mapping[str, Any], category_id: str,
         now=now,
         event_window_days=config.event_window_days,
     )
-    if start is None:
+    if start is None or not _is_within_event_window(start, now, config.event_window_days):
         return None
 
     end = _first_timestamp(
         stream,
         ("end_timestamp", "end_utc", "end_time", "event_end", "epg_end"),
         config.timezone_name,
-    )
+    ) or parse_stop_from_name(original_name, config.timezone_name)
     duration_inferred = end is None or end <= start
     if duration_inferred:
         inferred_minutes = (

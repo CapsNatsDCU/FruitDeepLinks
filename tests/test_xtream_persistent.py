@@ -250,7 +250,23 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
 
         categories = self.client.get("/api/xtream/categories")
         self.assertEqual(200, categories.status_code)
-        self.assertEqual(["410"], [row["category_id"] for row in categories.get_json()["categories"]])
+        self.assertEqual(["410", "999"], [row["category_id"] for row in categories.get_json()["categories"]])
+        self.assertTrue(next(row for row in categories.get_json()["categories"] if row["category_id"] == "410")["selected"])
+        self.assertNotIn("demo user", categories.get_data(as_text=True))
+        self.assertNotIn("secret/pass", categories.get_data(as_text=True))
+
+        saved = self.client.post("/api/xtream/categories", json={"category_ids": []})
+        self.assertEqual(200, saved.status_code)
+        self.assertEqual([], saved.get_json()["selected_category_ids"])
+        conn = sqlite3.connect(self.db_path)
+        stored_selection = conn.execute(
+            "SELECT value FROM user_preferences WHERE key='setting:xtream_category_ids'"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual('""', stored_selection)
+
+        restored = self.client.post("/api/xtream/categories", json={"category_ids": ["410"]})
+        self.assertEqual(200, restored.status_code)
 
         browse = self.client.get(
             "/api/xtream/categories/410/streams",

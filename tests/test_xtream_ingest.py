@@ -19,6 +19,7 @@ from xtream_ingest import (  # noqa: E402
     load_config,
     normalize_stream,
     parse_category_ids,
+    parse_stop_from_name,
     parse_start_from_name,
     redact_credentials,
     stable_event_id,
@@ -209,6 +210,20 @@ class XtreamParsingTest(unittest.TestCase):
         self.assertEqual(metadata["epg_channel_id"], "nhl.555")
         self.assertTrue(metadata["duration_inferred"])
 
+    def test_embedded_stop_time_is_provider_timing(self):
+        stream = {
+            "stream_id": 556,
+            "name": "MLB 02 | Braves x Nationals start:2026-09-02 18:05:00 stop:2026-09-03 01:18:20",
+        }
+        now = datetime(2026, 9, 2, 12, tzinfo=timezone.utc)
+        normalized = normalize_stream(stream, "10", "MLB PPV", config(), now=now)
+        self.assertEqual("2026-09-02T22:05:00Z", normalized["event"]["start_utc"])
+        self.assertEqual("2026-09-03T05:18:20Z", normalized["event"]["end_utc"])
+        metadata = json.loads(normalized["playable"]["stream_metadata_json"])
+        self.assertFalse(metadata["duration_inferred"])
+        self.assertEqual("provider", metadata["timing_source"])
+        self.assertEqual(datetime(2026, 9, 3, 5, 18, 20, tzinfo=timezone.utc), parse_stop_from_name(stream["name"], "America/New_York"))
+
     def test_real_provider_name_without_year_or_colon(self):
         local_zone = ZoneInfo("America/New_York")
         now = datetime(2026, 8, 28, 17, 30, tzinfo=local_zone)
@@ -261,6 +276,24 @@ class XtreamParsingTest(unittest.TestCase):
             event_window_days=7,
         ))
 
+    def test_explicit_dates_outside_import_window_are_rejected(self):
+        now = datetime(2026, 9, 2, 12, tzinfo=timezone.utc)
+        self.assertIsNone(parse_start_from_name(
+            "NBA | 2025-01-18 00:20 Knicks x Timberwolves", "America/New_York", now=now, event_window_days=7
+        ))
+        self.assertIsNone(normalize_stream(
+            {"stream_id": 2098, "name": "WNBA | 2098-12-31 18:00 Placeholder"},
+            "10", "WNBA PPV", config(), now=now,
+        ))
+
+    def test_floracing_textual_date_uses_configured_timezone_and_year_inference(self):
+        now = datetime(2026, 9, 2, 12, tzinfo=timezone.utc)
+        parsed = parse_start_from_name(
+            "Short Track Super Series at Afton @ Sep 3 6:00 PM :Flo Racing 03",
+            "America/New_York", now=now, event_window_days=7,
+        )
+        self.assertEqual(datetime(2026, 9, 3, 22, 0, tzinfo=timezone.utc), parsed)
+
     def test_time_only_name_is_not_assigned_a_date(self):
         self.assertIsNone(parse_start_from_name("NHL | Capitals @ Lightning | 7:00 PM"))
         self.assertIsNone(normalize_stream(
@@ -306,11 +339,12 @@ class XtreamStaleHandlingTest(unittest.TestCase):
         self.categories = [{"category_id": "10", "category_name": "Sports"}]
 
     def stream(self, stream_id):
+        start = int(datetime(2026, 8, 30, 18, tzinfo=timezone.utc).timestamp())
         return {
             "stream_id": stream_id,
             "name": f"Event {stream_id}",
-            "start_timestamp": 1_799_000_000,
-            "end_timestamp": 1_799_007_200,
+            "start_timestamp": start,
+            "end_timestamp": start + 7200,
             "container_extension": "ts",
         }
 

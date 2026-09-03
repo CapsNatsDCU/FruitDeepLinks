@@ -33,17 +33,17 @@
 {% block content %}
 <div class="grid">
   <div class="card">
-    <h2>Database Stats</h2>
+    <h2>Lineup Status</h2>
     <div id="db-stats"><span class="status-muted">Loading...</span></div>
   </div>
 
   <div class="card">
-    <h2>Output Files</h2>
+    <h2>Outputs</h2>
     <div id="file-list"><span class="status-muted">Loading...</span></div>
   </div>
 
   <div class="card">
-    <h2>Configuration</h2>
+    <h2>Providers</h2>
     <div id="env-vars"><span class="status-muted">Loading...</span></div>
     <div style="margin-top:12px">
       <a href="/settings" class="btn btn-secondary" style="font-size:12px">Edit Settings</a>
@@ -59,11 +59,14 @@
       <button class="btn btn-secondary" onclick="triggerRefresh(true)" id="btn-refresh-skip">Skip Scrape</button>
     </div>
 
-    <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+    <details class="advanced-section" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+      <summary>Advanced operations</summary>
+      <div style="margin-top:12px">
       <h3 style="font-size:14px;margin-bottom:8px;">Database Management</h3>
       <button class="btn btn-danger" onclick="openWipeModal()" id="btn-wipe-db">Wipe Event Data</button>
       <p style="font-size:12px;color:var(--text-muted);margin-top:6px;">Clears all events, playables, and lanes. Preserves filters and settings.</p>
-    </div>
+      </div>
+    </details>
 
     <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
       <h3 style="font-size:14px;margin-bottom:10px;">Auto Refresh</h3>
@@ -83,10 +86,12 @@
   </div>
 </div>
 
-<div class="card">
-  <h2>Live Logs <span id="log-status" style="font-size:12px;color:var(--text-muted);margin-left:8px"></span></h2>
+<details class="card advanced-section">
+  <summary>Advanced: live refresh logs <span id="log-status" style="font-size:12px;color:var(--text-muted);margin-left:8px"></span></summary>
+  <div style="margin-top:14px">
   <div class="log-container" id="log-container"></div>
-</div>
+  </div>
+</details>
 
 <!-- Wipe event data confirmation modal -->
 <div id="wipe-modal" class="modal-backdrop" role="dialog" aria-modal="true">
@@ -238,20 +243,23 @@ async function loadStatus() {
       const mod = db.db_modified ? new Date(db.db_modified).toLocaleString() : 'n/a';
       const sz = db.db_size ? (db.db_size/1024/1024).toFixed(2) + ' MB' : 'n/a';
       dbEl.innerHTML = [
-        ['Total Events', db.total_events||0], ['Future Events', db.future_events||0],
-        ['Lanes', db.lane_count||0], ['Scheduled', db.scheduled_events||0],
-        ['DB Updated', mod], ['DB Size', sz],
+        ['Upcoming events', db.future_events||0], ['Live now', data.operational?.live_events||0],
+        ['Lanes in use', `${db.scheduled_events||0} / ${db.lane_count||0}`],
+        ['Last data update', mod],
       ].map(([l,v]) => `<div class="stat"><span class="stat-label">${l}</span><span class="stat-value">${v}</span></div>`).join('');
     }
 
     // Files
     const fileEl = document.getElementById('file-list');
     const files = Object.entries(data.files || {});
-    fileEl.innerHTML = files.length
-      ? '<ul class="file-list">' + files.map(([n,i]) =>
+    const endpointLinks = [['M3U lanes','/m3u/lanes'], ['XMLTV lanes','/xmltv/lanes'], ['M3U direct','/m3u/direct'], ['XMLTV direct','/xmltv/direct']];
+    fileEl.innerHTML = '<ul class="file-list">' + endpointLinks.map(([name,url]) =>
+      `<li class="file-item"><a href="${url}">${name}</a><button class="btn btn-secondary" style="padding:4px 8px;font-size:11px" onclick="navigator.clipboard?.writeText(location.origin+'${url}');showToast('Copied output URL','success')">Copy URL</button></li>`
+    ).join('') + '</ul>' + (files.length
+      ? '<ul class="file-list" style="margin-top:12px">' + files.map(([n,i]) =>
           `<li class="file-item"><a href="/out/${n}" class="file-name">${n}</a><span class="file-size">${Math.max(0.01,i.size/1024/1024).toFixed(2)} MB</span></li>`
         ).join('') + '</ul>'
-      : '<span style="color:var(--text-muted)">No files generated yet</span>';
+      : '<div style="margin-top:10px;color:var(--text-muted);font-size:12px">No generated files yet.</div>');
 
     // Refresh
     const refresh = data.refresh;
@@ -279,18 +287,14 @@ async function loadStatus() {
 
     if (data.auto_refresh) applyAutoToDom(data.auto_refresh);
 
-    // Config (env vars)
+    // Provider summary deliberately avoids raw environment/config values.
     const envEl = document.getElementById('env-vars');
-    const ev = data.env_vars || {};
-    const keys = Object.keys(ev).sort();
-    envEl.innerHTML = keys.length
-      ? keys.map(k => {
-          let v = ev[k];
-          if (k.toLowerCase().match(/key|secret|password/)) v = '••••••••';
-          if (v && v.length > 55) v = v.slice(0,52) + '…';
-          return `<div class="stat"><span class="stat-label" style="font-size:11px">${k}</span><span class="stat-value" style="font-size:11px;font-family:var(--mono)">${v||'(empty)'}</span></div>`;
-        }).join('')
-      : '<span style="color:var(--text-muted)">No env vars set</span>';
+    const op = data.operational || {};
+    envEl.innerHTML = [
+      ['Xtream', op.xtream_enabled ? 'Enabled' : 'Disabled'],
+      ['Selected Xtream categories', op.xtream_categories || 0],
+      ['Other event sources', (data.database.top_providers || []).map(row => row.name).filter(name => !/xtream/i.test(name)).join(', ') || 'None detected'],
+    ].map(([l,v]) => `<div class="stat"><span class="stat-label">${_escapeHtml(l)}</span><span class="stat-value">${_escapeHtml(String(v))}</span></div>`).join('');
 
   } catch (err) {
     console.error('loadStatus:', err);

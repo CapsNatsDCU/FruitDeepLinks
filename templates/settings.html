@@ -62,6 +62,17 @@
 .persistent-form-grid input, .persistent-form-grid textarea, .persistent-form-grid select { margin-top:4px; }
 .persistent-form-grid textarea { min-height:70px; resize:vertical; }
 .persistent-links { display:flex; gap:14px; flex-wrap:wrap; margin-top:10px; font-size:12px; }
+.xtream-categories { margin-bottom:16px; }
+.xtream-category-toolbar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:14px 0 10px; }
+.xtream-category-toolbar input { flex:1; min-width:220px; }
+.xtream-category-count { color:var(--text-muted); font-size:12px; }
+.xtream-category-list { max-height:420px; overflow:auto; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg-inset); }
+.xtream-category-row { display:flex; gap:10px; align-items:center; padding:9px 12px; border-bottom:1px solid var(--border-dim); cursor:pointer; }
+.xtream-category-row:last-child { border-bottom:0; }
+.xtream-category-row:hover { background:var(--bg-hover); }
+.xtream-category-row input { width:17px; height:17px; accent-color:var(--accent); }
+.xtream-category-name { flex:1; min-width:0; overflow-wrap:anywhere; font-size:13px; }
+.xtream-category-id { color:var(--text-muted); font-family:var(--mono); font-size:11px; }
 details.advanced-section { margin-top: 8px; }
 details.advanced-section summary { font-size: 14px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; padding-bottom: 6px; border-bottom: 1px solid var(--border); cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; user-select: none; }
 details.advanced-section summary::-webkit-details-marker { display: none; }
@@ -104,6 +115,19 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
   <div id="favorite-error" class="favorite-alert" role="alert"></div>
   <div id="favorite-add-panel" hidden></div>
   <div id="favorite-list" class="favorite-list" aria-live="polite"><span class="status-muted">Loading favorite teams…</span></div>
+</section>
+
+<section class="card xtream-categories" aria-labelledby="xtream-categories-title">
+  <h2 id="xtream-categories-title">Xtream Event Categories</h2>
+  <p class="persistent-intro">Choose only the provider categories FruitDeepLinks should ingest. The provider connection and credentials remain server-side; saving does not start a refresh.</p>
+  <div class="xtream-category-toolbar">
+    <input id="xtream-category-search" type="search" placeholder="Filter categories by name or ID" oninput="renderXtreamCategories()" autocomplete="off">
+    <span id="xtream-category-count" class="xtream-category-count">Loading categories…</span>
+    <button class="btn btn-secondary" type="button" onclick="loadXtreamCategories()">Reload</button>
+    <button class="btn" type="button" id="xtream-category-save" onclick="saveXtreamCategories()" disabled>Save Categories</button>
+  </div>
+  <div id="xtream-category-error" class="favorite-alert" role="alert"></div>
+  <div id="xtream-category-list" class="xtream-category-list" aria-live="polite"><span class="status-muted">Loading categories…</span></div>
 </section>
 
 <section class="card" style="margin-bottom:16px" aria-labelledby="persistent-title">
@@ -158,7 +182,7 @@ const GROUPS = {
   'Pipeline': ['days_ahead', 'padding_minutes', 'max_event_minutes'],
   'Auto Refresh': ['auto_refresh_enabled', 'auto_refresh_time'],
   'Scrapers': ['kayo_enabled', 'fanatiz_enabled', 'bein_enabled', 'nesn_enabled', 'victory_enabled', 'gotham_enabled', 'espn_enabled'],
-  'Xtream IPTV': ['xtream_enabled', 'xtream_server_url', 'xtream_category_ids', 'xtream_timezone', 'xtream_default_duration_minutes'],
+  'Xtream IPTV': ['xtream_enabled', 'xtream_server_url', 'xtream_timezone', 'xtream_default_duration_minutes'],
 };
 
 const ADVANCED = {
@@ -172,6 +196,68 @@ let _favoriteState = {enabled:false, teams:[], malformed:false, errors:[]};
 let _persistentChannels = [];
 let _persistentResults = [];
 let _persistentPage = 1;
+let _xtreamCategories = [];
+let _xtreamSelected = new Set();
+
+function xtreamCategoryError(message = '') {
+  const box = document.getElementById('xtream-category-error');
+  box.textContent = message;
+  box.classList.toggle('visible', !!message);
+}
+
+function renderXtreamCategories() {
+  const list = document.getElementById('xtream-category-list');
+  const query = document.getElementById('xtream-category-search').value.trim().toLowerCase();
+  const shown = _xtreamCategories.filter(category => !query || `${category.category_name} ${category.category_id}`.toLowerCase().includes(query));
+  document.getElementById('xtream-category-count').textContent = `${_xtreamSelected.size} selected · ${shown.length} shown`;
+  if (!shown.length) {
+    list.innerHTML = '<div class="favorite-empty">No categories match this filter.</div>';
+    return;
+  }
+  list.innerHTML = shown.map(category => `<label class="xtream-category-row">
+    <input type="checkbox" value="${escHtml(category.category_id)}" ${_xtreamSelected.has(category.category_id) ? 'checked' : ''} onchange="toggleXtreamCategory(this.value, this.checked)">
+    <span class="xtream-category-name">${escHtml(category.category_name)}</span>
+    <span class="xtream-category-id">${escHtml(category.category_id)}</span>
+  </label>`).join('');
+}
+
+function toggleXtreamCategory(categoryId, selected) {
+  if (selected) _xtreamSelected.add(categoryId); else _xtreamSelected.delete(categoryId);
+  renderXtreamCategories();
+}
+
+async function loadXtreamCategories() {
+  const list = document.getElementById('xtream-category-list');
+  const save = document.getElementById('xtream-category-save');
+  list.innerHTML = '<span class="status-muted">Loading categories from Xtream…</span>';
+  save.disabled = true;
+  try {
+    const data = await persistentRequest('/api/xtream/categories');
+    _xtreamCategories = Array.isArray(data.categories) ? data.categories : [];
+    _xtreamSelected = new Set(Array.isArray(data.selected_category_ids) ? data.selected_category_ids : _xtreamCategories.filter(c => c.selected).map(c => c.category_id));
+    xtreamCategoryError('');
+    save.disabled = false;
+    renderXtreamCategories();
+  } catch (err) {
+    xtreamCategoryError(`Could not retrieve Xtream categories: ${err.message}`);
+    list.innerHTML = '<div class="favorite-empty">Categories are unavailable. Check the Xtream connection and enable the provider before retrying.</div>';
+  }
+}
+
+async function saveXtreamCategories() {
+  const button = document.getElementById('xtream-category-save');
+  button.disabled = true;
+  try {
+    const data = await persistentRequest('/api/xtream/categories', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({category_ids:[..._xtreamSelected]})});
+    _xtreamSelected = new Set(data.selected_category_ids || []);
+    renderXtreamCategories();
+    xtreamCategoryError('');
+    showToast(_xtreamSelected.size ? `Saved ${_xtreamSelected.size} Xtream categories. Run a refresh when ready.` : 'Saved an empty Xtream category selection. No Xtream events will be imported.', 'success', 5000);
+  } catch (err) {
+    xtreamCategoryError(`Category selection was not saved: ${err.message}`);
+    showToast('Xtream categories were not saved', 'error');
+  } finally { button.disabled = false; }
+}
 
 function persistentError(message = '') {
   const box = document.getElementById('persistent-error');
@@ -777,5 +863,6 @@ document.addEventListener('change', e => {
 loadSettings();
 loadFavoriteTeams();
 loadPersistentChannels();
+loadXtreamCategories();
 </script>
 {% endblock %}

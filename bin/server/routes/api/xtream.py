@@ -9,7 +9,7 @@ import sqlite3
 from flask import Blueprint, Response, jsonify, redirect, request
 
 from db.connection import get_conn, resolve_db_path
-from db.preferences import get_setting
+from db.preferences import get_setting, save_settings
 from server.logging_setup import log
 from server.services.xtream_persistent import (
     ChannelNumberConflict,
@@ -56,7 +56,7 @@ def _safe_error(exc: Exception, status: int = 400):
 
 def _configured_client(conn):
     config = load_config(conn, os.environ)
-    config.validate()
+    config.validate(require_categories=False)
     return config, XtreamClient(config)
 
 
@@ -67,22 +67,41 @@ def api_xtream_categories():
         with get_conn() as conn:
             config, client = _configured_client(conn)
             upstream = client.get_live_categories()
-        by_id = {
-            str(row.get("category_id")): row
-            for row in upstream if row.get("category_id") is not None
-        }
-        categories = []
-        for category_id in config.category_ids:
-            row = by_id.get(str(category_id))
-            categories.append({
-                "category_id": str(category_id),
-                "category_name": (
-                    str(row.get("category_name") or f"Category {category_id}")
-                    if row else f"Category {category_id}"
-                ),
-                "available": row is not None,
-            })
-        return jsonify({"status": "success", "categories": categories})
+        selected = set(config.category_ids)
+        categories = sorted(({
+            "category_id": str(row["category_id"]),
+            "category_name": str(row.get("category_name") or f"Category {row['category_id']}"),
+            "selected": str(row["category_id"]) in selected,
+        } for row in upstream if row.get("category_id") is not None),
+            key=lambda row: (row["category_name"].casefold(), row["category_id"]))
+        return jsonify({
+            "status": "success",
+            "categories": categories,
+            "selected_category_ids": list(config.category_ids),
+        })
+    except Exception as exc:
+        return _safe_error(exc, 502)
+
+
+@bp.route("/api/xtream/categories", methods=["POST"])
+def api_save_xtream_categories():
+    """Persist an explicit category selection without ever handling secrets."""
+    _ensure_database()
+    payload = request.get_json(silent=True) or {}
+    raw_ids = payload.get("category_ids") if isinstance(payload, dict) else None
+    if not isinstance(raw_ids, list) or any(not str(value).strip() for value in raw_ids):
+        return jsonify({"status": "error", "message": "Category selection must be a list of category IDs"}), 400
+    selected = list(dict.fromkeys(str(value).strip() for value in raw_ids))
+    try:
+        with get_conn() as conn:
+            config, client = _configured_client(conn)
+            available = {str(row.get("category_id")) for row in client.get_live_categories()}
+            missing = [category_id for category_id in selected if category_id not in available]
+            if missing:
+                raise PersistentChannelError("One or more selected categories are no longer available")
+            if not save_settings(conn, {"xtream_category_ids": ",".join(selected)}):
+                raise PersistentChannelError("Could not save Xtream category selection")
+        return jsonify({"status": "success", "selected_category_ids": selected})
     except Exception as exc:
         return _safe_error(exc, 502)
 
