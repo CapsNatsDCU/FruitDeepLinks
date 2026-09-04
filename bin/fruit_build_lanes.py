@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 FILTERING_AVAILABLE = False
 try:
     from filter_integration import load_user_preferences, get_best_playable_for_event, should_include_event
+    from team_preferences import match_favorite_teams
 
     FILTERING_AVAILABLE = True
 except ImportError:
@@ -344,6 +345,15 @@ def build_lanes_with_placeholders(
     if not events:
         print("No future events after applying provider filters")
         return
+
+    # Limited lanes are allocated to validated favorite events first.  This is
+    # a ranking modifier, not a filter: every event remains eligible and a
+    # false/ambiguous alias can never consume a lane.
+    if favorite_teams:
+        def lane_priority(event: Event) -> tuple[int, datetime]:
+            identity = {"title": event.title, "channel_name": event.channel_name}
+            return (0 if match_favorite_teams(identity, favorite_teams) else 1, event.start)
+        events.sort(key=lane_priority)
 
     now = datetime.now(timezone.utc)
     earliest_start = min(e.start for e in events)

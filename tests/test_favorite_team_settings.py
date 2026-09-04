@@ -173,11 +173,11 @@ class FavoriteTeamSettingsServiceTest(unittest.TestCase):
         set_global_enabled(self.conn, True)
         preview = preview_team_match(self.conn, {
             "team_index": 0,
-            "event_title": "Capitals at Rangers",
+            "event_title": "Washington Capitals at Rangers",
             "feed_name": "US: WASHINGTON CAPITALS on MONUMENTAL",
         })
         preference = preview["team_preference"]
-        self.assertEqual("Capitals", preference["event_matches"][0]["matched_term"])
+        self.assertEqual("Washington Capitals", preference["event_matches"][0]["matched_term"])
         self.assertEqual(170, preference["score"])
         self.assertEqual([100, 70], [reason["score"] for reason in preference["reasons"]])
 
@@ -260,8 +260,8 @@ class FavoriteTeamSettingsApiTest(unittest.TestCase):
 
         preview = self.client.post("/api/settings/favorite-teams/preview", json={
             "team_index": 0,
-            "event_title": "Capitals at Rangers",
-            "feed_name": "Monumental Capitals Broadcast",
+            "event_title": "Washington Capitals Hockey at Rangers",
+            "feed_name": "Monumental Washington Capitals Hockey Broadcast",
         })
         self.assertGreater(preview.get_json()["team_preference"]["score"], 0)
 
@@ -319,7 +319,7 @@ class FavoriteTeamSettingsApiTest(unittest.TestCase):
         conn.execute(
             "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, '[]', '[]', '[]', '{}')",
             (
-                "capitals-event", "Capitals at Penguins",
+                "capitals-event", "Washington Capitals at Penguins",
                 "2026-08-29T18:00:00Z", "2026-08-29T21:00:00Z",
                 "NHL", "2026-08-29T17:00:00Z",
             ),

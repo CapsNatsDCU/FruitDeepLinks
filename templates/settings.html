@@ -595,8 +595,10 @@ function teamFormHtml(team, key, isNew = false) {
     </label>
     <label for="${prefix}-aliases">Aliases
       <textarea id="${prefix}-aliases" placeholder="Comets&#10;Example City Comets&#10;ECC">${escHtml(aliases)}</textarea>
-      <span class="field-help">One value per line. Aliases identify the team in event titles and metadata.</span>
+      <span class="field-help">One per line. Multi-word aliases are matched as full phrases; ambiguous one-word aliases are retained but never grant favorite priority.</span>
     </label>
+    <label for="${prefix}-sport">Sport (optional)<input id="${prefix}-sport" type="text" value="${escHtml(team?.sport || '')}" placeholder="Hockey"></label>
+    <label for="${prefix}-league">League (optional)<input id="${prefix}-league" type="text" value="${escHtml(team?.league || '')}" placeholder="NHL"></label>
     <label for="${prefix}-preferred">Preferred broadcaster/feed terms
       <textarea id="${prefix}-preferred" placeholder="Local Sports Network&#10;Comets Broadcast">${escHtml(preferred)}</textarea>
       <span class="field-help">One per line. Use terms that appear in stream, channel, broadcaster, or feed names.</span>
@@ -686,6 +688,8 @@ function readTeamForm(key, enabled = true) {
     aliases: linesToValues(document.getElementById(`team-${key}-aliases`).value),
     preferred_terms: linesToValues(document.getElementById(`team-${key}-preferred`).value),
     avoid_terms: linesToValues(document.getElementById(`team-${key}-avoid`).value),
+    sport: document.getElementById(`team-${key}-sport`).value.trim() || null,
+    league: document.getElementById(`team-${key}-league`).value.trim() || null,
     enabled,
   };
 }
@@ -796,10 +800,12 @@ async function previewFavoriteTeam(index) {
     const score = Number(pref.score || 0);
     const eventMatches = (pref.event_matches || []).map(match => `<div>Matched favorite team: <strong>${escHtml(match.team)}</strong><br>Matched event term: <span class="mono">${escHtml(match.matched_term)}</span></div>`).join('');
     const reasons = (pref.reasons || []).map(reason => `<li><span class="mono">${Number(reason.score||0) >= 0 ? '+' : ''}${Number(reason.score||0)}</span> ${escHtml(reason.reason)}</li>`).join('');
+    const rejected = (pref.rejected_matches || []).map(match => `<li><strong>${escHtml(match.team)}</strong>${match.matched_term ? ` via <span class="mono">${escHtml(match.matched_term)}</span>` : ''}: REJECTED — ${escHtml(match.reason)}</li>`).join('');
     result.innerHTML = `<div class="preview-result">
       ${eventMatches || '<div>No enabled favorite team matched the event title.</div>'}
       <div style="margin-top:8px">Team preference score:</div><div class="preview-score">${score >= 0 ? '+' : ''}${score}</div>
       ${reasons ? `<ul>${reasons}</ul>` : '<div>No feed-specific preference reason matched.</div>'}
+      ${rejected ? `<div style="margin-top:8px"><strong>Rejected potential matches</strong><ul>${rejected}</ul></div>` : ''}
       ${data.global_enabled ? '' : '<div class="field-help">The global preference is currently off, so this score is only a preview.</div>'}
     </div>`;
   } catch (err) { result.innerHTML = `<div class="favorite-alert visible" role="alert">${escHtml(err.message)}</div>`; }

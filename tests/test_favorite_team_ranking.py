@@ -30,7 +30,7 @@ class TeamPreferenceUnitTests(unittest.TestCase):
             [
                 team["team"]
                 for team in find_favorite_teams(
-                    {"title": "Capitals vs Rangers"}, [CAPITALS]
+                    {"title": "Washington Capitals vs Rangers"}, [CAPITALS]
                 )
             ],
         )
@@ -42,10 +42,10 @@ class TeamPreferenceUnitTests(unittest.TestCase):
         )
 
     def test_explicit_avoid_term_is_a_penalty_not_a_filter(self):
-        favorite = dict(CAPITALS, avoid_terms=["BAD CALL"])
+        favorite = dict(CAPITALS, preferred_terms=[], avoid_terms=["BAD CALL"])
         scored = score_team_affinity(
-            {"title": "Capitals vs Rangers"},
-            {"title": "Capitals Broadcast - BAD CALL"},
+            {"title": "Washington Capitals vs Rangers"},
+            {"title": "Washington Capitals Broadcast - BAD CALL"},
             [favorite],
         )
         self.assertEqual(50, scored["score"])
@@ -157,7 +157,7 @@ class FavoriteTeamSelectionTests(unittest.TestCase):
         )
 
     def test_a_preferred_team_stream_wins(self):
-        self.event("Capitals vs Rangers")
+        self.event("Washington Capitals vs Rangers")
         self.playable("a-generic", "US: NHL PPV Capitals vs Rangers")
         self.playable("b-rangers", "US: NEW YORK RANGERS")
         self.playable("z-capitals", "US: WASHINGTON CAPITALS")
@@ -165,7 +165,7 @@ class FavoriteTeamSelectionTests(unittest.TestCase):
         self.assertEqual("z-capitals", self.best()["playable_id"])
 
     def test_b_preferred_broadcaster_wins_across_service_priority(self):
-        self.event("Capitals vs Penguins")
+        self.event("Washington Capitals vs Penguins")
         self.playable("a-espn", "ESPN+", provider="sportscenter", service="espn_plus")
         self.playable("b-generic", "generic NHL PPV")
         self.playable("z-monumental", "Monumental Sports Network")
@@ -175,46 +175,46 @@ class FavoriteTeamSelectionTests(unittest.TestCase):
         self.assertEqual(70, winner["team_preference"]["score"])
 
     def test_c_missing_preferred_stream_uses_existing_best_fallback(self):
-        self.event("Capitals vs Penguins")
+        self.event("Washington Capitals vs Penguins")
         self.playable("a-generic", "generic NHL PPV")
         self.playable("z-espn", "ESPN+", provider="sportscenter", service="espn_plus")
         self.preferences()
         self.assertEqual("z-espn", self.best()["playable_id"])
 
     def test_d_opponent_feed_loses(self):
-        self.event("Capitals vs Rangers")
+        self.event("Washington Capitals vs Rangers")
         self.playable("a-rangers", "Rangers Broadcast")
-        self.playable("z-capitals", "Capitals Broadcast")
+        self.playable("z-capitals", "Washington Capitals Broadcast")
         self.preferences()
         self.assertEqual("z-capitals", self.best()["playable_id"])
 
     def test_e_named_favorite_feed_wins_when_team_is_away(self):
-        self.event("Rangers vs Capitals")
+        self.event("Rangers vs Washington Capitals")
         self.playable("a-rangers", "Rangers Broadcast")
-        self.playable("z-capitals", "Capitals Broadcast")
+        self.playable("z-capitals", "Washington Capitals Broadcast")
         self.preferences()
         self.assertEqual("z-capitals", self.best()["playable_id"])
 
     def test_f_no_preference_configuration_preserves_baseline(self):
-        self.event("Capitals vs Rangers")
+        self.event("Washington Capitals vs Rangers")
         self.playable("a-rangers", "Rangers Broadcast")
-        self.playable("z-capitals", "Capitals Broadcast")
+        self.playable("z-capitals", "Washington Capitals Broadcast")
         baseline = self.best()["playable_id"]
         self.preferences(enabled=True, teams=[])
         self.assertEqual(baseline, self.best()["playable_id"])
 
     def test_g_toggle_off_preserves_baseline(self):
-        self.event("Capitals vs Rangers")
+        self.event("Washington Capitals vs Rangers")
         self.playable("a-rangers", "Rangers Broadcast")
-        self.playable("z-capitals", "Capitals Broadcast")
+        self.playable("z-capitals", "Washington Capitals Broadcast")
         baseline = self.best()["playable_id"]
         self.preferences(enabled=False)
         self.assertEqual(baseline, self.best()["playable_id"])
 
     def test_h_two_favorite_teams_is_deterministic(self):
-        self.event("Capitals vs Rangers")
+        self.event("Washington Capitals vs New York Rangers")
         self.playable("a-rangers", "Rangers Broadcast")
-        self.playable("z-capitals", "Capitals Broadcast")
+        self.playable("z-capitals", "Washington Capitals Broadcast")
         rangers = {
             "team": "New York Rangers",
             "aliases": ["Rangers"],
@@ -224,10 +224,10 @@ class FavoriteTeamSelectionTests(unittest.TestCase):
         }
         self.preferences(teams=[CAPITALS, rangers])
         winners = [self.best()["playable_id"] for _ in range(5)]
-        self.assertEqual(["a-rangers"] * 5, winners)
+        self.assertEqual(["z-capitals"] * 5, winners)
 
     def test_i_xtream_stream_metadata_is_used(self):
-        self.event("Capitals vs Rangers")
+        self.event("Washington Capitals vs Rangers")
         self.playable("a-generic", "generic stream")
         self.playable(
             "z-capitals",
@@ -241,7 +241,7 @@ class FavoriteTeamSelectionTests(unittest.TestCase):
         self.assertEqual("z-capitals", self.best()["playable_id"])
 
     def test_j_espn_home_away_metadata_uses_unambiguous_event_role(self):
-        self.event("Capitals at Rangers")
+        self.event("Washington Capitals at Rangers")
         self.playable(
             "a-home",
             "ESPN feed",
@@ -255,17 +255,17 @@ class FavoriteTeamSelectionTests(unittest.TestCase):
             "ESPN feed",
             provider="sportscenter",
             service="espn_plus",
-            feed_name="Capitals Broadcast",
+            feed_name="Washington Capitals Broadcast",
             feed_type="AWAY",
         )
         self.preferences()
         winner = self.best()
         self.assertEqual("z-away", winner["playable_id"])
-        self.assertEqual(140, winner["team_preference"]["score"])
+        self.assertEqual(210, winner["team_preference"]["score"])
 
     def test_persisted_settings_flow_into_resolved_deeplink_selection(self):
         """End-to-end-ish: SQLite settings -> shared ranker -> resolved link."""
-        self.event("Capitals vs Penguins")
+        self.event("Washington Capitals vs Penguins")
         self.playable("a-espn", "ESPN+", provider="sportscenter", service="espn_plus")
         self.playable("z-monumental", "Monumental Sports Network")
         self.preferences()

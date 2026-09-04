@@ -35,12 +35,12 @@ class GuideApiTest(unittest.TestCase):
                          (lane, f"placeholder-{lane}", self.start.isoformat(), self.end.isoformat(), f"Fruit Lane {lane}"))
         metadata = '{"category_id":"10","category_name":"NFL PPV","stream_id":"500","username":"never-return"}'
         conn.execute("INSERT INTO events VALUES (?, ?, '', 'NFL PPV', '[]', '[]', '', '', ?)",
-                     ("xtream-event", "Commanders at Ravens", metadata))
+                     ("xtream-event", "Washington Commanders at Ravens", metadata))
         conn.execute("INSERT INTO playables VALUES ('xtream-event', 'xtream-playable', 'xtream', '500', ?)", (metadata,))
         conn.execute("INSERT INTO playables VALUES ('xtream-event', 'alternate-playable', 'other', NULL, '{}')")
         conn.execute("INSERT INTO user_preferences VALUES ('setting:favorite_teams', ?, ?)",
                      ('[{"team":"Washington Commanders","aliases":["Commanders"],"preferred_terms":["NFL PPV"],"avoid_terms":[],"enabled":true}]', self.start.isoformat()))
-        conn.execute("INSERT INTO lane_events VALUES (1, 'xtream-event', 0, ?, ?, 'Commanders at Ravens', 'xtream-playable', 'xtream', 'xtream', NULL)",
+        conn.execute("INSERT INTO lane_events VALUES (1, 'xtream-event', 0, ?, ?, 'Washington Commanders at Ravens', 'xtream-playable', 'xtream', 'xtream', NULL)",
                      ((self.start + timedelta(minutes=30)).isoformat(), (self.start + timedelta(minutes=90)).isoformat()))
         conn.commit()
         conn.close()
@@ -70,7 +70,7 @@ class GuideApiTest(unittest.TestCase):
         payload = self.guide().get_json()
         event = next(row for row in payload["programmes"] if not row["is_placeholder"])
         self.assertEqual(event["lane_id"], 1)
-        self.assertEqual(event["title"], "Commanders at Ravens")
+        self.assertEqual(event["title"], "Washington Commanders at Ravens")
         self.assertEqual(event["start_utc"], (self.start + timedelta(minutes=30)).isoformat())
         self.assertEqual(event["xtream_category_name"], "NFL PPV")
         self.assertEqual(event["xtream_category_id"], "10")
