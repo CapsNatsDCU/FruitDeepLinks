@@ -27,6 +27,7 @@ class GuideApiTest(unittest.TestCase):
             CREATE TABLE events (id TEXT PRIMARY KEY, title TEXT, synopsis TEXT, channel_name TEXT, genres_json TEXT, classification_json TEXT, pvid TEXT, hero_image_url TEXT, raw_attributes_json TEXT);
             CREATE TABLE playables (event_id TEXT, playable_id TEXT, provider TEXT, stream_id TEXT, stream_metadata_json TEXT);
             CREATE TABLE event_images (event_id TEXT, img_type TEXT, url TEXT);
+            CREATE TABLE user_preferences (key TEXT PRIMARY KEY, value TEXT, updated_utc TEXT);
         """)
         for lane in range(1, 51):
             conn.execute("INSERT INTO lanes VALUES (?, ?, ?)", (lane, f"Fruit Lane {lane}", 8999 + lane))
@@ -36,6 +37,9 @@ class GuideApiTest(unittest.TestCase):
         conn.execute("INSERT INTO events VALUES (?, ?, '', 'NFL PPV', '[]', '[]', '', '', ?)",
                      ("xtream-event", "Commanders at Ravens", metadata))
         conn.execute("INSERT INTO playables VALUES ('xtream-event', 'xtream-playable', 'xtream', '500', ?)", (metadata,))
+        conn.execute("INSERT INTO playables VALUES ('xtream-event', 'alternate-playable', 'other', NULL, '{}')")
+        conn.execute("INSERT INTO user_preferences VALUES ('setting:favorite_teams', ?, ?)",
+                     ('[{"team":"Washington Commanders","aliases":["Commanders"],"preferred_terms":["NFL PPV"],"avoid_terms":[],"enabled":true}]', self.start.isoformat()))
         conn.execute("INSERT INTO lane_events VALUES (1, 'xtream-event', 0, ?, ?, 'Commanders at Ravens', 'xtream-playable', 'xtream', 'xtream', NULL)",
                      ((self.start + timedelta(minutes=30)).isoformat(), (self.start + timedelta(minutes=90)).isoformat()))
         conn.commit()
@@ -59,7 +63,7 @@ class GuideApiTest(unittest.TestCase):
         with patch.dict(os.environ, self.env, clear=False):
             page = create_app().test_client().get("/guide")
         self.assertEqual(page.status_code, 200)
-        self.assertIn(b"Guide Preview", page.data)
+        self.assertIn(b"Lane Guide", page.data)
         self.assertIn(b"/api/guide", page.data)
 
     def test_final_lane_record_and_xtream_details_are_safe(self):
@@ -71,6 +75,10 @@ class GuideApiTest(unittest.TestCase):
         self.assertEqual(event["xtream_category_name"], "NFL PPV")
         self.assertEqual(event["xtream_category_id"], "10")
         self.assertEqual(event["xtream_stream_id"], "500")
+        self.assertTrue(event["favorite"])
+        self.assertEqual(event["favorite_teams"], ["Washington Commanders"])
+        self.assertEqual(event["selected_playable"]["playable_id"], "xtream-playable")
+        self.assertEqual(event["playable_count"], 2)
         self.assertNotIn("username", event)
         self.assertNotIn("never-return", response_text := self.guide().get_data(as_text=True))
 
@@ -92,6 +100,10 @@ class GuideApiTest(unittest.TestCase):
         for programme in payload["programmes"]:
             self.assertIn(f'channel="lane.{programme["lane_id"]}"', xml)
             self.assertIn(f"<title>{programme['title']}</title>", xml)
+            start = datetime.fromisoformat(programme["start_utc"])
+            end = datetime.fromisoformat(programme["end_utc"])
+            self.assertIn(start.strftime('start="%Y%m%d%H%M%S +0000"'), xml)
+            self.assertIn(end.strftime('stop="%Y%m%d%H%M%S +0000"'), xml)
 
 
 if __name__ == "__main__":

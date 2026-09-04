@@ -12,8 +12,9 @@ from zoneinfo import ZoneInfo
 from flask import Blueprint, jsonify, request
 
 from db.connection import db_exists, get_conn
-from db.preferences import get_setting
+from db.preferences import get_setting, load as load_preferences
 from server.config import cfg
+from team_preferences import match_favorite_teams, score_team_affinity
 
 try:
     from fruit_export_lanes import build_enhanced_title
@@ -53,6 +54,21 @@ def _output_timestamp():
     if not path.exists():
         return None
     return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+
+
+def _display_playable(row):
+    """Return non-sensitive, inspector-safe playable data."""
+    return {
+        "playable_id": row.get("playable_id"),
+        "provider": row.get("provider"),
+        "logical_service": row.get("logical_service"),
+        "service_name": row.get("service_name"),
+        "title": row.get("title"),
+        "feed_name": row.get("feed_name"),
+        "feed_type": row.get("feed_type"),
+        "stream_type": "xtream" if row.get("stream_id") else "deeplink",
+        "stream_id": row.get("stream_id"),
+    }
 
 
 @bp.route("/api/guide")
@@ -98,6 +114,7 @@ def api_guide():
         rows = cur.execute(
             f"""
             SELECT le.*, e.title AS event_title, e.channel_name, e.raw_attributes_json,
+                   e.synopsis, e.classification_json, e.genres_json,
                    {playable_select}
               FROM lane_events le
               LEFT JOIN events e ON e.id = le.event_id
@@ -109,6 +126,20 @@ def api_guide():
             """,
             (end.isoformat(), start.isoformat(), include_placeholders, lane_filter, lane_filter),
         ).fetchall()
+        # Playable alternatives are read only for events already present in the
+        # requested final schedule.  The selected playable remains the stored
+        # lane_events.chosen_playable_id; this never re-runs lane selection.
+        playable_by_event = {}
+        if has_playables and rows:
+            event_ids = sorted({row["event_id"] for row in rows if row["event_id"]})
+            if event_ids:
+                columns = {row[1] for row in cur.execute("PRAGMA table_info(playables)")}
+                wanted = [name for name in ("event_id", "playable_id", "provider", "logical_service", "service_name", "title", "feed_name", "feed_type", "stream_id") if name in columns]
+                if "event_id" in wanted:
+                    placeholders = ",".join("?" for _ in event_ids)
+                    for playable in cur.execute(f"SELECT {', '.join(wanted)} FROM playables WHERE event_id IN ({placeholders})", event_ids):
+                        playable_by_event.setdefault(playable["event_id"], []).append(_display_playable(dict(playable)))
+        favorite_teams = load_preferences(conn).get("favorite_teams", [])
         try:
             zone_name = get_setting(conn, "timezone") or "America/New_York"
             ZoneInfo(zone_name)
@@ -128,6 +159,15 @@ def api_guide():
         if end_utc <= start_utc:
             end_utc = start_utc + timedelta(hours=1)
         provider = item.get("chosen_logical_service") or item.get("chosen_provider")
+        all_playables = playable_by_event.get(item.get("event_id"), [])
+        selected = next((p for p in all_playables if p.get("playable_id") == item.get("chosen_playable_id")), None)
+        if selected is None and item.get("chosen_playable_id"):
+            selected = {"playable_id": item.get("chosen_playable_id"), "provider": item.get("chosen_provider"),
+                        "logical_service": item.get("chosen_logical_service"), "stream_type": None}
+        favorite_matches = match_favorite_teams(item, favorite_teams)
+        preference = score_team_affinity(item, selected or {}, favorite_teams) if selected else {"score": 0, "reasons": []}
+        classification = _safe_json(item.get("classification_json"))
+        league = classification.get("league") if isinstance(classification, dict) else None
         programmes.append({
             "lane_id": item["lane_id"], "event_id": item.get("event_id"),
             "title": title, "is_placeholder": is_placeholder,
@@ -135,6 +175,14 @@ def api_guide():
             "start_utc": start_utc.isoformat(), "end_utc": end_utc.isoformat(),
             "duration_seconds": int((end_utc - start_utc).total_seconds()),
             "provider": provider, "channel_name": item.get("channel_name"),
+            "league": league or item.get("channel_name"),
+            "favorite": bool(favorite_matches),
+            "favorite_teams": [match["team"]["team"] for match in favorite_matches],
+            "selected_playable": selected,
+            "playables": all_playables,
+            "playable_count": len(all_playables),
+            "preference_score": preference.get("score", 0),
+            "preference_reasons": [reason.get("reason") for reason in preference.get("reasons", [])],
             "padding_minutes": cfg.PADDING_MINUTES if not is_placeholder else 0,
             "xtream_category_name": playable_metadata.get("category_name") or metadata.get("category_name"),
             "xtream_category_id": playable_metadata.get("category_id") or metadata.get("category_id"),
