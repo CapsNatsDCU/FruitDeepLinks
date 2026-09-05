@@ -8,6 +8,7 @@ from flask import Blueprint, jsonify, request
 from db.connection import db_exists, get_conn
 from sports_metadata import (applicable_rule, coverage, ensure_schema, resolve_source_event,
                              save_rule, sync_legacy_events, normalize_provider)
+from local_ai_event_parser import clear_cache as clear_local_ai_cache
 
 try:
     from db.preferences import get_setting
@@ -78,6 +79,19 @@ def inspect_event(canonical_event_id):
         event = conn.execute("SELECT ce.*,s.name AS sport,l.name AS league FROM canonical_events ce LEFT JOIN sports s ON s.id=ce.sport_id LEFT JOIN leagues l ON l.id=ce.league_id WHERE ce.id=?", (canonical_event_id,)).fetchone()
         if not event: return jsonify({"ok": False, "error": "Not found"}), 404
         sources = [dict(r) for r in conn.execute("SELECT source,source_event_id,confidence,resolution_kind,evidence_json,last_seen_utc FROM source_event_records WHERE canonical_event_id=?", (canonical_event_id,))]
+        # Keep the untrusted AI interpretation visibly separate from Fruit's
+        # canonical resolution fields.  Cache rows intentionally contain no
+        # provider credentials or transport URLs.
+        for source_row in sources:
+            ai_row = conn.execute(
+                "SELECT model,result_json,confidence,validation_status,failure_kind,parsed_utc FROM local_ai_event_cache "
+                "WHERE provider=? AND source_event_id=? ORDER BY updated_utc DESC LIMIT 1",
+                (source_row["source"], source_row["source_event_id"]),
+            ).fetchone()
+            if ai_row:
+                item = dict(ai_row)
+                item["interpretation"] = _safe_metadata(item.pop("result_json"))
+                source_row["local_ai_interpretation"] = item
         participants = [dict(r) for r in conn.execute("SELECT p.*,t.name AS canonical_team FROM canonical_event_participants p LEFT JOIN teams t ON t.id=p.team_id WHERE p.event_id=?", (canonical_event_id,))]
         rule = applicable_rule(conn, canonical_event_id)
         source_ids = [row["source_event_id"] for row in sources]
@@ -104,6 +118,20 @@ def resolver_bench():
         conn.row_factory = sqlite3.Row; _prepare(conn)
         result = resolve_source_event(conn, source=str(body["source"]), source_event_id=str(body["source_event_id"]), data=body.get("event") or {})
     return jsonify({"ok": True, "result": result})
+
+
+@bp.route("/api/sports/local-ai/cache/clear", methods=["POST"])
+def clear_local_ai_interpretations():
+    """Explicitly clear local-AI parser cache so a later sync reparses data."""
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    body = request.get_json(silent=True) or {}
+    provider = str(body.get("provider") or "").strip().casefold() or None
+    source_event_id = str(body.get("source_event_id") or "").strip() or None
+    with get_conn() as conn:
+        _prepare(conn)
+        cleared = clear_local_ai_cache(conn, provider=provider, source_event_id=source_event_id)
+        conn.commit()
+    return jsonify({"ok": True, "cleared": cleared, "reparse": "Run the next refresh or resolver request to reparse eligible records."})
 
 
 @bp.route("/api/sports/mappings", methods=["POST"])

@@ -97,6 +97,29 @@ five likely disabled categories and retains only 25 sample names per category;
 it does not enable anything or expose credentials.  A scan failure cannot
 alter the selected category setting.
 
+### Optional local-AI metadata parser
+
+`local_ai_event_parser.py` is a disabled-by-default, OpenAI-compatible local
+parser for incomplete/weak provider metadata. It receives a bounded,
+sanitized title/category/source-label payload only; it never receives an
+Xtream URL, source ID, credentials, cookie, token, or raw provider payload.
+Its strict JSON result is length/type/role/confidence validated and cached by
+source/title fingerprint, model, and parser version. Cache clearing is an
+explicit `POST /api/sports/local-ai/cache/clear` action; it never enables a
+source or changes lane allocation.
+
+The parser runs only after deterministic metadata extraction and only where
+structured sport/league/two-participant metadata is incomplete. Complete
+Apple-style metadata and manual source mappings bypass it. A valid local
+interpretation can supply missing/weak fields, but it still passes through
+the existing canonical event candidate matching; it cannot create a manual
+mapping, merge on a mascot, choose a playable, or schedule a lane. The Event
+Resolution Inspector exposes its cache/status separately from canonical
+resolver evidence. Offline, malformed, low-confidence, and timeout results
+are non-fatal and retain deterministic behavior. Refresh sync uses a
+configurable uncached-request cap and leaves capped work pending for a later
+bounded run rather than declaring it synchronized.
+
 ## Timestamp trace
 
 | Stage | Stored/compared form | Display/export form |

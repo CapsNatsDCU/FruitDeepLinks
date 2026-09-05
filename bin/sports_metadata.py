@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from typing import Any, Iterable, Mapping, Optional
 
 
 UTC = timezone.utc
+LOG = logging.getLogger(__name__)
 POLICIES = frozenset({"IGNORE", "NORMAL", "PRIORITIZE", "ALWAYS_SCHEDULE"})
 _WORDS = re.compile(r"[^a-z0-9]+")
 
@@ -103,6 +105,25 @@ def _json(value: Any) -> Any:
     return value or {}
 
 
+def _source_input_fingerprint(data: Mapping[str, Any], raw: Mapping[str, Any]) -> str:
+    """Fingerprint resolution-relevant source data to avoid stale mappings.
+
+    A manual mapping remains authoritative, but an automatically inferred
+    source ID must be reconsidered when its title/timing/structured identity
+    changes (common for re-used IPTV stream identifiers).
+    """
+    material = {
+        "title": data.get("title"), "sport": data.get("sport") or data.get("sport_name"),
+        "league": data.get("league") or data.get("league_name"),
+        "participants": data.get("participants") or data.get("competitors"),
+        "start": data.get("start_utc") or data.get("start_ms") or data.get("start_time"),
+        "end": data.get("end_utc") or data.get("end_ms") or data.get("end_time"),
+        "raw": raw,
+    }
+    encoded = json.dumps(material, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create idempotent canonical tables without altering legacy records."""
     conn.executescript("""
@@ -161,6 +182,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_rules_target ON sports_rules(target_type, target_id, enabled);
     CREATE INDEX IF NOT EXISTS idx_canonical_events_time ON canonical_events(start_utc);
     """)
+    # Local AI is an optional parser/cache only.  Keeping its table here makes
+    # the migration idempotent without coupling callers to an AI runtime.
+    from local_ai_event_parser import ensure_schema as ensure_local_ai_schema
+    ensure_local_ai_schema(conn)
     # Existing databases predate the normalized, NOCASE declaration above.
     # Coalesce aliases transactionally so ``Xtream`` and ``xtream-codes`` do
     # not become independent capacity buckets.  The smaller limit is the only
@@ -309,22 +334,76 @@ def _event_candidates(conn: sqlite3.Connection, *, sport_id: str | None, league_
 
 def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_id: str,
                          data: Mapping[str, Any], commit: bool = True,
-                         schema_ready: bool = False) -> dict[str, Any]:
+                         schema_ready: bool = False, ai_config=None,
+                         ai_requester=None, ai_budget: list[int] | None = None,
+                         recheck_inferred_mapping: bool = True) -> dict[str, Any]:
     """Resolve one structured source record to Fruit-owned canonical identity."""
     if not schema_ready:
         ensure_schema(conn)
     source = _norm(source) or "unknown"
-    prior = conn.execute("SELECT canonical_event_id FROM source_event_records WHERE source=? AND source_event_id=?", (source, str(source_event_id))).fetchone()
+    prior = conn.execute("SELECT canonical_event_id,resolution_kind,evidence_json FROM source_event_records WHERE source=? AND source_event_id=?", (source, str(source_event_id))).fetchone()
     raw = _json(data.get("raw_attributes_json"))
+    source_fingerprint = _source_input_fingerprint(data, raw)
+    prior_evidence = _json(prior[2]) if prior else {}
+    prior_is_current = bool(prior and (not recheck_inferred_mapping or prior[1] == "manual_override" or not prior_evidence.get("source_input_fingerprint")
+                                       or prior_evidence.get("source_input_fingerprint") == source_fingerprint))
     sport = data.get("sport") or data.get("sport_name") or raw.get("sport_name")
     league = data.get("league") or data.get("league_name") or raw.get("league_name")
-    participants = _participants(data) or _participants(raw)
+    structured_participants = _participants(data) or _participants(raw)
+    # A title match is useful deterministic input, but is not authoritative
+    # provider metadata.  A valid local-AI interpretation may clarify a
+    # provider-prefixed title before the normal resolver sees it.
+    participants = structured_participants or _title_participants(data.get("title") or raw.get("title") or raw.get("original_stream_name"))
     start_value = data.get("start_utc") or data.get("start_ms") or data.get("start_time") or raw.get("start_utc")
     start = utc_instant(start_value, source_timezone=data.get("source_timezone"))
     if not start:
         return {"resolved": False, "reason": "invalid_or_naive_start_timestamp"}
     start_text = utc_text(start)
     end_text = utc_text(data.get("end_utc") or data.get("end_ms") or data.get("end_time"), source_timezone=data.get("source_timezone"))
+    event_type = data.get("event_type") or raw.get("event_type") or raw.get("eventType") or "event"
+    competition = data.get("competition") or raw.get("competition")
+    ai_result = {"status": "not_needed", "interpretation": None}
+    # Never let an AI reinterpret complete structured metadata or an explicit
+    # manual mapping.  It is only an optional parser for incomplete/weak text.
+    strong_structured_identity = bool(sport and league and len(structured_participants) >= 2)
+    title_text = data.get("title") or raw.get("title") or raw.get("original_stream_name")
+    sports_words = ("nfl", "nhl", "mlb", "mls", "nba", "ncaa", "football", "hockey", "baseball", "soccer", "basketball", "formula 1", "grand prix")
+    potential_sports_record = source == "xtream" or bool(sport or league or participants) or any(word in _norm(title_text) for word in sports_words)
+    if potential_sports_record and not strong_structured_identity and not (prior and prior[1] == "manual_override"):
+        try:
+            from local_ai_event_parser import enrich, request_openai_compatible
+            kwargs = {
+                # Use Fruit's normalized source label, never a provider-supplied
+                # transport/configuration field, as the parser/cache provider.
+                "provider": source,
+                "source_event_id": str(source_event_id),
+                "title": title_text,
+                "category": raw.get("category_name") or raw.get("category"),
+                "sport_hint": sport,
+                "league_hint": league,
+                "start_time": start_text,
+                "config": ai_config,
+                "budget": ai_budget,
+            }
+            if ai_requester is not None:
+                kwargs["requester"] = ai_requester
+            ai_result = enrich(conn, **kwargs)
+            interpretation = ai_result.get("interpretation")
+            if interpretation:
+                # Explicit structured fields always win.  Title-derived names
+                # are weak parsing and may be replaced by a validated parser
+                # candidate, which still must pass _event_candidates below.
+                sport = sport or interpretation.get("sport")
+                league = league or interpretation.get("league")
+                event_type = data.get("event_type") or raw.get("event_type") or raw.get("eventType") or interpretation.get("event_type") or event_type
+                competition = competition or interpretation.get("competition")
+                if not structured_participants and interpretation.get("participants"):
+                    participants = interpretation["participants"]
+        except Exception as exc:
+            # This boundary is deliberately fail-open: the optional parser may
+            # not delay or remove a legacy event.  Do not log raw provider text.
+            LOG.warning("Optional local AI event parser failed (%s); using deterministic metadata", type(exc).__name__)
+            ai_result = {"status": "parser_error", "interpretation": None, "error": type(exc).__name__}
     sport_id = _upsert_named(conn, "sports", str(sport)) if sport else None
     league_id = _upsert_named(conn, "leagues", str(league), sport_id=sport_id) if league else None
     team_rows = []
@@ -336,9 +415,12 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
             conn.execute("INSERT INTO source_entity_mappings(source,entity_type,source_id,canonical_id,confidence,manual,evidence_json,last_seen_utc) VALUES(?,?,?,?,?,?,?,?) "
                          "ON CONFLICT(source,entity_type,source_id) DO UPDATE SET canonical_id=excluded.canonical_id,confidence=excluded.confidence,last_seen_utc=excluded.last_seen_utc",
                          (source, "team", str(participant["source_id"]), team_id, 1.0, 0, '{"kind":"structured_id"}', utc_now()))
-    event_type = data.get("event_type") or raw.get("event_type") or raw.get("eventType") or "event"
-    if prior:
-        canonical_id, confidence, kind, evidence = prior[0], 1.0, "source_mapping", {"source_mapping": True}
+    if prior_is_current:
+        canonical_id, confidence = prior[0], 1.0
+        if prior[1] == "manual_override":
+            kind, evidence = "manual_override", {"operator_confirmed": True}
+        else:
+            kind, evidence = "source_mapping", {"source_mapping": True}
     else:
         canonical_id, confidence, evidence = _event_candidates(conn, sport_id=sport_id, league_id=league_id,
                                                                   start=start, participants=participants, event_type=str(event_type))
@@ -350,20 +432,25 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
             confidence = 1.0 if known else .9
     metadata = {"title": data.get("title"), "source": source, "raw_start": start_value,
                 "canonical_start_utc": start_text, "time_contract": "absolute_utc"}
+    if ai_result.get("status") not in {"not_needed", "disabled"}:
+        metadata["local_ai"] = {"status": ai_result.get("status"), "model": getattr(ai_config, "model", None),
+                                "used": bool(ai_result.get("interpretation"))}
     fingerprint = event_fingerprint(sport=sport, league=league, participants=participants, event_type=str(event_type), start_utc=start_text)
     conn.execute("INSERT INTO canonical_events(id,fingerprint,sport_id,league_id,season,competition,stage,round,event_type,start_utc,end_utc,venue,status,title,metadata_json,created_utc,updated_utc) "
                  "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET end_utc=COALESCE(excluded.end_utc,canonical_events.end_utc), status=excluded.status,title=COALESCE(excluded.title,canonical_events.title),metadata_json=excluded.metadata_json,updated_utc=excluded.updated_utc",
-                 (canonical_id, fingerprint, sport_id, league_id, data.get("season") or raw.get("season"), data.get("competition") or raw.get("competition"), data.get("stage") or raw.get("stage"), data.get("round") or raw.get("round"), str(event_type), start_text, end_text, data.get("venue") or raw.get("venue"), data.get("status") or raw.get("status") or "discovered", data.get("title"), json.dumps(metadata), utc_now(), utc_now()))
+                 (canonical_id, fingerprint, sport_id, league_id, data.get("season") or raw.get("season"), competition, data.get("stage") or raw.get("stage"), data.get("round") or raw.get("round"), str(event_type), start_text, end_text, data.get("venue") or raw.get("venue"), data.get("status") or raw.get("status") or "discovered", data.get("title"), json.dumps(metadata), utc_now(), utc_now()))
     conn.execute("DELETE FROM canonical_event_participants WHERE event_id=?", (canonical_id,))
     for participant, team_id in team_rows:
         conn.execute("INSERT INTO canonical_event_participants(event_id,team_id,display_name,role,source_identifier) VALUES(?,?,?,?,?)",
                      (canonical_id, team_id, participant["name"], participant["role"], str(participant.get("source_id") or "") or None))
+    evidence = {**evidence, "source_input_fingerprint": source_fingerprint}
     conn.execute("INSERT INTO source_event_records(source,source_event_id,canonical_event_id,confidence,resolution_kind,evidence_json,raw_json,last_seen_utc) VALUES(?,?,?,?,?,?,?,?) "
                  "ON CONFLICT(source,source_event_id) DO UPDATE SET canonical_event_id=excluded.canonical_event_id,confidence=excluded.confidence,resolution_kind=excluded.resolution_kind,evidence_json=excluded.evidence_json,raw_json=excluded.raw_json,last_seen_utc=excluded.last_seen_utc",
                  (source, str(source_event_id), canonical_id, confidence, kind, json.dumps(evidence), json.dumps(raw), utc_now()))
     if commit:
         conn.commit()
-    return {"resolved": True, "canonical_event_id": canonical_id, "confidence": confidence, "resolution_kind": kind, "start_utc": start_text}
+    return {"resolved": True, "canonical_event_id": canonical_id, "confidence": confidence, "resolution_kind": kind, "start_utc": start_text,
+            "local_ai": {"status": ai_result.get("status"), "used": bool(ai_result.get("interpretation"))}}
 
 
 def _legacy_sync_fingerprint(conn: sqlite3.Connection) -> str:
@@ -379,12 +466,22 @@ def sync_legacy_events(conn: sqlite3.Connection) -> dict[str, int]:
     ensure_schema(conn)
     columns = {r[1] for r in conn.execute("PRAGMA table_info(events)")}
     if not {"id", "start_utc"}.issubset(columns): return {"resolved": 0, "skipped": 0}
-    fingerprint = _legacy_sync_fingerprint(conn)
+    try:
+        from local_ai_event_parser import PARSER_VERSION, load_config
+        ai_config = load_config(conn)
+        ai_state = f"{PARSER_VERSION}:{ai_config.usable}:{ai_config.model}:{ai_config.minimum_confidence}"
+    except Exception:
+        ai_config = None
+        ai_state = "local-ai-unavailable"
+    fingerprint = f"{_legacy_sync_fingerprint(conn)}|{ai_state}"
     state = conn.execute("SELECT value FROM sports_metadata_state WHERE key='legacy_events_fingerprint'").fetchone()
     if state and state[0] == fingerprint:
         return {"resolved": 0, "skipped": 0, "unchanged": 1}
     rows = conn.execute("SELECT * FROM events WHERE start_utc IS NOT NULL").fetchall()
-    resolved = skipped = 0
+    # One bounded budget covers this incremental sync.  Cache hits are free,
+    # while a large provider catalog cannot cause an unbounded model walk.
+    ai_budget = [ai_config.max_requests_per_refresh] if ai_config else [0]
+    resolved = skipped = pending_ai = 0
     for row in rows:
         data = dict(row)
         raw = _json(data.get("raw_attributes_json"))
@@ -397,12 +494,18 @@ def sync_legacy_events(conn: sqlite3.Connection) -> dict[str, int]:
         source = ("apple" if str(data.get("id", "")).startswith("appletv-")
                   else "xtream" if raw.get("provider") == "xtream" or str(data.get("id", "")).startswith("xtream:")
                   else str(data.get("channel_provider_id") or "legacy"))
-        result = resolve_source_event(conn, source=source, source_event_id=str(data["id"]), data=data, commit=False, schema_ready=True)
+        result = resolve_source_event(conn, source=source, source_event_id=str(data["id"]), data=data, commit=False, schema_ready=True,
+                                      ai_budget=ai_budget, recheck_inferred_mapping=False)
         resolved += int(bool(result.get("resolved"))); skipped += int(not result.get("resolved"))
-    conn.execute("INSERT INTO sports_metadata_state(key,value,updated_utc) VALUES('legacy_events_fingerprint',?,?) "
-                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_utc=excluded.updated_utc", (fingerprint, utc_now()))
+        pending_ai += int(bool(ai_config and ai_config.max_requests_per_refresh > 0)
+                          and result.get("local_ai", {}).get("status") == "budget_exhausted")
+    # A capped run is intentionally not marked complete.  On the next refresh
+    # cache hits cost nothing and the next bounded slice can be interpreted.
+    if not pending_ai:
+        conn.execute("INSERT INTO sports_metadata_state(key,value,updated_utc) VALUES('legacy_events_fingerprint',?,?) "
+                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_utc=excluded.updated_utc", (fingerprint, utc_now()))
     conn.commit()
-    return {"resolved": resolved, "skipped": skipped, "unchanged": 0}
+    return {"resolved": resolved, "skipped": skipped, "pending_local_ai": pending_ai, "unchanged": 0}
 
 
 def save_rule(conn: sqlite3.Connection, *, target_type: str, target_id: str, policy: str,

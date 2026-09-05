@@ -359,6 +359,36 @@ SETTINGS_DEFS: Dict[str, tuple] = {
         "Xtream Default Duration",
         "Duration in minutes when a reliable start exists but no end is supplied; stored metadata marks it inferred.",
     ),
+    "local_ai_event_parsing_enabled": (
+        "LOCAL_AI_EVENT_PARSING_ENABLED", "bool", False,
+        "Enable Local AI Event Parsing",
+        "Optionally ask a configured local OpenAI-compatible model to interpret incomplete provider event titles. It cannot merge events, select streams, or schedule lanes.",
+    ),
+    "local_ai_event_parsing_base_url": (
+        "LOCAL_AI_EVENT_PARSING_BASE_URL", "str", "",
+        "Local AI API Base URL",
+        "LAN URL for an OpenAI-compatible local endpoint (for example http://localhost:11434/v1). No API key is stored by FruitDeepLinks.",
+    ),
+    "local_ai_event_parsing_model": (
+        "LOCAL_AI_EVENT_PARSING_MODEL", "str", "",
+        "Local AI Model",
+        "Model name exposed by the local OpenAI-compatible endpoint.",
+    ),
+    "local_ai_event_parsing_timeout_seconds": (
+        "LOCAL_AI_EVENT_PARSING_TIMEOUT_SECONDS", "int", 5,
+        "Local AI Request Timeout",
+        "Maximum seconds for one optional local metadata request. A timeout never blocks the refresh.",
+    ),
+    "local_ai_event_parsing_min_confidence": (
+        "LOCAL_AI_EVENT_PARSING_MIN_CONFIDENCE", "float", 0.85,
+        "Local AI Minimum Confidence",
+        "Ignore local model interpretations below this 0–1 confidence threshold.",
+    ),
+    "local_ai_event_parsing_max_requests_per_refresh": (
+        "LOCAL_AI_EVENT_PARSING_MAX_REQUESTS_PER_REFRESH", "int", 25,
+        "Local AI Request Limit per Refresh",
+        "Maximum uncached eligible records sent to the local parser in one metadata sync. Cache hits do not count.",
+    ),
 }
 
 _SETTING_KEY_PREFIX = "setting:"
@@ -376,6 +406,11 @@ def _cast_setting(value: str, type_hint: str):
             return int(json.loads(value))
         except Exception:
             return int(value)
+    if type_hint == "float":
+        try:
+            return float(json.loads(value))
+        except Exception:
+            return float(value)
     if type_hint == "json":
         parsed = json.loads(value) if isinstance(value, str) else value
         return parsed

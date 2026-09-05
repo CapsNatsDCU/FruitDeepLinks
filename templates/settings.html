@@ -183,6 +183,7 @@ const GROUPS = {
   'Auto Refresh': ['auto_refresh_enabled', 'auto_refresh_time'],
   'Scrapers': ['kayo_enabled', 'fanatiz_enabled', 'bein_enabled', 'nesn_enabled', 'victory_enabled', 'gotham_enabled', 'espn_enabled'],
   'Xtream IPTV': ['xtream_enabled', 'xtream_server_url', 'xtream_timezone', 'xtream_default_duration_minutes'],
+  'Optional Local AI Event Parsing': ['local_ai_event_parsing_enabled', 'local_ai_event_parsing_base_url', 'local_ai_event_parsing_model', 'local_ai_event_parsing_timeout_seconds', 'local_ai_event_parsing_min_confidence', 'local_ai_event_parsing_max_requests_per_refresh'],
 };
 
 const ADVANCED = {
@@ -523,8 +524,9 @@ function renderInput(key, s, val) {
       ${val ? 'Enabled' : 'Disabled'}
     </label>`;
   }
-  if (s.type === 'int') {
-    return `<input type="number" name="${key}" id="s_${key}" value="${val}" style="width:140px">`;
+  if (s.type === 'int' || s.type === 'float') {
+    const numericOptions = s.type === 'float' ? ' step="0.01" min="0" max="1"' : '';
+    return `<input type="number" name="${key}" id="s_${key}" value="${val}"${numericOptions} style="width:140px">`;
   }
   if (key === 'log_level') {
     const levels = ['DEBUG','INFO','WARNING','ERROR'];
@@ -821,6 +823,7 @@ function collectSettings() {
     const s = _schema[key];
     if (s.type === 'bool') updates[key] = el.checked;
     else if (s.type === 'int') updates[key] = parseInt(el.value, 10) || s.default;
+    else if (s.type === 'float') updates[key] = parseFloat(el.value) || s.default;
     else updates[key] = el.value.trim();
   }
   return updates;
