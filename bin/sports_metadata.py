@@ -345,7 +345,10 @@ def coverage(conn: sqlite3.Connection, *, days: int = 14) -> list[dict[str, Any]
             marks = ",".join("?" for _ in legacy_ids)
             playable_count = conn.execute(f"SELECT COUNT(*) FROM playables WHERE event_id IN ({marks})", legacy_ids).fetchone()[0]
             lane = conn.execute(f"SELECT lane_id FROM lane_events WHERE event_id IN ({marks}) AND COALESCE(is_placeholder,0)=0 ORDER BY start_utc LIMIT 1", legacy_ids).fetchone()
+        decision = conn.execute("SELECT decision,reason_json FROM scheduling_decisions WHERE canonical_event_id=? ORDER BY generation_utc DESC LIMIT 1", (event["id"],)).fetchone()
         status = "scheduled" if lane else ("playable_found" if playable_count else "awaiting_source")
+        if decision and decision[0] in {"provider_concurrency", "lane_capacity"}:
+            status = "resource_conflict"
         participants = [dict(r) for r in conn.execute("SELECT display_name,role FROM canonical_event_participants WHERE event_id=?", (event["id"],))]
-        result.append({"canonical_event_id": event["id"], "title": event.get("title"), "start_utc": event["start_utc"], "participants": participants, "rule": rule["policy"], "coverage_state": status, "playable_count": playable_count, "lane_id": lane[0] if lane else None})
+        result.append({"canonical_event_id": event["id"], "title": event.get("title"), "start_utc": event["start_utc"], "participants": participants, "rule": rule["policy"], "coverage_state": status, "playable_count": playable_count, "lane_id": lane[0] if lane else None, "decision": decision[0] if decision else None})
     return result

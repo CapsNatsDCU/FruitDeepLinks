@@ -73,7 +73,15 @@ def inspect_event(canonical_event_id):
         sources = [dict(r) for r in conn.execute("SELECT source,source_event_id,confidence,resolution_kind,evidence_json,last_seen_utc FROM source_event_records WHERE canonical_event_id=?", (canonical_event_id,))]
         participants = [dict(r) for r in conn.execute("SELECT p.*,t.name AS canonical_team FROM canonical_event_participants p LEFT JOIN teams t ON t.id=p.team_id WHERE p.event_id=?", (canonical_event_id,))]
         rule = applicable_rule(conn, canonical_event_id)
-    return jsonify({"ok": True, "event": dict(event), "participants": participants, "source_records": sources, "applicable_rule": rule})
+        source_ids = [row["source_event_id"] for row in sources]
+        playables = []; lanes = []
+        if source_ids:
+            marks = ",".join("?" for _ in source_ids)
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "playables" in tables: playables = [dict(r) for r in conn.execute(f"SELECT event_id,playable_id,provider,logical_service,service_name,priority FROM playables WHERE event_id IN ({marks})", source_ids)]
+            if "lane_events" in tables: lanes = [dict(r) for r in conn.execute(f"SELECT lane_id,event_id,start_utc,end_utc,chosen_playable_id,chosen_provider FROM lane_events WHERE event_id IN ({marks}) AND COALESCE(is_placeholder,0)=0", source_ids)]
+        decisions = [dict(r) for r in conn.execute("SELECT * FROM scheduling_decisions WHERE canonical_event_id=? ORDER BY generation_utc DESC LIMIT 20", (canonical_event_id,))]
+    return jsonify({"ok": True, "event": dict(event), "participants": participants, "source_records": sources, "applicable_rule": rule, "lanes": lanes, "playables": playables, "scheduling_decisions": decisions, "time_resolution": {"raw": _safe_metadata(event["metadata_json"]).get("raw_start"), "canonical_utc": event["start_utc"], "display_timezone": "America/New_York", "contract": "absolute_utc"}})
 
 
 @bp.route("/api/sports/resolver", methods=["POST"])
@@ -120,6 +128,28 @@ def schedule_simulation():
         from sports_scheduler import simulate
         result = simulate(conn, lanes, days)
     return jsonify({"ok": True, "lanes": lanes, "days": days, **result})
+
+
+def _safe_metadata(value):
+    import json
+    try: return json.loads(value or "{}")
+    except (TypeError, ValueError): return {}
+
+
+@bp.route("/api/sports/provider-capacities", methods=["GET", "POST"])
+def provider_capacities():
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    with get_conn() as conn:
+        _prepare(conn)
+        if request.method == "POST":
+            body = request.get_json(silent=True) or {}
+            provider = str(body.get("provider", "")).strip().casefold()
+            try: maximum = int(body.get("max_concurrent"))
+            except (TypeError, ValueError): maximum = 0
+            if not provider or maximum < 1: return jsonify({"ok": False, "error": "provider and positive max_concurrent are required"}), 400
+            conn.execute("INSERT INTO provider_capacities(provider,max_concurrent,updated_utc) VALUES(?,?,datetime('now')) ON CONFLICT(provider) DO UPDATE SET max_concurrent=excluded.max_concurrent,updated_utc=excluded.updated_utc", (provider, maximum)); conn.commit()
+        rows = [dict(r) for r in conn.execute("SELECT * FROM provider_capacities ORDER BY provider")]
+    return jsonify({"ok": True, "capacities": rows})
 
 
 @bp.route("/api/sports/health")
