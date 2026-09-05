@@ -1,4 +1,5 @@
 """Metadata-first Sports Rules, coverage, resolver, and health APIs."""
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -6,7 +7,13 @@ from flask import Blueprint, jsonify, request
 
 from db.connection import db_exists, get_conn
 from sports_metadata import (applicable_rule, coverage, ensure_schema, resolve_source_event,
-                             save_rule, sync_legacy_events)
+                             save_rule, sync_legacy_events, normalize_provider)
+
+try:
+    from db.preferences import get_setting
+except ImportError:
+    def get_setting(conn, key, fallback=None):
+        return fallback
 
 bp = Blueprint("sports_api", __name__)
 
@@ -75,13 +82,15 @@ def inspect_event(canonical_event_id):
         rule = applicable_rule(conn, canonical_event_id)
         source_ids = [row["source_event_id"] for row in sources]
         playables = []; lanes = []
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if source_ids:
             marks = ",".join("?" for _ in source_ids)
-            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if "playables" in tables: playables = [dict(r) for r in conn.execute(f"SELECT event_id,playable_id,provider,logical_service,service_name,priority FROM playables WHERE event_id IN ({marks})", source_ids)]
             if "lane_events" in tables: lanes = [dict(r) for r in conn.execute(f"SELECT lane_id,event_id,start_utc,end_utc,chosen_playable_id,chosen_provider FROM lane_events WHERE event_id IN ({marks}) AND COALESCE(is_placeholder,0)=0", source_ids)]
         decisions = [dict(r) for r in conn.execute("SELECT * FROM scheduling_decisions WHERE canonical_event_id=? ORDER BY generation_utc DESC LIMIT 20", (canonical_event_id,))]
-    return jsonify({"ok": True, "event": dict(event), "participants": participants, "source_records": sources, "applicable_rule": rule, "lanes": lanes, "playables": playables, "scheduling_decisions": decisions, "time_resolution": {"raw": _safe_metadata(event["metadata_json"]).get("raw_start"), "canonical_utc": event["start_utc"], "display_timezone": "America/New_York", "contract": "absolute_utc"}})
+        capacities = [dict(r) for r in conn.execute("SELECT provider,max_concurrent,updated_utc FROM provider_capacities ORDER BY provider")] if "provider_capacities" in tables else []
+        display_timezone = get_setting(conn, "timezone") or os.getenv("FRUIT_TIMEZONE") or os.getenv("TZ") or "UTC"
+    return jsonify({"ok": True, "event": dict(event), "participants": participants, "source_records": sources, "applicable_rule": rule, "lanes": lanes, "playables": playables, "scheduling_decisions": decisions, "provider_capacities": capacities, "time_resolution": {"raw": _safe_metadata(event["metadata_json"]).get("raw_start"), "canonical_utc": event["start_utc"], "display_timezone": display_timezone, "contract": "absolute_utc"}})
 
 
 @bp.route("/api/sports/resolver", methods=["POST"])
@@ -143,7 +152,7 @@ def provider_capacities():
         _prepare(conn)
         if request.method == "POST":
             body = request.get_json(silent=True) or {}
-            provider = str(body.get("provider", "")).strip().casefold()
+            provider = normalize_provider(body.get("provider"))
             try: maximum = int(body.get("max_concurrent"))
             except (TypeError, ValueError): maximum = 0
             if not provider or maximum < 1: return jsonify({"ok": False, "error": "provider and positive max_concurrent are required"}), 400

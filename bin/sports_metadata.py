@@ -23,6 +23,18 @@ POLICIES = frozenset({"IGNORE", "NORMAL", "PRIORITIZE", "ALWAYS_SCHEDULE"})
 _WORDS = re.compile(r"[^a-z0-9]+")
 
 
+def normalize_provider(value: Any) -> str:
+    """Return the stable provider identity used by capacities and diagnostics.
+
+    Provider strings come from several legacy importers.  A capacity must not
+    be bypassed merely because one importer spells ``X-Tream`` differently
+    from another; equally, an unknown provider remains unconstrained.
+    """
+    raw = _norm(value).replace(" ", "")
+    aliases = {"xtreamcodes": "xtream", "xtreamcode": "xtream", "xtreamiptv": "xtream"}
+    return aliases.get(raw, raw)
+
+
 def utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -136,8 +148,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
       priority INTEGER NOT NULL DEFAULT 0, reason_json TEXT NOT NULL DEFAULT '{}', lane_id INTEGER,
       PRIMARY KEY(canonical_event_id, generation_utc));
     CREATE TABLE IF NOT EXISTS provider_capacities (
-      provider TEXT PRIMARY KEY, max_concurrent INTEGER NOT NULL CHECK(max_concurrent > 0),
+      provider TEXT PRIMARY KEY COLLATE NOCASE, max_concurrent INTEGER NOT NULL CHECK(max_concurrent > 0),
       updated_utc TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS sports_metadata_state (
+      key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_utc TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS xtream_catalog_categories (
       category_id TEXT PRIMARY KEY, name TEXT NOT NULL, normalized_name TEXT NOT NULL,
       enabled INTEGER NOT NULL DEFAULT 0, ignored INTEGER NOT NULL DEFAULT 0, stream_count INTEGER,
@@ -147,6 +161,23 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_rules_target ON sports_rules(target_type, target_id, enabled);
     CREATE INDEX IF NOT EXISTS idx_canonical_events_time ON canonical_events(start_utc);
     """)
+    # Existing databases predate the normalized, NOCASE declaration above.
+    # Coalesce aliases transactionally so ``Xtream`` and ``xtream-codes`` do
+    # not become independent capacity buckets.  The smaller limit is the only
+    # safe deterministic choice when old duplicate rows disagree.
+    capacity_rows = conn.execute("SELECT provider,max_concurrent,updated_utc FROM provider_capacities").fetchall()
+    normalized_capacities: dict[str, tuple[int, str]] = {}
+    for provider, maximum, updated in capacity_rows:
+        key = normalize_provider(provider)
+        if not key:
+            continue
+        prior = normalized_capacities.get(key)
+        normalized_capacities[key] = (min(int(maximum), prior[0]) if prior else int(maximum),
+                                      max(str(updated or ""), prior[1]) if prior else str(updated or utc_now()))
+    if normalized_capacities and any(str(provider) != normalize_provider(provider) for provider, _, _ in capacity_rows):
+        conn.execute("DELETE FROM provider_capacities")
+        conn.executemany("INSERT INTO provider_capacities(provider,max_concurrent,updated_utc) VALUES(?,?,?)",
+                         [(provider, maximum, updated) for provider, (maximum, updated) in normalized_capacities.items()])
     conn.commit()
 
 
@@ -165,17 +196,22 @@ def _upsert_named(conn: sqlite3.Connection, table: str, name: str, *, sport_id: 
     elif table == "leagues":
         row = conn.execute("SELECT id FROM leagues WHERE sport_id IS ? AND normalized_name=?", (sport_id, normalized)).fetchone()
         identifier = row[0] if row else _key("league", sport_id, normalized)
-        conn.execute("INSERT INTO leagues(id,sport_id,name,normalized_name,created_utc,updated_utc) VALUES(?,?,?,?,?,?) "
-                     "ON CONFLICT(sport_id,normalized_name) DO UPDATE SET name=excluded.name,updated_utc=excluded.updated_utc",
-                     (identifier, sport_id, name, normalized, utc_now(), utc_now()))
+        if row:
+            conn.execute("UPDATE leagues SET name=?,updated_utc=? WHERE id=?", (name, utc_now(), identifier))
+        else:
+            conn.execute("INSERT INTO leagues(id,sport_id,name,normalized_name,created_utc,updated_utc) VALUES(?,?,?,?,?,?)",
+                         (identifier, sport_id, name, normalized, utc_now(), utc_now()))
     else:
         row = conn.execute("SELECT id FROM teams WHERE league_id IS ? AND normalized_name=?", (league_id, normalized)).fetchone()
         identifier = row[0] if row else _key("team", league_id, normalized)
         prior = conn.execute("SELECT aliases_json FROM teams WHERE id=?", (identifier,)).fetchone()
         merged = sorted({_norm(x): x for x in [*(_json(prior[0]) if prior else []), *aliases] if _norm(x)}.values(), key=str.casefold)
-        conn.execute("INSERT INTO teams(id,sport_id,league_id,name,normalized_name,aliases_json,created_utc,updated_utc) VALUES(?,?,?,?,?,?,?,?) "
-                     "ON CONFLICT(league_id,normalized_name) DO UPDATE SET name=excluded.name, aliases_json=excluded.aliases_json, updated_utc=excluded.updated_utc",
-                     (identifier, sport_id, league_id, name, normalized, json.dumps(merged), utc_now(), utc_now()))
+        if row:
+            conn.execute("UPDATE teams SET name=?,aliases_json=?,updated_utc=? WHERE id=?",
+                         (name, json.dumps(merged), utc_now(), identifier))
+        else:
+            conn.execute("INSERT INTO teams(id,sport_id,league_id,name,normalized_name,aliases_json,created_utc,updated_utc) VALUES(?,?,?,?,?,?,?,?)",
+                         (identifier, sport_id, league_id, name, normalized, json.dumps(merged), utc_now(), utc_now()))
     return identifier
 
 
@@ -196,6 +232,21 @@ def _participants(data: Mapping[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _title_participants(title: Any) -> list[dict[str, Any]]:
+    """Conservative fallback for provider names that omit competitor objects."""
+    text = str(title or "").strip()
+    # A provider prefix/date may precede the actual fixture; use the final
+    # pipe segment to avoid treating a category label as a team.
+    text = text.rsplit("|", 1)[-1].strip()
+    match = re.search(r"(?P<away>.+?)\s+(?:at|vs\.?|v\.?|x)\s+(?P<home>.+)$", text, re.IGNORECASE)
+    if not match:
+        return []
+    away, home = (" ".join(match.group(key).split(" - ")[-1].split()) for key in ("away", "home"))
+    if not away or not home or _norm(away) == _norm(home):
+        return []
+    return [{"name": away, "role": "away"}, {"name": home, "role": "home"}]
+
+
 def event_fingerprint(*, sport: str | None, league: str | None, participants: Iterable[Mapping[str, Any]],
                       event_type: str | None, start_utc: str) -> str:
     # Roles are material when authoritative; non-team events simply have an
@@ -206,29 +257,52 @@ def event_fingerprint(*, sport: str | None, league: str | None, participants: It
 
 def _event_candidates(conn: sqlite3.Connection, *, sport_id: str | None, league_id: str | None,
                       start: datetime, participants: list[dict[str, Any]], event_type: str | None) -> tuple[str | None, float, dict]:
-    """Cautious deterministic match: 0.85 auto; ambiguity is unresolved."""
+    """Match structured event identity without merging concurrent fixtures.
+
+    League/time are a candidate *scope*, never enough evidence to merge.  An
+    exact participant set (and, where supplied, home/away roles) wins even
+    during an NFL Sunday slate.  Incomplete or mascot-only input stays
+    unresolved rather than risking a false merge.
+    """
     # SQLite compares ISO text; use UTC ISO bounds rather than epoch integers.
     lower = datetime.fromtimestamp(start.timestamp() - 600, UTC).isoformat().replace("+00:00", "Z")
     upper = datetime.fromtimestamp(start.timestamp() + 600, UTC).isoformat().replace("+00:00", "Z")
     rows = conn.execute("SELECT id,start_utc,event_type FROM canonical_events WHERE sport_id IS ? AND league_id IS ? "
                         "AND start_utc BETWEEN ? AND ?", (sport_id, league_id, lower, upper)).fetchall()
-    wanted = {_norm(p["name"]) for p in participants}
+    wanted = {_norm(p["name"]) for p in participants if _norm(p.get("name"))}
+    wanted_roles = {(_norm(p["name"]), _norm(p.get("role"))) for p in participants if _norm(p.get("name")) and p.get("role") in {"home", "away"}}
     scored = []
     for row in rows:
-        names = {_norm(r[0]) for r in conn.execute("SELECT display_name FROM canonical_event_participants WHERE event_id=?", (row[0],))}
+        participant_rows = conn.execute("SELECT display_name,role FROM canonical_event_participants WHERE event_id=?", (row[0],)).fetchall()
+        names = {_norm(r[0]) for r in participant_rows}
+        roles = {(_norm(r[0]), _norm(r[1])) for r in participant_rows if r[1] in {"home", "away"}}
         overlap = len(wanted & names)
-        score = 0.45 + 0.25 * min(overlap, 2) + (0.1 if _norm(row[2]) == _norm(event_type) else 0)
-        if wanted and wanted == names: score += 0.1
-        scored.append((score, row[0], {"participant_overlap": overlap, "time_tolerance_minutes": 10}))
-    scored.sort(reverse=True)
-    if len(scored) == 1 and scored[0][0] >= .85:
+        exact_set = bool(wanted) and wanted == names
+        role_match = bool(wanted_roles) and wanted_roles == roles
+        # A full two-team identity is strong enough to distinguish concurrent
+        # league fixtures.  One shared token is deliberately not.
+        score = 0.35 + 0.25 * min(overlap, 2)
+        if exact_set:
+            score += 0.35
+        if role_match:
+            score += 0.05
+        if _norm(row[2]) == _norm(event_type):
+            score += 0.03
+        score = min(score, 1.0)
+        scored.append((score, row[0], {"participant_overlap": overlap, "exact_participant_set": exact_set,
+                                       "home_away_match": role_match, "time_tolerance_minutes": 10}))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    if scored and scored[0][0] >= .9 and (len(scored) == 1 or scored[0][0] > scored[1][0]):
         return scored[0][1], scored[0][0], scored[0][2]
     return None, 0.0, {"candidate_count": len(scored), "reason": "ambiguous_or_insufficient_evidence"}
 
 
-def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_id: str, data: Mapping[str, Any]) -> dict[str, Any]:
+def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_id: str,
+                         data: Mapping[str, Any], commit: bool = True,
+                         schema_ready: bool = False) -> dict[str, Any]:
     """Resolve one structured source record to Fruit-owned canonical identity."""
-    ensure_schema(conn)
+    if not schema_ready:
+        ensure_schema(conn)
     source = _norm(source) or "unknown"
     prior = conn.execute("SELECT canonical_event_id FROM source_event_records WHERE source=? AND source_event_id=?", (source, str(source_event_id))).fetchone()
     raw = _json(data.get("raw_attributes_json"))
@@ -277,24 +351,48 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     conn.execute("INSERT INTO source_event_records(source,source_event_id,canonical_event_id,confidence,resolution_kind,evidence_json,raw_json,last_seen_utc) VALUES(?,?,?,?,?,?,?,?) "
                  "ON CONFLICT(source,source_event_id) DO UPDATE SET canonical_event_id=excluded.canonical_event_id,confidence=excluded.confidence,resolution_kind=excluded.resolution_kind,evidence_json=excluded.evidence_json,raw_json=excluded.raw_json,last_seen_utc=excluded.last_seen_utc",
                  (source, str(source_event_id), canonical_id, confidence, kind, json.dumps(evidence), json.dumps(raw), utc_now()))
-    conn.commit()
+    if commit:
+        conn.commit()
     return {"resolved": True, "canonical_event_id": canonical_id, "confidence": confidence, "resolution_kind": kind, "start_utc": start_text}
 
 
+def _legacy_sync_fingerprint(conn: sqlite3.Connection) -> str:
+    """Cheap change detector; avoids a full canonical backfill on every API hit."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    last_seen = ", COALESCE(MAX(last_seen_utc), '')" if "last_seen_utc" in columns else ""
+    row = conn.execute(f"SELECT COUNT(*), COALESCE(MAX(start_utc), ''), COALESCE(MAX(end_utc), ''){last_seen} FROM events WHERE start_utc IS NOT NULL").fetchone()
+    return "|".join(map(str, row))
+
+
 def sync_legacy_events(conn: sqlite3.Connection) -> dict[str, int]:
-    """Backfill canonical records from existing imported events, idempotently."""
+    """Incrementally backfill canonical records from existing imported events."""
     ensure_schema(conn)
     columns = {r[1] for r in conn.execute("PRAGMA table_info(events)")}
     if not {"id", "start_utc"}.issubset(columns): return {"resolved": 0, "skipped": 0}
+    fingerprint = _legacy_sync_fingerprint(conn)
+    state = conn.execute("SELECT value FROM sports_metadata_state WHERE key='legacy_events_fingerprint'").fetchone()
+    if state and state[0] == fingerprint:
+        return {"resolved": 0, "skipped": 0, "unchanged": 1}
     rows = conn.execute("SELECT * FROM events WHERE start_utc IS NOT NULL").fetchall()
     resolved = skipped = 0
     for row in rows:
         data = dict(row)
         raw = _json(data.get("raw_attributes_json"))
-        data.update({"sport_name": raw.get("sport_name"), "league_name": raw.get("league_name"), "competitors": raw.get("competitors", [])})
-        result = resolve_source_event(conn, source="apple" if str(data.get("id", "")).startswith("appletv-") else str(data.get("channel_provider_id") or "legacy"), source_event_id=str(data["id"]), data=data)
+        classifications = _json(data.get("classification_json"))
+        classified = {str(item.get("type")): item.get("value") for item in classifications if isinstance(item, Mapping)} if isinstance(classifications, list) else {}
+        sport = raw.get("sport_name") or raw.get("sport") or classified.get("sport")
+        league = raw.get("league_name") or raw.get("league") or raw.get("series") or classified.get("league")
+        competitors = raw.get("competitors") or raw.get("participants") or _title_participants(data.get("title") or raw.get("original_stream_name"))
+        data.update({"sport_name": sport, "league_name": league, "competitors": competitors})
+        source = ("apple" if str(data.get("id", "")).startswith("appletv-")
+                  else "xtream" if raw.get("provider") == "xtream" or str(data.get("id", "")).startswith("xtream:")
+                  else str(data.get("channel_provider_id") or "legacy"))
+        result = resolve_source_event(conn, source=source, source_event_id=str(data["id"]), data=data, commit=False, schema_ready=True)
         resolved += int(bool(result.get("resolved"))); skipped += int(not result.get("resolved"))
-    return {"resolved": resolved, "skipped": skipped}
+    conn.execute("INSERT INTO sports_metadata_state(key,value,updated_utc) VALUES('legacy_events_fingerprint',?,?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_utc=excluded.updated_utc", (fingerprint, utc_now()))
+    conn.commit()
+    return {"resolved": resolved, "skipped": skipped, "unchanged": 0}
 
 
 def save_rule(conn: sqlite3.Connection, *, target_type: str, target_id: str, policy: str,
@@ -319,7 +417,8 @@ def applicable_rule(conn: sqlite3.Connection, canonical_event_id: str) -> dict[s
     event = dict(event)
     team_ids = [r[0] for r in conn.execute("SELECT team_id FROM canonical_event_participants WHERE event_id=? AND team_id IS NOT NULL", (canonical_event_id,))]
     candidates = [("event", canonical_event_id, 5), *[("team", t, 4) for t in team_ids],
-                  ("competition", event.get("competition") or "", 3), ("league", event.get("league_id") or "", 2), ("sport", event.get("sport_id") or "", 1)]
+                  ("league", event.get("league_id") or "", 3), ("competition", event.get("competition") or "", 2),
+                  ("sport", event.get("sport_id") or "", 1)]
     for target_type, target_id, specificity in candidates:
         if not target_id: continue
         row = conn.execute("SELECT * FROM sports_rules WHERE enabled=1 AND target_type=? AND target_id=? AND (event_type='' OR event_type=?) ORDER BY CASE WHEN event_type='' THEN 0 ELSE 1 END DESC, id DESC LIMIT 1", (target_type, target_id, event.get("event_type") or "")).fetchone()
@@ -347,8 +446,10 @@ def coverage(conn: sqlite3.Connection, *, days: int = 14) -> list[dict[str, Any]
             lane = conn.execute(f"SELECT lane_id FROM lane_events WHERE event_id IN ({marks}) AND COALESCE(is_placeholder,0)=0 ORDER BY start_utc LIMIT 1", legacy_ids).fetchone()
         decision = conn.execute("SELECT decision,reason_json FROM scheduling_decisions WHERE canonical_event_id=? ORDER BY generation_utc DESC LIMIT 1", (event["id"],)).fetchone()
         status = "scheduled" if lane else ("playable_found" if playable_count else "awaiting_source")
-        if decision and decision[0] in {"provider_concurrency", "lane_capacity"}:
-            status = "resource_conflict"
+        if decision and decision[0] == "provider_capacity_conflict":
+            status = "provider_capacity_conflict"
+        elif decision and decision[0] == "lane_capacity_conflict":
+            status = "lane_capacity_conflict"
         participants = [dict(r) for r in conn.execute("SELECT display_name,role FROM canonical_event_participants WHERE event_id=?", (event["id"],))]
         result.append({"canonical_event_id": event["id"], "title": event.get("title"), "start_utc": event["start_utc"], "participants": participants, "rule": rule["policy"], "coverage_state": status, "playable_count": playable_count, "lane_id": lane[0] if lane else None, "decision": decision[0] if decision else None})
     return result

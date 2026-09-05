@@ -356,6 +356,24 @@ class XtreamClient:
         return self._get("get_live_streams", category_id=category_id)
 
 
+
+    def get_account_max_connections(self) -> Optional[int]:
+        """Read an optional provider limit without retaining authenticated data."""
+        try:
+            response = self.session.get(
+                f"{self.config.server_url}/player_api.php",
+                params={"username": self.config.username, "password": self.config.password},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            value = (payload.get("user_info") or {}).get("max_connections") if isinstance(payload, dict) else None
+            maximum = int(value)
+            return maximum if maximum > 0 else None
+        except Exception:
+            # Never surface exception text: an HTTP client can include the
+            # authenticated request URL. Unknown capacity is unconstrained.
+            return None
 def stable_event_id(category_id: Any, stream_id: Any) -> str:
     identity = f"{PROVIDER}\0{category_id}\0{stream_id}".encode("utf-8")
     return f"xtream:{hashlib.sha256(identity).hexdigest()[:24]}"
@@ -982,8 +1000,18 @@ def run(db_path: Path, environ: Optional[Mapping[str, str]] = None,
     try:
         config = load_config(conn, environ)
         config.validate()
-        categories, streams = fetch_snapshot(client_factory(config), config)
-        return ingest_payload(conn, categories, streams, config)
+        client = client_factory(config)
+        categories, streams = fetch_snapshot(client, config)
+        result = ingest_payload(conn, categories, streams, config)
+        maximum = client.get_account_max_connections()
+        if maximum:
+            from sports_metadata import ensure_schema
+            ensure_schema(conn)
+            conn.execute("INSERT OR IGNORE INTO provider_capacities(provider,max_concurrent,updated_utc) VALUES('xtream',?,?)",
+                         (maximum, datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")))
+            conn.commit()
+            result["provider_capacity_discovered"] = maximum
+        return result
     finally:
         conn.close()
 

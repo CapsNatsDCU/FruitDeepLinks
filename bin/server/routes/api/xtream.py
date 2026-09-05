@@ -70,6 +70,28 @@ def _catalog_rows(conn, query=""):
     )]
 
 
+def _recommendation_score(row, tokens):
+    """Score category plus bounded cached preview names using structured tokens."""
+    haystacks = [("category", str(row.get("name") or "").casefold())]
+    try:
+        samples = json.loads(row.get("samples_json") or "[]")
+    except (TypeError, ValueError):
+        samples = []
+    for sample in samples[:25]:
+        if isinstance(sample, dict):
+            haystacks.append(("sample_stream", str(sample.get("name") or "").casefold()))
+    reasons = []
+    for token in sorted(tokens):
+        if len(token) < 3:
+            continue
+        locations = sorted({kind for kind, text in haystacks if token in text})
+        if locations:
+            reasons.append({"match": token, "evidence": locations})
+    # Participant/league evidence receives several independent matches; a
+    # category title alone cannot silently enable anything.
+    return len(reasons), reasons
+
+
 @bp.route("/api/xtream/discovery/scan", methods=["POST"])
 def api_xtream_discovery_scan():
     """Persist category metadata only; scan never changes selected IDs."""
@@ -150,7 +172,11 @@ def api_xtream_discovery_ignore(category_id):
 
 @bp.route("/api/xtream/discovery/recommendations")
 def api_xtream_discovery_recommendations():
-    """Rank disabled categories using canonical wanted metadata, never raw aliases alone."""
+    """Rank disabled categories from wanted identities and bounded samples.
+
+    ``preview=1`` may refresh at most five likely categories and samples only
+    the first 25 names.  It never changes category selection.
+    """
     _ensure_database()
     try:
         with get_conn() as conn:
@@ -162,15 +188,34 @@ def api_xtream_discovery_recommendations():
                 marks = ",".join("?" for _ in event_ids)
                 for row in conn.execute(f"SELECT s.name,l.name FROM canonical_events ce LEFT JOIN sports s ON s.id=ce.sport_id LEFT JOIN leagues l ON l.id=ce.league_id WHERE ce.id IN ({marks})", event_ids):
                     tokens.update(str(value).casefold() for value in row if value)
+            catalog = [row for row in _catalog_rows(conn)
+                       if not row["enabled"] and not row["ignored"] and not row.get("disappeared_utc")]
+            previewed = []
+            if request.args.get("preview") in {"1", "true"}:
+                # Avoid broad provider walks: only a handful of categories
+                # whose metadata has at least a sport/league hint are sampled.
+                likely = [row for row in catalog if any(token in row["name"].casefold() for token in tokens if len(token) > 2)]
+                if likely:
+                    config, client = _configured_client(conn)
+                    now = utc_now()
+                    for row in likely[:5]:
+                        streams = client.get_live_streams(str(row["category_id"]))
+                        samples = [{"stream_id": str(item.get("stream_id") or ""), "name": str(item.get("name") or "")}
+                                   for item in streams[:25]]
+                        conn.execute("UPDATE xtream_catalog_categories SET stream_count=?,samples_json=?,last_seen_utc=? WHERE category_id=?",
+                                     (len(streams), json.dumps(samples), now, row["category_id"]))
+                        row["stream_count"], row["samples_json"] = len(streams), json.dumps(samples)
+                        previewed.append(row["category_id"])
+                    conn.commit()
             recommendations = []
-            for row in _catalog_rows(conn):
-                if row["enabled"] or row["ignored"] or row.get("disappeared_utc"): continue
-                haystack = row["name"].casefold()
-                hits = sorted(token for token in tokens if len(token) > 2 and token in haystack)
-                if hits:
-                    recommendations.append({"category_id": row["category_id"], "category_name": row["name"], "score": len(hits), "reasons": hits})
+            for row in catalog:
+                score, reasons = _recommendation_score(row, tokens)
+                if score:
+                    recommendations.append({"category_id": row["category_id"], "category_name": row["name"], "score": score,
+                                            "reasons": reasons, "sampled": bool(row.get("samples_json") and row.get("samples_json") != "[]")})
         recommendations.sort(key=lambda x: (-x["score"], x["category_name"].casefold(), x["category_id"]))
-        return jsonify({"status": "success", "recommendations": recommendations})
+        return jsonify({"status": "success", "recommendations": recommendations, "previewed_category_ids": previewed,
+                        "selection_changed": False})
     except Exception as exc:
         return _safe_error(exc)
 

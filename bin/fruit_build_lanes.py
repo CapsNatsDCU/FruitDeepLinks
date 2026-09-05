@@ -9,7 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple
 # Optional filter integration (service preferences + playables)
 FILTERING_AVAILABLE = False
 try:
-    from filter_integration import load_user_preferences, get_best_playable_for_event, should_include_event
+    from filter_integration import (load_user_preferences, get_best_playable_for_event,
+                                    get_filtered_playables, should_include_event)
     from team_preferences import match_favorite_teams
 
     FILTERING_AVAILABLE = True
@@ -61,6 +62,7 @@ class Event:
     canonical_event_id: Optional[str] = None
     sports_priority: int = 0
     sports_rule: str = "NORMAL"
+    legacy_event_ids: Tuple[str, ...] = ()
 
 
 def ms_to_dt(ts_ms: int) -> datetime:
@@ -113,7 +115,10 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int) -> List[Event]
     try:
         from sports_metadata import applicable_rule, sync_legacy_events
         sync_legacy_events(conn)
-    except Exception:
+    except Exception as exc:
+        # Canonical enrichment must never silently alter legacy availability.
+        # Continue with the existing rows, but leave an actionable diagnostic.
+        print(f"Warning: canonical sports sync failed; using legacy fallback ({type(exc).__name__}: {exc})")
         applicable_rule = None
     
     # Load user preferences if filtering is available
@@ -167,17 +172,11 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int) -> List[Event]
 
         # Use the database columns directly (works for both Peacock and Apple TV)
         try:
-            start_dt = datetime.fromisoformat(start_utc.replace("Z", "+00:00"))
-            if start_dt.tzinfo is None:
-                start_dt = start_dt.replace(tzinfo=timezone.utc)
-            else:
-                start_dt = start_dt.astimezone(timezone.utc)
-
-            end_dt = datetime.fromisoformat(end_utc.replace("Z", "+00:00"))
-            if end_dt.tzinfo is None:
-                end_dt = end_dt.replace(tzinfo=timezone.utc)
-            else:
-                end_dt = end_dt.astimezone(timezone.utc)
+            from sports_metadata import utc_instant
+            start_dt = utc_instant(start_utc)
+            end_dt = utc_instant(end_utc)
+            if not start_dt or not end_dt:
+                raise ValueError("event columns contain a naive or invalid timestamp")
         except Exception:
             # Fallback: try to parse from raw_attributes_json (Peacock-style)
             try:
@@ -239,7 +238,35 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int) -> List[Event]
                   canonical_event_id, sports_priority, sports_rule)
         )
 
-    events.sort(key=lambda e: (-e.sports_priority, e.start, e.event_id))
+    # A canonical event is one scheduling candidate even when Apple, Xtream,
+    # or another source supplied several legacy event rows.  Keep legacy rows
+    # untouched: they remain the source of playable alternatives and exports.
+    grouped: Dict[str, List[Event]] = {}
+    ungrouped: List[Event] = []
+    for event in events:
+        (grouped.setdefault(event.canonical_event_id, []).append(event)
+         if event.canonical_event_id else ungrouped.append(event))
+    canonical_events: List[Event] = []
+    for canonical_id, rows in grouped.items():
+        rows.sort(key=lambda item: (item.start, item.event_id))
+        representative = rows[0]
+        canonical_events.append(Event(
+            representative.event_id, representative.pvid, representative.slug,
+            representative.title, representative.channel_name,
+            min(item.start for item in rows), max(item.end_padded for item in rows),
+            canonical_id, representative.sports_priority, representative.sports_rule,
+            tuple(item.event_id for item in rows),
+        ))
+    for event in ungrouped:
+        canonical_events.append(Event(
+            event.event_id, event.pvid, event.slug, event.title, event.channel_name,
+            event.start, event.end_padded, None, event.sports_priority, event.sports_rule,
+            (event.event_id,),
+        ))
+    # Chronology is inviolable.  Priority is used only between overlapping
+    # candidates by the allocator below, never to move next week's game ahead
+    # of a non-overlapping game today.
+    events = sorted(canonical_events, key=lambda e: (e.start, e.event_id))
     
     if filtered_count > 0:
         print(f"Sports/League filters: removed {filtered_count} events")
@@ -300,6 +327,11 @@ def build_lanes_with_placeholders(
     conn: sqlite3.Connection, events: List[Event], lane_count: int
 ):
     cur = conn.cursor()
+    # Public callers (including the dry-run) share the exact production
+    # allocator.  Normalize input order here as a final guard, not only in
+    # load_future_events, so deterministic tie-breaking cannot depend on a
+    # caller's database/query order.
+    events = sorted(events, key=lambda event: (event.start, event.event_id))
     if not events:
         print("No future events")
         return
@@ -340,28 +372,34 @@ def build_lanes_with_placeholders(
     playable_cache: Dict[str, Optional[Dict[str, Any]]] = {}
     if FILTERING_AVAILABLE:
         for ev in events:
-            best = None
-            if ev.event_id:
+            ranked: List[Dict[str, Any]] = []
+            seen_playables = set()
+            for legacy_id in ev.legacy_event_ids or (ev.event_id,):
                 try:
-                    best = get_best_playable_for_event(
-                        conn, ev.event_id, enabled_services,
-                        priority_map=priority_map,
-                        amazon_penalty=amazon_penalty,
+                    choices = get_filtered_playables(
+                        conn, legacy_id, enabled_services,
+                        priority_map=priority_map, amazon_penalty=amazon_penalty,
                         language_preference=language_preference,
                         prefer_favorite_team_broadcaster=prefer_favorite_team_broadcaster,
                         favorite_teams=favorite_teams,
                     )
-                except Exception:
-                    best = None
-            playable_cache[ev.event_id] = best
+                except Exception as exc:
+                    print(f"Warning: playable ranking failed for {legacy_id}: {type(exc).__name__}")
+                    choices = []
+                for choice in choices:
+                    marker = (choice.get("event_id"), choice.get("playable_id"))
+                    if marker not in seen_playables:
+                        seen_playables.add(marker)
+                        ranked.append(choice)
+            playable_cache[ev.event_id] = ranked
 
         # Apply provider filtering: if user has explicitly enabled services and
         # this event has no playable in that set, drop it from lane planning.
         filtered_events: List[Event] = []
         filtered_out = 0
         for ev in events:
-            best = playable_cache.get(ev.event_id)
-            if enabled_services and best is None:
+            best = playable_cache.get(ev.event_id, [])
+            if enabled_services and not best:
                 filtered_out += 1
                 continue
             filtered_events.append(ev)
@@ -376,14 +414,9 @@ def build_lanes_with_placeholders(
         print("No future events after applying provider filters")
         return
 
-    # Limited lanes are allocated to validated favorite events first.  This is
-    # a ranking modifier, not a filter: every event remains eligible and a
-    # false/ambiguous alias can never consume a lane.
-    if favorite_teams:
-        def lane_priority(event: Event) -> tuple[int, datetime]:
-            identity = {"title": event.title, "channel_name": event.channel_name}
-            return (-event.sports_priority, 0 if match_favorite_teams(identity, favorite_teams) else 1, event.start, event.event_id)
-        events.sort(key=lane_priority)
+    # Do not globally sort by a sports/favorite rule here.  A greedy interval
+    # allocator must encounter time in chronological order; conflict priority
+    # is applied only when candidates actually overlap below.
 
     now = datetime.now(timezone.utc)
     earliest_start = min(e.start for e in events)
@@ -419,42 +452,96 @@ def build_lanes_with_placeholders(
     table_names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     provider_capacities = {}
     if "provider_capacities" in table_names:
-        provider_capacities = {row[0]: int(row[1]) for row in conn.execute(
+        from sports_metadata import normalize_provider
+        provider_capacities = {normalize_provider(row[0]): int(row[1]) for row in conn.execute(
             "SELECT provider,max_concurrent FROM provider_capacities"
         )}
-    provider_events: Dict[str, List[Event]] = {}
     decision_rows: List[Tuple[str, str, int, str, Optional[int]]] = []
+    scheduled: List[Tuple[Event, int, Dict[str, Any]]] = []
+    selected_playables: Dict[str, Dict[str, Any]] = {}
+
+    def _provider(playable: Dict[str, Any]) -> str:
+        try:
+            from sports_metadata import normalize_provider
+            return normalize_provider(playable.get("provider"))
+        except ImportError:
+            return str(playable.get("provider") or "").strip().casefold()
+
+    def _priority(event: Event) -> Tuple[int, int, str]:
+        favorite = 0
+        if favorite_teams:
+            favorite = int(bool(match_favorite_teams(
+                {"title": event.title, "channel_name": event.channel_name}, favorite_teams
+            )))
+        # Event/team/league/sport policies already map to sports_priority.
+        # Retain legacy favorite affinity only as a secondary conflict tie-break.
+        return (event.sports_priority, favorite, event.event_id)
+
+    def _has_provider_capacity(event: Event, playable: Dict[str, Any], ignored: Optional[Event] = None) -> bool:
+        provider = _provider(playable)
+        limit = provider_capacities.get(provider)
+        if not provider or limit is None:
+            return True
+        active = [entry for entry, _, selected in scheduled
+                  if entry is not ignored and _provider(selected) == provider
+                  and entry.start < event.end_padded and entry.end_padded > event.start]
+        return len(active) < limit
+
+    def _select_playable(event: Event, ignored: Optional[Event] = None) -> Optional[Dict[str, Any]]:
+        for playable in playable_cache.get(event.event_id, []):
+            if _has_provider_capacity(event, playable, ignored):
+                return playable
+        return None
 
     for ev in events:
-        best = playable_cache.get(ev.event_id)
-        provider = (best or {}).get("provider")
-        capacity = provider_capacities.get(provider) if provider else None
-        if capacity:
-            overlapping = [other for other in provider_events.get(provider, [])
-                           if other.start < ev.end_padded and other.end_padded > ev.start]
-            if len(overlapping) >= capacity:
-                dropped.append(ev)
-                if ev.canonical_event_id:
-                    decision_rows.append((ev.canonical_event_id, "provider_concurrency", ev.sports_priority,
-                                          json.dumps({"provider": provider, "capacity": capacity}), None))
-                continue
-        placed = False
-        for idx in range(lane_count):
-            if lane_ends[idx] <= ev.start:
-                lane_events[idx].append(ev)
-                lane_ends[idx] = ev.end_padded
-                placed = True
-                if provider:
-                    provider_events.setdefault(provider, []).append(ev)
-                if ev.canonical_event_id:
-                    decision_rows.append((ev.canonical_event_id, "scheduled", ev.sports_priority,
-                                          json.dumps({"rule": ev.sports_rule, "provider": provider}), idx + 1))
-                break
-        if not placed:
+        best = _select_playable(ev)
+        if not best and playable_cache.get(ev.event_id):
             dropped.append(ev)
             if ev.canonical_event_id:
-                decision_rows.append((ev.canonical_event_id, "lane_capacity", ev.sports_priority,
+                attempted = sorted({_provider(choice) for choice in playable_cache[ev.event_id] if _provider(choice)})
+                decision_rows.append((ev.canonical_event_id, "provider_capacity_conflict", ev.sports_priority,
+                                      json.dumps({"providers": attempted,
+                                                  "limits": {name: provider_capacities.get(name) for name in attempted}}), None))
+            continue
+
+        free_lane = next((index for index, end in enumerate(lane_ends) if end <= ev.start), None)
+        if free_lane is None:
+            active = [(entry, lane, selected) for entry, lane, selected in scheduled if entry.end_padded > ev.start]
+            # All entries were added chronologically, so active entries are the
+            # only real competitors.  Replace exactly one lower-priority event;
+            # later non-overlapping events are never considered or displaced.
+            victim = min(active, key=lambda item: (_priority(item[0])[0], _priority(item[0])[1], item[0].event_id), default=None)
+            if victim and _priority(ev)[:2] > _priority(victim[0])[:2]:
+                replacement = _select_playable(ev, ignored=victim[0])
+                if replacement:
+                    old_event, free_lane, old_playable = victim
+                    lane_events[free_lane].remove(old_event)
+                    scheduled.remove(victim)
+                    selected_playables.pop(old_event.event_id, None)
+                    dropped.append(old_event)
+                    if old_event.canonical_event_id:
+                        decision_rows.append((old_event.canonical_event_id, "lane_capacity_conflict", old_event.sports_priority,
+                                              json.dumps({"displaced_by": ev.canonical_event_id or ev.event_id}), None))
+                    best = replacement
+                else:
+                    free_lane = None
+            else:
+                free_lane = None
+        if free_lane is None:
+            dropped.append(ev)
+            if ev.canonical_event_id:
+                decision_rows.append((ev.canonical_event_id, "lane_capacity_conflict", ev.sports_priority,
                                       json.dumps({"rule": ev.sports_rule}), None))
+            continue
+
+        lane_events[free_lane].append(ev)
+        lane_events[free_lane].sort(key=lambda item: (item.start, item.event_id))
+        lane_ends[free_lane] = max((item.end_padded for item in lane_events[free_lane]), default=placeholder_start_global)
+        scheduled.append((ev, free_lane, best or {}))
+        selected_playables[ev.event_id] = best or {}
+        if ev.canonical_event_id:
+            decision_rows.append((ev.canonical_event_id, "scheduled", ev.sports_priority,
+                                  json.dumps({"rule": ev.sports_rule, "provider": _provider(best or {})}), free_lane + 1))
 
     if decision_rows and "scheduling_decisions" in table_names:
         generated = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -513,9 +600,7 @@ def build_lanes_with_placeholders(
             chosen_logical_service: Optional[str] = None
             chosen_deeplink: Optional[str] = None
 
-            best = None
-            if FILTERING_AVAILABLE and ev.event_id:
-                best = playable_cache.get(ev.event_id)
+            best = selected_playables.get(ev.event_id)
 
             if best:
                 chosen_playable_id = best.get("playable_id")

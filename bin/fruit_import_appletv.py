@@ -113,13 +113,18 @@ def iso_to_ms(iso_str: Optional[str]) -> Optional[int]:
     if not iso_str: return None
     try:
         dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        # Apple timestamps with Z/offset are already absolute.  A bare wall
+        # time has no safe interpretation in this importer, so reject it
+        # rather than letting the host locale turn it into a double shift.
+        if dt.tzinfo is None:
+            return None
         return int(dt.timestamp() * 1000)
     except Exception:
         return None
 
 def ms_to_iso(ts_ms: Optional[int]) -> Optional[str]:
     if ts_ms is None: return None
-    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat(timespec="seconds")
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 PREFERRED_WIDTH = 1280
 PREFERRED_HEIGHT = 720
