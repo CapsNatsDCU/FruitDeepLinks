@@ -396,7 +396,10 @@ def get_filtered_playables(
             "stream_metadata_json", "category_name", "subcategory_name", "network",
             "stream_id", "stream_extension",
         ) if c in available_cols]
-        select_cols = base_cols + optional_cols
+        # Older Apple-only databases legitimately predate ESPN enrichment
+        # columns.  Select only columns present in that schema, then provide
+        # neutral defaults below so normal provider ranking remains usable.
+        select_cols = [column for column in base_cols if column in available_cols] + optional_cols
 
         cur.execute(
             f"""
@@ -412,6 +415,8 @@ def get_filtered_playables(
         playables: List[Dict[str, Any]] = []
         for row in rows:
             playable: Dict[str, Any] = dict(zip(select_cols, row))
+            for column in base_cols:
+                playable.setdefault(column, None)
             playable.setdefault("locale_fallback", 0)
             playable.setdefault("feed_name", None)
             playable.setdefault("feed_type", None)

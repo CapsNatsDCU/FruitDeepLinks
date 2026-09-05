@@ -15,6 +15,7 @@ from fruit_build_lanes import (Event, build_lanes_with_placeholders, create_lane
 from fruit_export_lanes import build_lanes_xmltv
 from fruit_import_appletv import (ensure_events_schema, iso_to_ms, map_apple_to_fruit,
                                   ms_to_iso, upsert_event)
+from filter_integration import get_filtered_playables
 from sports_metadata import applicable_rule, ensure_schema, resolve_source_event, save_rule
 from sports_scheduler import simulate
 from xtream_ingest import parse_timestamp
@@ -255,6 +256,16 @@ class SportsSchedulerHardeningTests(unittest.TestCase):
             programme = next(item for item in ET.parse(xml_path).findall("programme")
                              if item.attrib["start"] == "20261101053000 +0000")
         self.assertEqual("20261101053000 +0000", programme.attrib["start"])
+
+    def test_playable_ranking_supports_pre_espn_enrichment_schema(self):
+        ensure_events_schema(self.conn)
+        self.conn.execute(
+            "INSERT INTO playables(event_id,playable_id,provider,service_name,logical_service,deeplink_play,deeplink_open,playable_url,title,content_id,priority,created_utc) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("legacy", "legacy-playable", "apple-tv-plus", "Apple TV+", "apple_tv_plus", "apple://play", None,
+             None, "Legacy event", "legacy", 1, "2026-01-01T00:00:00Z"),
+        )
+        ranked = get_filtered_playables(self.conn, "legacy", [])
+        self.assertEqual(["legacy-playable"], [item["playable_id"] for item in ranked])
 
     def test_explicit_rule_policies_flow_from_canonical_identity_to_lane_result(self):
         ensure_events_schema(self.conn)
