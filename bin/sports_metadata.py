@@ -175,9 +175,19 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         normalized_capacities[key] = (min(int(maximum), prior[0]) if prior else int(maximum),
                                       max(str(updated or ""), prior[1]) if prior else str(updated or utc_now()))
     if normalized_capacities and any(str(provider) != normalize_provider(provider) for provider, _, _ in capacity_rows):
-        conn.execute("DELETE FROM provider_capacities")
-        conn.executemany("INSERT INTO provider_capacities(provider,max_concurrent,updated_utc) VALUES(?,?,?)",
-                         [(provider, maximum, updated) for provider, (maximum, updated) in normalized_capacities.items()])
+        # Keep the destructive rewrite atomic.  A malformed legacy row or a
+        # process interruption must not leave the production database with no
+        # capacity configuration at all.
+        conn.execute("SAVEPOINT normalize_provider_capacities")
+        try:
+            conn.execute("DELETE FROM provider_capacities")
+            conn.executemany("INSERT INTO provider_capacities(provider,max_concurrent,updated_utc) VALUES(?,?,?)",
+                             [(provider, maximum, updated) for provider, (maximum, updated) in normalized_capacities.items()])
+        except Exception:
+            conn.execute("ROLLBACK TO normalize_provider_capacities")
+            conn.execute("RELEASE normalize_provider_capacities")
+            raise
+        conn.execute("RELEASE normalize_provider_capacities")
     conn.commit()
 
 

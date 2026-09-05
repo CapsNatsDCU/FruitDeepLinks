@@ -513,7 +513,12 @@ def build_lanes_with_placeholders(
             victim = min(active, key=lambda item: (_priority(item[0])[0], _priority(item[0])[1], item[0].event_id), default=None)
             if victim and _priority(ev)[:2] > _priority(victim[0])[:2]:
                 replacement = _select_playable(ev, ignored=victim[0])
-                if replacement:
+                # Legacy scheduling intentionally permits a candidate with no
+                # playable rows when service filtering is not enabled.  That
+                # same candidate must still be able to win a lane conflict;
+                # only a non-empty ranked list with every provider at capacity
+                # is a failed replacement.
+                if replacement or not playable_cache.get(ev.event_id):
                     old_event, free_lane, old_playable = victim
                     lane_events[free_lane].remove(old_event)
                     scheduled.remove(victim)
