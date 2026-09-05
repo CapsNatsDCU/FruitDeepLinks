@@ -89,6 +89,39 @@ def resolver_bench():
     return jsonify({"ok": True, "result": result})
 
 
+@bp.route("/api/sports/mappings", methods=["POST"])
+def manual_mapping():
+    """Store an operator-confirmed source-event association above inference."""
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    body = request.get_json(silent=True) or {}
+    source, source_event_id, canonical_event_id = (str(body.get(key, "")).strip() for key in ("source", "source_event_id", "canonical_event_id"))
+    if not all((source, source_event_id, canonical_event_id)):
+        return jsonify({"ok": False, "error": "source, source_event_id, and canonical_event_id are required"}), 400
+    with get_conn() as conn:
+        _prepare(conn)
+        if not conn.execute("SELECT 1 FROM canonical_events WHERE id=?", (canonical_event_id,)).fetchone():
+            return jsonify({"ok": False, "error": "Canonical event not found"}), 404
+        conn.execute("INSERT INTO source_event_records(source,source_event_id,canonical_event_id,confidence,resolution_kind,evidence_json,raw_json,last_seen_utc) VALUES(?,?,?,?,?,?,?,datetime('now')) "
+                     "ON CONFLICT(source,source_event_id) DO UPDATE SET canonical_event_id=excluded.canonical_event_id,confidence=1,resolution_kind='manual_override',evidence_json=excluded.evidence_json,last_seen_utc=excluded.last_seen_utc",
+                     (source.casefold(), source_event_id, canonical_event_id, 1.0, "manual_override", '{"operator_confirmed":true}', '{}'))
+        conn.commit()
+    return jsonify({"ok": True, "resolution_kind": "manual_override"})
+
+
+@bp.route("/api/sports/schedule-simulation", methods=["POST"])
+def schedule_simulation():
+    """Execute the actual allocator on a temporary database, never live lanes."""
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    body = request.get_json(silent=True) or {}
+    lanes = min(max(int(body.get("lanes", 50)), 1), 500)
+    days = min(max(int(body.get("days", 14)), 1), 90)
+    with get_conn() as conn:
+        _prepare(conn)
+        from sports_scheduler import simulate
+        result = simulate(conn, lanes, days)
+    return jsonify({"ok": True, "lanes": lanes, "days": days, **result})
+
+
 @bp.route("/api/sports/health")
 def health():
     if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404

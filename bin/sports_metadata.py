@@ -135,6 +135,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
       canonical_event_id TEXT NOT NULL, generation_utc TEXT NOT NULL, decision TEXT NOT NULL,
       priority INTEGER NOT NULL DEFAULT 0, reason_json TEXT NOT NULL DEFAULT '{}', lane_id INTEGER,
       PRIMARY KEY(canonical_event_id, generation_utc));
+    CREATE TABLE IF NOT EXISTS provider_capacities (
+      provider TEXT PRIMARY KEY, max_concurrent INTEGER NOT NULL CHECK(max_concurrent > 0),
+      updated_utc TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS xtream_catalog_categories (
       category_id TEXT PRIMARY KEY, name TEXT NOT NULL, normalized_name TEXT NOT NULL,
       enabled INTEGER NOT NULL DEFAULT 0, ignored INTEGER NOT NULL DEFAULT 0, stream_count INTEGER,
