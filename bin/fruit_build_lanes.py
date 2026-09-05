@@ -58,6 +58,9 @@ class Event:
     channel_name: Optional[str]
     start: datetime
     end_padded: datetime
+    canonical_event_id: Optional[str] = None
+    sports_priority: int = 0
+    sports_rule: str = "NORMAL"
 
 
 def ms_to_dt(ts_ms: int) -> datetime:
@@ -103,6 +106,15 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int) -> List[Event]
     """Load future events with optional sports/league filtering."""
     now = datetime.now(timezone.utc)
     cutoff = now + timedelta(days=days_ahead)
+
+    # Metadata backfill is deliberately independent of lane storage.  It
+    # makes existing Apple/Xtream events available to Sports Rules without
+    # changing their provider IDs or creating another event scheduler.
+    try:
+        from sports_metadata import applicable_rule, sync_legacy_events
+        sync_legacy_events(conn)
+    except Exception:
+        applicable_rule = None
     
     # Load user preferences if filtering is available
     prefs = {}
@@ -204,12 +216,30 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int) -> List[Event]
         if end_dt > max_end_dt:
             end_dt = max_end_dt
 
+        canonical_event_id = None
+        sports_priority = 0
+        sports_rule = "NORMAL"
+        if applicable_rule:
+            mapping = conn.execute(
+                "SELECT canonical_event_id FROM source_event_records WHERE source_event_id=? ORDER BY confidence DESC LIMIT 1",
+                (event_id,),
+            ).fetchone()
+            if mapping:
+                canonical_event_id = mapping[0]
+                rule = applicable_rule(conn, canonical_event_id)
+                sports_priority = int(rule.get("priority", 0))
+                sports_rule = rule.get("policy", "NORMAL")
+                if sports_rule == "IGNORE":
+                    filtered_count += 1
+                    continue
+
         end_padded = end_dt + timedelta(minutes=PADDING_MINUTES)
         events.append(
-            Event(event_id, pvid, slug, title, channel_name, start_dt, end_padded)
+            Event(event_id, pvid, slug, title, channel_name, start_dt, end_padded,
+                  canonical_event_id, sports_priority, sports_rule)
         )
 
-    events.sort(key=lambda e: e.start)
+    events.sort(key=lambda e: (-e.sports_priority, e.start, e.event_id))
     
     if filtered_count > 0:
         print(f"Sports/League filters: removed {filtered_count} events")
@@ -352,7 +382,7 @@ def build_lanes_with_placeholders(
     if favorite_teams:
         def lane_priority(event: Event) -> tuple[int, datetime]:
             identity = {"title": event.title, "channel_name": event.channel_name}
-            return (0 if match_favorite_teams(identity, favorite_teams) else 1, event.start)
+            return (-event.sports_priority, 0 if match_favorite_teams(identity, favorite_teams) else 1, event.start, event.event_id)
         events.sort(key=lane_priority)
 
     now = datetime.now(timezone.utc)

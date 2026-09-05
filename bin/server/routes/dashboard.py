@@ -67,6 +67,11 @@ def guide_page():
     return _render("guide.html")
 
 
+@bp.route("/my-sports")
+def my_sports_page():
+    return _render("my_sports.html")
+
+
 @bp.route("/events/now")
 def events_now_redirect():
     return redirect("/events?live=1&has_playables=1")

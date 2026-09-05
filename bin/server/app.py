@@ -58,6 +58,7 @@ def create_app() -> Flask:
     from server.routes.api.lanes import bp as lanes_bp
     from server.routes.api.guide import bp as guide_bp
     from server.routes.api.xtream import bp as xtream_bp
+    from server.routes.api.sports import bp as sports_bp
 
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(admin_bp)
@@ -66,5 +67,6 @@ def create_app() -> Flask:
     app.register_blueprint(lanes_bp)
     app.register_blueprint(guide_bp)
     app.register_blueprint(xtream_bp)
+    app.register_blueprint(sports_bp)
 
     return app
