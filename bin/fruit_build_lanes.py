@@ -416,17 +416,51 @@ def build_lanes_with_placeholders(
     lane_ends = [placeholder_start_global for _ in range(lane_count)]
     lane_events: List[List[Event]] = [[] for _ in range(lane_count)]
     dropped: List[Event] = []
+    table_names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    provider_capacities = {}
+    if "provider_capacities" in table_names:
+        provider_capacities = {row[0]: int(row[1]) for row in conn.execute(
+            "SELECT provider,max_concurrent FROM provider_capacities"
+        )}
+    provider_events: Dict[str, List[Event]] = {}
+    decision_rows: List[Tuple[str, str, int, str, Optional[int]]] = []
 
     for ev in events:
+        best = playable_cache.get(ev.event_id)
+        provider = (best or {}).get("provider")
+        capacity = provider_capacities.get(provider) if provider else None
+        if capacity:
+            overlapping = [other for other in provider_events.get(provider, [])
+                           if other.start < ev.end_padded and other.end_padded > ev.start]
+            if len(overlapping) >= capacity:
+                dropped.append(ev)
+                if ev.canonical_event_id:
+                    decision_rows.append((ev.canonical_event_id, "provider_concurrency", ev.sports_priority,
+                                          json.dumps({"provider": provider, "capacity": capacity}), None))
+                continue
         placed = False
         for idx in range(lane_count):
             if lane_ends[idx] <= ev.start:
                 lane_events[idx].append(ev)
                 lane_ends[idx] = ev.end_padded
                 placed = True
+                if provider:
+                    provider_events.setdefault(provider, []).append(ev)
+                if ev.canonical_event_id:
+                    decision_rows.append((ev.canonical_event_id, "scheduled", ev.sports_priority,
+                                          json.dumps({"rule": ev.sports_rule, "provider": provider}), idx + 1))
                 break
         if not placed:
             dropped.append(ev)
+            if ev.canonical_event_id:
+                decision_rows.append((ev.canonical_event_id, "lane_capacity", ev.sports_priority,
+                                      json.dumps({"rule": ev.sports_rule}), None))
+
+    if decision_rows and "scheduling_decisions" in table_names:
+        generated = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        for canonical_id, decision, priority, reason, lane_id in decision_rows:
+            conn.execute("INSERT OR REPLACE INTO scheduling_decisions(canonical_event_id,generation_utc,decision,priority,reason_json,lane_id) VALUES(?,?,?,?,?,?)",
+                         (canonical_id, generated, decision, priority, reason, lane_id))
 
     def add_placeholder(lane_id: int, start: datetime, end: datetime):
         cur.execute(
