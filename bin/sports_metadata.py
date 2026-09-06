@@ -182,6 +182,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_rules_target ON sports_rules(target_type, target_id, enabled);
     CREATE INDEX IF NOT EXISTS idx_canonical_events_time ON canonical_events(start_utc);
     """)
+    # The knowledge catalog is additive and local-only at runtime.  Installing
+    # its indexes here keeps every existing importer on the same schema without
+    # making event resolution depend on a network refresh.
+    from sports_catalog import ensure_schema as ensure_catalog_schema
+    ensure_catalog_schema(conn)
     # Local AI is an optional parser/cache only.  Keeping its table here makes
     # the migration idempotent without coupling callers to an AI runtime.
     from local_ai_event_parser import ensure_schema as ensure_local_ai_schema
@@ -338,6 +343,11 @@ def _existing_canonical_match(conn: sqlite3.Connection, *, sport: Any, league: A
     """Use the existing catalog matcher without creating a canonical event."""
     sport_id = _upsert_named(conn, "sports", str(sport)) if sport else None
     league_id = _upsert_named(conn, "leagues", str(league), sport_id=sport_id) if league else None
+    # Catalog aliases are only accepted where their full normalized text maps
+    # to one team inside this exact sport/league.  This retains the resolver's
+    # false-negative preference for ambiguous mascot names.
+    from sports_catalog import canonicalize_participants
+    participants = canonicalize_participants(conn, participants, sport_id=sport_id, league_id=league_id)
     canonical_id, confidence, evidence = _event_candidates(
         conn, sport_id=sport_id, league_id=league_id, start=utc_instant(start_text),
         participants=participants, event_type=str(event_type),
@@ -457,6 +467,17 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
             ai_result = {"status": "parser_error", "interpretation": None, "error": type(exc).__name__}
     sport_id = _upsert_named(conn, "sports", str(sport)) if sport else None
     league_id = _upsert_named(conn, "leagues", str(league), sport_id=sport_id) if league else None
+    from sports_catalog import canonicalize_participants
+    participants = canonicalize_participants(conn, participants, sport_id=sport_id, league_id=league_id)
+    # Racing fixtures need not have home/away participants.  A local recurring
+    # event match gives their common title/venue forms stable catalog identity
+    # without turning the catalog into a date-specific schedule.
+    recurring_event = None
+    if not participants:
+        from sports_catalog import recurring_event_aliases
+        recurring_event = recurring_event_aliases(conn, data.get("title") or raw.get("title"), league_id=league_id)
+        if recurring_event:
+            competition = competition or recurring_event["name"]
     team_rows = []
     for participant in participants:
         team_id = _upsert_named(conn, "teams", participant["name"], sport_id=sport_id, league_id=league_id,
@@ -488,6 +509,8 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
             confidence = 1.0 if known else .9
     metadata = {"title": data.get("title"), "source": source, "raw_start": start_value,
                 "canonical_start_utc": start_text, "time_contract": "absolute_utc"}
+    if recurring_event:
+        metadata["recurring_event"] = recurring_event
     if ai_result.get("status") not in {"not_needed", "disabled"}:
         metadata["local_ai"] = {"status": ai_result.get("status"), "model": getattr(active_ai_config, "model", None),
                                 "used": bool(ai_result.get("interpretation"))}
