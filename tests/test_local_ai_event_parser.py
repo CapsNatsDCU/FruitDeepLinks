@@ -114,10 +114,10 @@ class LocalAIEventParserTests(unittest.TestCase):
         self.assertTrue(malformed["resolved"])
         self.assertEqual("invalid_schema", malformed["local_ai"]["status"])
 
-        low = self.resolve("low", "Low title", interpretation(confidence=.2))
+        low = self.resolve("low", "Low title", interpretation(confidence=.2), sport_name="Hockey", league_name="NHL")
         self.assertEqual("low_confidence", low["local_ai"]["status"])
 
-        result = resolve_source_event(self.conn, source="xtream", source_event_id="offline", data={"title": "Offline game", "start_utc": UTC_START},
+        result = resolve_source_event(self.conn, source="xtream", source_event_id="offline", data={"title": "Offline game", "sport_name": "Baseball", "league_name": "MLB", "start_utc": UTC_START},
                                       ai_config=CONFIG, ai_requester=lambda *_args: (_ for _ in ()).throw(RuntimeError("offline")))
         self.assertTrue(result["resolved"])
         self.assertEqual("transport_failure", result["local_ai"]["status"])
@@ -184,6 +184,42 @@ class LocalAIEventParserTests(unittest.TestCase):
         self.assertEqual("fresh", one["status"])
         self.assertEqual("budget_exhausted", two["status"])
         self.assertEqual(1, len(calls))
+
+    def test_interpretation_strategies_keep_the_same_clear_canonical_result(self):
+        known = resolve_source_event(self.conn, source="apple", source_event_id="known", data={
+            "sport_name": "Hockey", "league_name": "NHL", "start_utc": UTC_START,
+            "competitors": [{"name": "Washington Capitals", "homeAway": "away"}, {"name": "New York Rangers", "homeAway": "home"}],
+        })
+        deterministic_calls = []
+        deterministic = resolve_source_event(self.conn, source="xtream", source_event_id="deterministic", data={
+            "title": "Washington Capitals at New York Rangers", "sport_name": "Hockey", "league_name": "NHL", "start_utc": UTC_START,
+        }, ai_config=CONFIG, ai_requester=lambda *_args: deterministic_calls.append(True) or interpretation())
+        ai_first_calls = []
+        ai_first = LocalAIConfig(True, "http://127.0.0.1:11434/v1", "fruit-local", 1, .8, 3, "ai_first")
+        ai_mode = resolve_source_event(self.conn, source="xtream", source_event_id="ai-first", data={
+            "title": "Washington Capitals at New York Rangers", "sport_name": "Hockey", "league_name": "NHL", "start_utc": UTC_START,
+        }, ai_config=ai_first, ai_requester=lambda _config, metadata: ai_first_calls.append(metadata) or interpretation(
+            sport="Hockey", league="NHL", participants=[
+                {"name": "Washington Capitals", "role": "away"}, {"name": "New York Rangers", "role": "home"},
+            ]))
+        self.assertEqual([], deterministic_calls)
+        self.assertEqual(known["canonical_event_id"], deterministic["canonical_event_id"])
+        self.assertEqual(known["canonical_event_id"], ai_mode["canonical_event_id"])
+        self.assertEqual(1, len(ai_first_calls))
+        self.assertLessEqual(len(ai_first_calls[0]["canonical_candidates"]), 8)
+        self.assertIn("Washington Capitals", ai_first_calls[0]["canonical_candidates"][0]["participants"])
+
+    def test_ai_first_unavailable_falls_back_to_deterministic_catalog_match(self):
+        known = resolve_source_event(self.conn, source="apple", source_event_id="known-fallback", data={
+            "sport_name": "Hockey", "league_name": "NHL", "start_utc": UTC_START,
+            "competitors": [{"name": "Washington Capitals", "homeAway": "away"}, {"name": "New York Rangers", "homeAway": "home"}],
+        })
+        ai_first = LocalAIConfig(True, "http://127.0.0.1:11434/v1", "fruit-local", 1, .8, 3, "ai_first")
+        resolved = resolve_source_event(self.conn, source="xtream", source_event_id="ai-unavailable", data={
+            "title": "Washington Capitals at New York Rangers", "sport_name": "Hockey", "league_name": "NHL", "start_utc": UTC_START,
+        }, ai_config=ai_first, ai_requester=lambda *_args: (_ for _ in ()).throw(RuntimeError("offline")))
+        self.assertEqual("transport_failure", resolved["local_ai"]["status"])
+        self.assertEqual(known["canonical_event_id"], resolved["canonical_event_id"])
 
 
 if __name__ == "__main__":

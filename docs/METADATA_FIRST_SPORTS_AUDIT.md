@@ -120,6 +120,14 @@ are non-fatal and retain deterministic behavior. Refresh sync uses a
 configurable uncached-request cap and leaves capped work pending for a later
 bounded run rather than declaring it synchronized.
 
+The `Event Interpretation Strategy` setting defaults to
+`deterministic_first`: Fruit attempts its existing catalog match before
+asking the local parser. `ai_first` changes that order only for weak records,
+giving the parser at most eight same-time canonical hints; both strategies
+then use the same canonical validation, resolver, and deterministic fallback.
+Selecting AI First while the parser is disabled, times out, or is unavailable
+continues with deterministic resolution.
+
 ## Timestamp trace
 
 | Stage | Stored/compared form | Display/export form |

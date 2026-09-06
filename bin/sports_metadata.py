@@ -332,6 +332,38 @@ def _event_candidates(conn: sqlite3.Connection, *, sport_id: str | None, league_
     return None, 0.0, {"candidate_count": len(scored), "reason": "ambiguous_or_insufficient_evidence"}
 
 
+def _existing_canonical_match(conn: sqlite3.Connection, *, sport: Any, league: Any,
+                              participants: list[dict[str, Any]], event_type: Any,
+                              start_text: str) -> tuple[str | None, float, dict]:
+    """Use the existing catalog matcher without creating a canonical event."""
+    sport_id = _upsert_named(conn, "sports", str(sport)) if sport else None
+    league_id = _upsert_named(conn, "leagues", str(league), sport_id=sport_id) if league else None
+    canonical_id, confidence, evidence = _event_candidates(
+        conn, sport_id=sport_id, league_id=league_id, start=utc_instant(start_text),
+        participants=participants, event_type=str(event_type),
+    )
+    if canonical_id:
+        return canonical_id, confidence, evidence
+    fingerprint = event_fingerprint(sport=sport, league=league, participants=participants,
+                                    event_type=str(event_type), start_utc=start_text)
+    known = conn.execute("SELECT id FROM canonical_events WHERE fingerprint=?", (fingerprint,)).fetchone()
+    return ((known[0], 1.0, {"fingerprint_match": True}) if known else (None, 0.0, evidence))
+
+
+def _canonical_candidate_hints(conn: sqlite3.Connection, *, start: datetime, limit: int = 8) -> list[dict[str, Any]]:
+    """Provide at most eight same-time catalog candidates to AI-first mode."""
+    lower = datetime.fromtimestamp(start.timestamp() - 600, UTC).isoformat().replace("+00:00", "Z")
+    upper = datetime.fromtimestamp(start.timestamp() + 600, UTC).isoformat().replace("+00:00", "Z")
+    rows = conn.execute(
+        "SELECT ce.id,s.name,l.name FROM canonical_events ce LEFT JOIN sports s ON s.id=ce.sport_id "
+        "LEFT JOIN leagues l ON l.id=ce.league_id WHERE ce.start_utc BETWEEN ? AND ? ORDER BY ce.start_utc,ce.id LIMIT ?",
+        (lower, upper, max(1, min(limit, 8))),
+    ).fetchall()
+    return [{"sport": row[1], "league": row[2], "participants": [participant[0] for participant in conn.execute(
+        "SELECT display_name FROM canonical_event_participants WHERE event_id=? ORDER BY role,display_name", (row[0],)
+    ).fetchall()]} for row in rows]
+
+
 def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_id: str,
                          data: Mapping[str, Any], commit: bool = True,
                          schema_ready: bool = False, ai_config=None,
@@ -363,13 +395,31 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     event_type = data.get("event_type") or raw.get("event_type") or raw.get("eventType") or "event"
     competition = data.get("competition") or raw.get("competition")
     ai_result = {"status": "not_needed", "interpretation": None}
+    try:
+        from local_ai_event_parser import load_config
+        active_ai_config = ai_config or load_config(conn)
+    except Exception:
+        active_ai_config = ai_config
+    strategy = getattr(active_ai_config, "interpretation_strategy", "deterministic_first")
+    if strategy not in {"deterministic_first", "ai_first"}:
+        strategy = "deterministic_first"
     # Never let an AI reinterpret complete structured metadata or an explicit
     # manual mapping.  It is only an optional parser for incomplete/weak text.
     strong_structured_identity = bool(sport and league and len(structured_participants) >= 2)
     title_text = data.get("title") or raw.get("title") or raw.get("original_stream_name")
     sports_words = ("nfl", "nhl", "mlb", "mls", "nba", "ncaa", "football", "hockey", "baseball", "soccer", "basketball", "formula 1", "grand prix")
     potential_sports_record = source == "xtream" or bool(sport or league or participants) or any(word in _norm(title_text) for word in sports_words)
-    if potential_sports_record and not strong_structured_identity and not (prior and prior[1] == "manual_override"):
+    # Deterministic First makes its normal catalog match before asking AI.
+    # AI First only changes ordering for weak records; source/manual mappings
+    # and authoritative provider metadata always retain their precedence.
+    pre_match = (None, 0.0, {})
+    if not prior_is_current and strategy == "deterministic_first":
+        pre_match = _existing_canonical_match(conn, sport=sport, league=league, participants=participants,
+                                               event_type=event_type, start_text=start_text)
+    should_ask_ai = (potential_sports_record and not strong_structured_identity
+                     and not (prior and prior[1] == "manual_override")
+                     and (strategy == "ai_first" or not pre_match[0]))
+    if should_ask_ai:
         try:
             from local_ai_event_parser import enrich, request_openai_compatible
             kwargs = {
@@ -382,7 +432,8 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
                 "sport_hint": sport,
                 "league_hint": league,
                 "start_time": start_text,
-                "config": ai_config,
+                "canonical_candidates": _canonical_candidate_hints(conn, start=start),
+                "config": active_ai_config,
                 "budget": ai_budget,
             }
             if ai_requester is not None:
@@ -421,9 +472,14 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
             kind, evidence = "manual_override", {"operator_confirmed": True}
         else:
             kind, evidence = "source_mapping", {"source_mapping": True}
+    elif pre_match[0]:
+        canonical_id, confidence, evidence = pre_match
+        kind = "fingerprint_match" if evidence.get("fingerprint_match") else "confidence_match"
     else:
-        canonical_id, confidence, evidence = _event_candidates(conn, sport_id=sport_id, league_id=league_id,
-                                                                  start=start, participants=participants, event_type=str(event_type))
+        canonical_id, confidence, evidence = _existing_canonical_match(
+            conn, sport=sport, league=league, participants=participants,
+            event_type=event_type, start_text=start_text,
+        )
         kind = "confidence_match" if canonical_id else "new_fingerprint"
         if not canonical_id:
             fingerprint = event_fingerprint(sport=sport, league=league, participants=participants, event_type=str(event_type), start_utc=start_text)
@@ -433,7 +489,7 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     metadata = {"title": data.get("title"), "source": source, "raw_start": start_value,
                 "canonical_start_utc": start_text, "time_contract": "absolute_utc"}
     if ai_result.get("status") not in {"not_needed", "disabled"}:
-        metadata["local_ai"] = {"status": ai_result.get("status"), "model": getattr(ai_config, "model", None),
+        metadata["local_ai"] = {"status": ai_result.get("status"), "model": getattr(active_ai_config, "model", None),
                                 "used": bool(ai_result.get("interpretation"))}
     fingerprint = event_fingerprint(sport=sport, league=league, participants=participants, event_type=str(event_type), start_utc=start_text)
     conn.execute("INSERT INTO canonical_events(id,fingerprint,sport_id,league_id,season,competition,stage,round,event_type,start_utc,end_utc,venue,status,title,metadata_json,created_utc,updated_utc) "
@@ -469,7 +525,7 @@ def sync_legacy_events(conn: sqlite3.Connection) -> dict[str, int]:
     try:
         from local_ai_event_parser import PARSER_VERSION, load_config
         ai_config = load_config(conn)
-        ai_state = f"{PARSER_VERSION}:{ai_config.usable}:{ai_config.model}:{ai_config.minimum_confidence}"
+        ai_state = f"{PARSER_VERSION}:{ai_config.usable}:{ai_config.model}:{ai_config.minimum_confidence}:{ai_config.interpretation_strategy}"
     except Exception:
         ai_config = None
         ai_state = "local-ai-unavailable"

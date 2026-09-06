@@ -389,6 +389,18 @@ SETTINGS_DEFS: Dict[str, tuple] = {
         "Local AI Request Limit per Refresh",
         "Maximum uncached eligible records sent to the local parser in one metadata sync. Cache hits do not count.",
     ),
+    "local_ai_event_interpretation_strategy": (
+        "LOCAL_AI_EVENT_INTERPRETATION_STRATEGY", "str", "deterministic_first",
+        "Event Interpretation Strategy",
+        "Deterministic First uses Fruit's sports catalog and source mappings before asking the local AI. AI First asks the local model to interpret weak provider metadata earlier, but all AI results are still validated against Fruit's canonical sports catalog.",
+    ),
+}
+
+SETTINGS_OPTIONS = {
+    "local_ai_event_interpretation_strategy": [
+        {"value": "deterministic_first", "label": "Deterministic First"},
+        {"value": "ai_first", "label": "AI First"},
+    ],
 }
 
 _SETTING_KEY_PREFIX = "setting:"
@@ -502,6 +514,7 @@ def get_settings_schema() -> list[dict]:
             "type": type_hint,
             "default": default,
             "env_var": env_var,
+            "options": SETTINGS_OPTIONS.get(key),
         }
         for key, (env_var, type_hint, default, label, desc) in SETTINGS_DEFS.items()
     ]
