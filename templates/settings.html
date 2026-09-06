@@ -177,7 +177,7 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
 {% block extra_script %}
 <script>
 const GROUPS = {
-  'Server': ['server_url', 'channels_dvr_ip', 'channels_source_name', 'timezone'],
+  'Server': ['server_url', 'channels_dvr_ip', 'channels_source_name', 'timezone', 'app_primary_color'],
   'Lanes': ['num_lanes', 'expand_all_playables'],
   'Pipeline': ['days_ahead', 'padding_minutes', 'max_event_minutes'],
   'Auto Refresh': ['auto_refresh_enabled', 'auto_refresh_time'],
@@ -849,6 +849,7 @@ async function saveSettings() {
       showToast('Settings saved', 'success');
       status.textContent = 'Saved at ' + new Date().toLocaleTimeString();
       _current = {..._current, ...updates};
+      if (updates.app_primary_color) document.documentElement.setAttribute('data-primary-color', updates.app_primary_color);
     } else {
       showToast(data.message || 'Save failed', 'error');
       status.textContent = 'Save failed';

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-primary-color="{{ app_primary_color|default('blue') }}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -63,6 +63,16 @@
   --danger:     #dc2626;
   --danger-bg:  #dc2626;
 }
+
+/* ---- User-selected primary accent ---- */
+:root[data-primary-color="red"]    { --accent:#ef4444; --accent-dark:#dc2626; --accent-nav:#b91c1c; --heading:#f87171; }
+:root[data-primary-color="green"]  { --accent:#22c55e; --accent-dark:#16a34a; --accent-nav:#15803d; --heading:#4ade80; }
+:root[data-primary-color="purple"] { --accent:#a855f7; --accent-dark:#9333ea; --accent-nav:#7e22ce; --heading:#c084fc; }
+:root[data-primary-color="orange"] { --accent:#f97316; --accent-dark:#ea580c; --accent-nav:#c2410c; --heading:#fb923c; }
+:root[data-theme="light"][data-primary-color="red"]    { --accent:#dc2626; --accent-dark:#b91c1c; --accent-nav:#b91c1c; --heading:#b91c1c; }
+:root[data-theme="light"][data-primary-color="green"]  { --accent:#16a34a; --accent-dark:#15803d; --accent-nav:#15803d; --heading:#15803d; }
+:root[data-theme="light"][data-primary-color="purple"] { --accent:#9333ea; --accent-dark:#7e22ce; --accent-nav:#7e22ce; --heading:#7e22ce; }
+:root[data-theme="light"][data-primary-color="orange"] { --accent:#ea580c; --accent-dark:#c2410c; --accent-nav:#c2410c; --heading:#c2410c; }
 
 /* ---- Base ---- */
 body {

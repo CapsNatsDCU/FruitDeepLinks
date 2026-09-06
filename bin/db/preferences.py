@@ -394,6 +394,11 @@ SETTINGS_DEFS: Dict[str, tuple] = {
         "Event Interpretation Strategy",
         "Deterministic First uses Fruit's sports catalog and source mappings before asking the local AI. AI First asks the local model to interpret weak provider metadata earlier, but all AI results are still validated against Fruit's canonical sports catalog.",
     ),
+    "app_primary_color": (
+        None, "str", "blue",
+        "App Primary Color",
+        "Choose the primary accent color used for navigation, buttons, links, and focus states.",
+    ),
 }
 
 SETTINGS_OPTIONS = {
@@ -401,7 +406,23 @@ SETTINGS_OPTIONS = {
         {"value": "deterministic_first", "label": "Deterministic First"},
         {"value": "ai_first", "label": "AI First"},
     ],
+    "app_primary_color": [
+        {"value": "blue", "label": "Blue"},
+        {"value": "red", "label": "Red"},
+        {"value": "green", "label": "Green"},
+        {"value": "purple", "label": "Purple"},
+        {"value": "orange", "label": "Orange"},
+    ],
 }
+
+
+def _validated_option(key: str, value: Any, default: Any) -> Any:
+    """Keep enumerated appearance/resolution settings within known values."""
+    options = SETTINGS_OPTIONS.get(key)
+    if not options:
+        return value
+    allowed = {item["value"] for item in options}
+    return value if value in allowed else default
 
 _SETTING_KEY_PREFIX = "setting:"
 
@@ -449,7 +470,7 @@ def get_setting(conn: sqlite3.Connection, key: str, fallback=None):
         row = cur.fetchone()
         if row and row[0] is not None:
             type_hint = defn[1] if defn else "str"
-            return _cast_setting(row[0], type_hint)
+            return _validated_option(key, _cast_setting(row[0], type_hint), defn[2] if defn else fallback)
     except Exception:
         pass
 
@@ -458,7 +479,7 @@ def get_setting(conn: sqlite3.Connection, key: str, fallback=None):
         env_val = os.getenv(env_var) if env_var else None
         if env_val is not None:
             try:
-                return _cast_setting(env_val, type_hint)
+                return _validated_option(key, _cast_setting(env_val, type_hint), default)
             except Exception:
                 pass
         return default
@@ -494,6 +515,7 @@ def save_settings(conn: sqlite3.Connection, updates: Dict[str, Any]) -> bool:
             if key == "favorite_teams":
                 from team_preferences import normalize_favorite_teams
                 value = normalize_favorite_teams(value)
+            value = _validated_option(key, value, SETTINGS_DEFS[key][2])
             cur.execute(
                 "INSERT OR REPLACE INTO user_preferences (key, value, updated_utc) VALUES (?, ?, ?)",
                 (f"{_SETTING_KEY_PREFIX}{key}", json.dumps(value), now),

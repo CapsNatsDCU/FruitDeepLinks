@@ -41,6 +41,18 @@ def create_app() -> Flask:
     if CORS is not None:
         CORS(app)
 
+    @app.context_processor
+    def template_appearance():
+        """Expose only a validated primary-color token to every template."""
+        try:
+            from db.connection import get_conn_or_none
+            from db.preferences import get_setting
+            with get_conn_or_none() as conn:
+                color = get_setting(conn, "app_primary_color", "blue") if conn else "blue"
+        except Exception:
+            color = "blue"
+        return {"app_primary_color": color if color in {"blue", "red", "green", "purple", "orange"} else "blue"}
+
     # Ensure bin/ is on sys.path so local helpers (adb_provider_mapper etc.) import cleanly
     bin_dir = str(Path(__file__).parent.parent)
     if bin_dir not in sys.path:
