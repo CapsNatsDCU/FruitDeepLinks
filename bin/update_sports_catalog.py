@@ -22,11 +22,17 @@ from urllib.request import Request, urlopen
 from sports_catalog import apply_catalog_records
 
 
+DEFAULT_WIKIDATA_QUERY = Path(__file__).resolve().parents[1] / "docs" / "sources" / "wikidata-major-sports.rq"
+
+
 # This is deliberately a compact requested-scope bootstrap, not a hand-made
 # roster.  Teams and aliases arrive through source importers with provenance.
 BOOTSTRAP = (
     ("American football", "NFL"), ("Ice hockey", "NHL"), ("Baseball", "MLB"),
     ("Basketball", "NBA"), ("Basketball", "WNBA"), ("Soccer", "MLS"),
+    ("Soccer", "UEFA Champions League"), ("Soccer", "English Premier League"),
+    ("Soccer", "La Liga"), ("Soccer", "Bundesliga"), ("Soccer", "Serie A"),
+    ("Soccer", "Ligue 1"), ("Soccer", "FIFA World Cup"),
     ("Motorsport", "Formula 1"), ("Motorsport", "NASCAR Cup Series"),
     ("Motorsport", "IndyCar Series"), ("Motorsport", "IMSA SportsCar Championship"),
     ("Motorsport", "FIA World Endurance Championship"),
@@ -36,6 +42,19 @@ RACING_EVENTS = (
     ("Formula 1", "British Grand Prix", ("British GP", "Silverstone")),
     ("IndyCar Series", "Indianapolis 500", ("Indy 500",)),
     ("NASCAR Cup Series", "Daytona 500", ()),
+)
+BOOTSTRAP_TEAMS = (
+    # A small, provenance-labelled usability seed makes My Sports useful on a
+    # fresh offline installation.  It is not a substitute for source updates
+    # or a hard-coded application roster; each alias remains league-scoped.
+    ("Ice hockey", "NHL", "Washington Capitals", ("Washington Caps", "WSH", "Caps")),
+    ("Ice hockey", "NHL", "Philadelphia Flyers", ("PHI", "Flyers")),
+    ("Baseball", "MLB", "Washington Nationals", ("WSH", "WSN", "Nats")),
+    ("Baseball", "MLB", "Los Angeles Dodgers", ("LAD", "Dodgers")),
+    ("American football", "NFL", "Washington Commanders", ("WAS", "WSH", "Commanders")),
+    ("American football", "NFL", "Philadelphia Eagles", ("PHI", "Eagles")),
+    ("Soccer", "MLS", "D.C. United", ("DC United", "DCU")),
+    ("Soccer", "MLS", "FC Cincinnati", ("Cincinnati",)),
 )
 
 
@@ -54,6 +73,10 @@ def bootstrap_records() -> list[dict[str, Any]]:
                         "aliases": aliases, "venue_aliases": aliases[-1:] if aliases else (),
                         "session_vocabulary": ("practice", "qualifying", "sprint", "race"), "source": "fruit_bootstrap",
                         "provenance": {"scope": "stable_recurring_event_identity"}})
+    for sport, league, name, aliases in BOOTSTRAP_TEAMS:
+        records.append({"entity_type": "team", "name": name, "sport": sport, "league": league,
+                        "aliases": aliases, "source": "fruit_bootstrap",
+                        "provenance": {"scope": "offline_my_sports_usability_seed"}})
     return records
 
 
@@ -111,7 +134,7 @@ def wikidata_records(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     """
     grouped: dict[tuple[str, str], dict[str, Any]] = {}
     for row in (payload.get("results") or {}).get("bindings") or []:
-        label = ((row.get("entityLabel") or row.get("label") or {}).get("value") or "").strip()
+        label = ((row.get("fruitName") or row.get("entityLabel") or row.get("label") or {}).get("value") or "").strip()
         url = ((row.get("entity") or row.get("item") or {}).get("value") or "").strip()
         external_id = url.rsplit("/", 1)[-1]
         entity_type = ((row.get("entityType") or {}).get("value") or "team").strip().casefold()
@@ -128,6 +151,11 @@ def wikidata_records(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         alias = (row.get("alias") or {}).get("value")
         if alias:
             record["aliases"].append(alias)
+        location = (row.get("locationLabel") or {}).get("value")
+        if location:
+            record["provenance"].setdefault("locations", [])
+            if location not in record["provenance"]["locations"]:
+                record["provenance"]["locations"].append(location)
     return list(grouped.values())
 
 
@@ -162,7 +190,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cache-dir", default="data/cache/sports_catalog")
     parser.add_argument("--refresh", action="store_true", help="Bypass cached source responses for this explicit update")
     parser.add_argument("--request-interval", type=float, default=2.1, help="Seconds between uncached requests")
-    parser.add_argument("--wikidata-query-file", type=Path, help="Bounded SPARQL query file for the official WDQS endpoint")
+    parser.add_argument("--wikidata-query-file", type=Path,
+                        help="Bounded SPARQL query file for the official WDQS endpoint (defaults to the major-sports seed query)")
     parser.add_argument("--records", type=Path, help="Normalized source records JSON (including official exports)")
     parser.add_argument("--openligadb-league", help="Explicit OpenLigaDB league shortcut/name")
     parser.add_argument("--season", help="OpenLigaDB season (required with --openligadb-league)")
@@ -181,9 +210,10 @@ def main(argv: list[str] | None = None) -> int:
             api_key = os.environ.get("THESPORTSDB_API_KEY", "123")
             records.extend(thesportsdb_records(lambda url: fetch_json(url, cache_dir=cache_dir, interval=args.request_interval, refresh=args.refresh), api_key=api_key))
         if "wikidata" in sources:
-            if not args.wikidata_query_file:
-                parser.error("--source wikidata requires --wikidata-query-file")
-            query = args.wikidata_query_file.read_text(encoding="utf-8")
+            query_file = args.wikidata_query_file or DEFAULT_WIKIDATA_QUERY
+            if not query_file.exists():
+                parser.error(f"Wikidata query file not found: {query_file}")
+            query = query_file.read_text(encoding="utf-8")
             url = "https://query.wikidata.org/sparql?" + urlencode({"query": query, "format": "json"})
             records.extend(wikidata_records(fetch_json(url, cache_dir=cache_dir, interval=args.request_interval, refresh=args.refresh)))
         if "openligadb" in sources:

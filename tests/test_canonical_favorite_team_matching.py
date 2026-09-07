@@ -1,4 +1,5 @@
 import sys
+import json
 import unittest
 from pathlib import Path
 
@@ -43,6 +44,20 @@ class CanonicalFavoriteTeamMatchingTests(unittest.TestCase):
     def test_explicit_context_is_a_veto(self):
         favorite = team("Washington Nationals", "baseball", "MLB")
         self.assert_rejects(favorite, [{"title": "Washington Nationals at Dodgers", "league": "NHL"}])
+
+    def test_structured_metadata_is_reported_as_high_confidence(self):
+        favorite = team("Washington Capitals", "hockey", "NHL")
+        event = {
+            "title": "Live hockey",
+            "classification_json": json.dumps([{"type": "league", "value": "NHL"}]),
+            "raw_attributes_json": json.dumps({"competitors": [
+                {"name": "Washington Capitals", "homeAway": "away"},
+                {"name": "Tampa Bay Lightning", "homeAway": "home"},
+            ]}),
+        }
+        matches = match_favorite_teams(event, [favorite])
+        self.assertEqual("structured_metadata", matches[0]["matched_by"])
+        self.assertEqual("high", matches[0]["confidence"])
 
 
 if __name__ == "__main__": unittest.main()

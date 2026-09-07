@@ -176,6 +176,11 @@ def get_provider_lane_stats(conn: sqlite3.Connection) -> list[dict]:
     Merges playable counts from the events DB with provider_lanes configuration.
     """
     cur = conn.cursor()
+    try:
+        from xtream_mode import is_xtream_only
+        xtream_only = is_xtream_only(conn)
+    except Exception:
+        xtream_only = False
     cur.execute("PRAGMA table_info(playables)")
     cols = [r[1] for r in cur.fetchall()]
 
@@ -211,6 +216,8 @@ def get_provider_lane_stats(conn: sqlite3.Connection) -> list[dict]:
     services: dict[str, dict] = {}
     for row in cur.fetchall():
         code = row[0]
+        if xtream_only and code != "xtream":
+            continue
         name = get_display_name(code) if _CATALOG else code.upper()
         services[code] = {
             "provider_code": code,
@@ -232,6 +239,8 @@ def get_provider_lane_stats(conn: sqlite3.Connection) -> list[dict]:
     )
     for row in cur.fetchall():
         code = row[0]
+        if xtream_only and code != "xtream":
+            continue
         if code in services:
             services[code].update({
                 "adb_enabled": row[1], "adb_lane_count": row[2],
@@ -425,6 +434,12 @@ def get_lane_direct_stream(
         keys = [item.split(".")[-1] for item in select]
         playable = dict(row) if isinstance(row, sqlite3.Row) else dict(zip(keys, row))
 
+        from xtream_mode import is_xtream_only
+        xtream_only = is_xtream_only(conn)
+        provider = (playable.get("provider") or "").lower()
+        if xtream_only and provider != "xtream":
+            return None
+
         direct_url = str(playable.get("stream_url") or "").strip()
         if direct_url:
             if direct_url.startswith(("http://", "https://")):
@@ -432,7 +447,7 @@ def get_lane_direct_stream(
                 return playable
             return None
 
-        if (playable.get("provider") or "").lower() != "xtream":
+        if provider != "xtream":
             return None
         if not playable.get("stream_id"):
             return None
@@ -502,6 +517,13 @@ def get_provider_playable_link(
         return empty
 
     try:
+        from xtream_mode import is_xtream_only
+        if is_xtream_only(conn) and provider_code.lower() != "xtream":
+            return empty
+    except Exception:
+        pass
+
+    try:
         cur = conn.cursor()
         cur.execute("PRAGMA table_info(playables)")
         cols = {row[1] for row in cur.fetchall()}
@@ -523,6 +545,8 @@ def get_provider_playable_link(
             return empty
 
         select_cols = deeplink_cols[:]
+        if provider_col not in select_cols:
+            select_cols.append(provider_col)
         for extra in (http_col, playable_id_col, espn_col, svc_name_col, logical_col):
             if extra:
                 select_cols.append(extra)
@@ -545,6 +569,8 @@ def get_provider_playable_link(
             if not row:
                 return empty
             r = dict(row) if isinstance(row, sqlite3.Row) else dict(zip(select_cols, row))
+            if is_xtream_only(conn) and (r.get(provider_col) or "").lower() != "xtream":
+                return empty
             deeplink = next((r.get(c) for c in ["deeplink_play", "deeplink_open", "playable_url"] if r.get(c)), None)
             espn_id = r.get(espn_col) if espn_col else None
             if provider_code.lower() in ("sportscenter", "espn", "espn+") and espn_id and deeplink:
@@ -668,6 +694,8 @@ def get_provider_playable_link(
             return empty
 
         r = dict(row) if isinstance(row, sqlite3.Row) else dict(zip(select_cols, row))
+        if is_xtream_only(conn) and (r.get(provider_col) or "").lower() != "xtream":
+            return empty
         deeplink = next((r.get(c) for c in ["deeplink_play", "deeplink_open", "playable_url"] if r.get(c)), None)
 
         espn_id = r.get(espn_col) if espn_col else None
@@ -707,6 +735,14 @@ def get_playable_id_for_event(conn: sqlite3.Connection, event_id: str, provider_
         if "playable_id" not in cols:
             return None
 
+        try:
+            from xtream_mode import is_xtream_only
+            xtream_only = is_xtream_only(conn)
+        except Exception:
+            xtream_only = False
+        if xtream_only and provider_code and provider_code.lower() != "xtream":
+            return None
+
         if provider_code:
             if "logical_service" in cols:
                 cur.execute(
@@ -722,6 +758,14 @@ def get_playable_id_for_event(conn: sqlite3.Connection, event_id: str, provider_
                     " AND provider = ? ORDER BY priority ASC LIMIT 1",
                     (event_id, provider_code),
                 )
+        elif xtream_only:
+            cur.execute(
+                "SELECT playable_id FROM playables WHERE event_id = ?"
+                " AND playable_id IS NOT NULL AND playable_id != ''"
+                " AND LOWER(COALESCE(provider, '')) = 'xtream'"
+                " ORDER BY priority ASC LIMIT 1",
+                (event_id,),
+            )
         else:
             cur.execute(
                 "SELECT playable_id FROM playables WHERE event_id = ?"
@@ -750,6 +794,11 @@ def get_event_link_info(
     """
     empty = {"event_uid": None, "deeplink_url": None, "deeplink_url_full": None}
     cur = conn.cursor()
+    try:
+        from xtream_mode import is_xtream_only
+        xtream_only = is_xtream_only(conn)
+    except Exception:
+        xtream_only = False
 
     try:
         cur.execute("PRAGMA table_info(events)")
@@ -788,7 +837,9 @@ def get_event_link_info(
     primary_value = data.get(primary_deeplink_col) if primary_deeplink_col else None
     full_value = data.get(full_deeplink_col) if full_deeplink_col else None
 
-    deeplink_url = primary_value or full_value
+    # Event-level links are normally Apple/catalogue links. In Xtream-only
+    # mode they are not eligible substitutes for a provider playable.
+    deeplink_url = None if xtream_only else (primary_value or full_value)
 
     if chosen_provider and not deeplink_url:
         link = get_provider_playable_link(conn, event_id, chosen_provider)
@@ -835,7 +886,7 @@ def get_event_link_info(
         except ImportError:
             pass
 
-    if not deeplink_url and pvid and not str(event_id).startswith("appletv-"):
+    if not xtream_only and not deeplink_url and pvid and not str(event_id).startswith("appletv-"):
         try:
             payload = {"pvid": pvid, "type": "PROGRAMME", "action": "PLAY"}
             deeplink_url = "https://www.peacocktv.com/deeplink?deeplinkData=" + urllib.parse.quote(
@@ -846,11 +897,19 @@ def get_event_link_info(
 
     if not deeplink_url:
         try:
-            cur.execute(
-                "SELECT playable_url FROM playables WHERE event_id = ?"
-                " AND playable_url IS NOT NULL ORDER BY priority ASC LIMIT 1",
-                (event_id,),
-            )
+            if xtream_only:
+                cur.execute(
+                    "SELECT playable_url FROM playables WHERE event_id = ?"
+                    " AND LOWER(COALESCE(provider, '')) = 'xtream'"
+                    " AND playable_url IS NOT NULL ORDER BY priority ASC LIMIT 1",
+                    (event_id,),
+                )
+            else:
+                cur.execute(
+                    "SELECT playable_url FROM playables WHERE event_id = ?"
+                    " AND playable_url IS NOT NULL ORDER BY priority ASC LIMIT 1",
+                    (event_id,),
+                )
             prow = cur.fetchone()
             if prow and prow[0]:
                 deeplink_url = prow[0]
@@ -864,10 +923,10 @@ def get_event_link_info(
         except Exception:
             pass
 
-    if not deeplink_url and apple_url:
+    if not xtream_only and not deeplink_url and apple_url:
         deeplink_url = apple_url
 
-    deeplink_full = full_value or deeplink_url or apple_url
+    deeplink_full = (None if xtream_only else full_value) or deeplink_url or (None if xtream_only else apple_url)
     return {"event_uid": event_uid, "deeplink_url": deeplink_url, "deeplink_url_full": deeplink_full}
 
 

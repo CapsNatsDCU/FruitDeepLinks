@@ -14,7 +14,9 @@ def simulate(conn: sqlite3.Connection, lane_count: int, days_ahead: int) -> dict
     copy.row_factory = sqlite3.Row
     try:
         conn.backup(copy)
-        events = load_future_events(copy, days_ahead)
+        # A simulation must inspect already-materialized state, never invoke a
+        # local model while servicing an interactive request.
+        events = load_future_events(copy, days_ahead, canonical_ai_mode="disabled")
         ensure_lane_schema(copy); reset_lanes(copy); create_lanes(copy, lane_count)
         build_lanes_with_placeholders(copy, events, lane_count)
         scheduled = [dict(row) for row in copy.execute(

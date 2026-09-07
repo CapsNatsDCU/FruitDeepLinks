@@ -33,7 +33,7 @@ class LocalAIConfig:
     enabled: bool = False
     base_url: str = ""
     model: str = ""
-    timeout_seconds: int = 5
+    timeout_seconds: int = 60
     minimum_confidence: float = 0.85
     max_requests_per_refresh: int = 25
     interpretation_strategy: str = "deterministic_first"
@@ -50,7 +50,7 @@ def load_config(conn: sqlite3.Connection) -> LocalAIConfig:
         enabled = bool(get_setting(conn, "local_ai_event_parsing_enabled", False))
         base_url = str(get_setting(conn, "local_ai_event_parsing_base_url", "") or "")
         model = str(get_setting(conn, "local_ai_event_parsing_model", "") or "")
-        timeout = int(get_setting(conn, "local_ai_event_parsing_timeout_seconds", 5) or 5)
+        timeout = int(get_setting(conn, "local_ai_event_parsing_timeout_seconds", 60) or 60)
         minimum = float(get_setting(conn, "local_ai_event_parsing_min_confidence", 0.85) or 0.85)
         maximum = int(get_setting(conn, "local_ai_event_parsing_max_requests_per_refresh", 25) or 25)
         strategy = str(get_setting(conn, "local_ai_event_interpretation_strategy", "deterministic_first") or "deterministic_first")
@@ -60,7 +60,9 @@ def load_config(conn: sqlite3.Connection) -> LocalAIConfig:
         enabled=enabled,
         base_url=base_url.strip(),
         model=model.strip(),
-        timeout_seconds=max(1, min(timeout, 60)),
+        # 27B local models routinely need 31–56 seconds.  Keep 60 seconds as
+        # the default and permit slower local hardware to opt into more.
+        timeout_seconds=max(1, min(timeout, 300)),
         minimum_confidence=max(0.0, min(minimum, 1.0)),
         max_requests_per_refresh=max(0, min(maximum, 500)),
         interpretation_strategy=strategy if strategy in {"deterministic_first", "ai_first"} else "deterministic_first",
@@ -180,7 +182,10 @@ def request_openai_compatible(config: LocalAIConfig, metadata: Mapping[str, Any]
     try:
         with urlopen(request, timeout=config.timeout_seconds) as response:  # nosec B310 -- user-configured local endpoint
             decoded = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+    except TimeoutError as exc:
+        LOG.warning("Local AI event parsing timed out")
+        raise RuntimeError("timeout") from exc
+    except (HTTPError, URLError, OSError, ValueError) as exc:
         # Do not include exception text: a misconfigured endpoint could contain
         # credentials, and enrichment must never fail the refresh.
         LOG.warning("Local AI event parsing unavailable (%s)", type(exc).__name__)
@@ -273,10 +278,11 @@ def enrich(conn: sqlite3.Connection, *, provider: str, source_event_id: str, tit
     try:
         raw = requester(config, payload)
         interpretation, status = validate_output(raw, minimum_confidence=config.minimum_confidence)
-    except RuntimeError:
+    except RuntimeError as exc:
+        failure_kind = "timeout" if str(exc) == "timeout" else "transport_failure"
         _store(conn, cache_key=key, provider=provider, source_event_id=source_event_id, fingerprint=fingerprint,
-               config=config, result=None, status="transport_failure", failure_kind="transport_failure", now=now_text)
-        return {"status": "transport_failure", "interpretation": None}
+               config=config, result=None, status="transport_failure", failure_kind=failure_kind, now=now_text)
+        return {"status": "transport_failure", "interpretation": None, "failure_kind": failure_kind}
     except (TypeError, ValueError, KeyError):
         _store(conn, cache_key=key, provider=provider, source_event_id=source_event_id, fingerprint=fingerprint,
                config=config, result=None, status="invalid_schema", failure_kind="malformed_json", now=now_text)

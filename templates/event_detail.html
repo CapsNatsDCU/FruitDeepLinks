@@ -29,6 +29,17 @@ pre { background:var(--bg-inset); border:1px solid var(--border); border-radius:
   <div id="summary">Loading…</div>
 </div>
 
+<div class="card" style="margin-bottom:16px">
+  <h2>Programming name</h2>
+  <div class="small" style="margin-bottom:8px">Optional override used by XMLTV, guide, and lane exports. Leave blank to use the automatic matchup name.</div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+    <input id="normalizedName" type="text" maxlength="256" style="flex:1;min-width:260px" placeholder="[NHL] Road Team @ Home Team">
+    <button class="btn" onclick="saveNormalizedName()">Save name</button>
+    <button class="btn btn-secondary" onclick="clearNormalizedName()">Use automatic</button>
+  </div>
+  <div id="nameStatus" class="small" style="margin-top:8px"></div>
+</div>
+
 <div class="grid">
   <div class="card" style="grid-column:1/-1">
     <h2>Playables</h2>
@@ -100,6 +111,7 @@ async function loadDetail() {
 
   const e = data.event || {};
   const playables = data.playables || [];
+  document.getElementById("normalizedName").value = e.normalized_name || "";
 
   const badges = [];
   if (data.is_live_now) badges.push('<span class="badge good">LIVE NOW</span>');
@@ -119,7 +131,8 @@ async function loadDetail() {
       ${badges.join(" ")||'<span class="badge">EVENT</span>'}
       <span class="badge">${escH(e.id)}</span>
     </div>
-    <div style="font-size:20px;font-weight:700">${escH(e.title)}</div>
+    <div style="font-size:20px;font-weight:700">${escH(e.programming_name || e.title)}</div>
+    <div class="small" style="margin-top:4px">Source title: ${escH(e.title || "—")}</div>
     <div class="mono small" style="margin-top:6px">${escH(e.start_utc)} → ${escH(e.end_utc)}</div>
     <div class="small" style="margin-top:6px">Channel: <b>${escH(e.channel_name||"")}</b></div>
     <div class="small" style="margin-top:8px">Providers:
@@ -256,6 +269,30 @@ async function loadDetail() {
     tr.innerHTML = `<td class="mono">${escH(k)}</td><td class="mono">${escH(v)}</td>`;
     er.appendChild(tr);
   }
+}
+
+async function saveNormalizedName() {
+  const value = document.getElementById("normalizedName").value.trim();
+  const status = document.getElementById("nameStatus");
+  try {
+    const response = await fetch("/api/events/" + encodeURIComponent(getEventId()), {
+      method: "PATCH", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({normalized_name: value || null})
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Save failed");
+    status.textContent = value ? "Saved. Refresh lane/XMLTV exports to apply it." : "Cleared; automatic naming will be used.";
+    status.style.color = "var(--success)";
+    loadDetail();
+  } catch (err) {
+    status.textContent = err.message || "Save failed";
+    status.style.color = "var(--danger)";
+  }
+}
+
+function clearNormalizedName() {
+  document.getElementById("normalizedName").value = "";
+  saveNormalizedName();
 }
 
 async function copyJson() {

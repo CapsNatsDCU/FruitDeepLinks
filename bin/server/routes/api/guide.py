@@ -94,7 +94,14 @@ def api_guide():
 
     with get_conn() as conn:
         cur = conn.cursor()
+        try:
+            from xtream_mode import is_xtream_only
+            xtream_only = is_xtream_only(conn)
+        except Exception:
+            xtream_only = False
         table_names = {row[0] for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        event_columns = {row[1] for row in cur.execute("PRAGMA table_info(events)")} if "events" in table_names else set()
+        normalized_select = "e.normalized_name," if "normalized_name" in event_columns else ""
         has_playables = "playables" in table_names
         playable_columns = set()
         if has_playables:
@@ -111,9 +118,12 @@ def api_guide():
             f"SELECT l.lane_id, l.name, l.logical_number FROM lanes l {lane_where} ORDER BY l.lane_id",
             (lane_filter, lane_filter),
         ).fetchall()
+        mode_clause = ""
+        if xtream_only:
+            mode_clause = " AND (COALESCE(le.is_placeholder, 0) = 1 OR LOWER(COALESCE(le.chosen_provider, '')) = 'xtream')"
         rows = cur.execute(
             f"""
-            SELECT le.*, e.title AS event_title, e.channel_name, e.raw_attributes_json,
+            SELECT le.*, e.title AS event_title, {normalized_select} e.channel_name, e.raw_attributes_json,
                    e.synopsis, e.classification_json, e.genres_json,
                    {playable_select}
               FROM lane_events le
@@ -122,6 +132,7 @@ def api_guide():
              WHERE datetime(le.start_utc) < datetime(?) AND datetime(le.end_utc) > datetime(?)
                AND (? OR COALESCE(le.is_placeholder, 0) = 0)
                AND (? IS NULL OR le.lane_id = ?)
+               {mode_clause}
              ORDER BY le.lane_id, le.start_utc
             """,
             (end.isoformat(), start.isoformat(), include_placeholders, lane_filter, lane_filter),
@@ -137,7 +148,8 @@ def api_guide():
                 wanted = [name for name in ("event_id", "playable_id", "provider", "logical_service", "service_name", "title", "feed_name", "feed_type", "stream_id") if name in columns]
                 if "event_id" in wanted:
                     placeholders = ",".join("?" for _ in event_ids)
-                    for playable in cur.execute(f"SELECT {', '.join(wanted)} FROM playables WHERE event_id IN ({placeholders})", event_ids):
+                    playable_mode_clause = " AND LOWER(COALESCE(provider, '')) = 'xtream'" if xtream_only else ""
+                    for playable in cur.execute(f"SELECT {', '.join(wanted)} FROM playables WHERE event_id IN ({placeholders}){playable_mode_clause}", event_ids):
                         playable_by_event.setdefault(playable["event_id"], []).append(_display_playable(dict(playable)))
         favorite_teams = load_preferences(conn).get("favorite_teams", [])
         try:

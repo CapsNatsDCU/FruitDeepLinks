@@ -105,6 +105,11 @@ def _build_filters(conn: sqlite3.Connection) -> Dict[str, Any]:
     providers: List[dict] = []
     amazon_services: List[dict] = []
     espn_services: List[dict] = []
+    try:
+        from xtream_mode import is_xtream_only
+        xtream_only = is_xtream_only(conn)
+    except Exception:
+        xtream_only = False
 
     if _LOGICAL_SERVICES_AVAILABLE:
         try:
@@ -123,6 +128,8 @@ def _build_filters(conn: sqlite3.Connection) -> Dict[str, Any]:
                 service_counts[canonical] = service_counts.get(canonical, 0) + count
 
             for code, count in sorted(service_counts.items(), key=lambda x: -x[1]):
+                if xtream_only and code != "xtream":
+                    continue
                 entry = {"scheme": code, "name": get_display_name(code), "count": count}
                 if code == "aiv" or code.startswith("aiv_"):
                     amazon_services.append(entry)
@@ -153,6 +160,8 @@ def _build_filters(conn: sqlite3.Connection) -> Dict[str, Any]:
                 provider_counts[canonical] = provider_counts.get(canonical, 0) + count
 
             for provider, count in sorted(provider_counts.items(), key=lambda x: -x[1]):
+                if xtream_only and provider != "xtream":
+                    continue
                 name = get_display_name(provider) if _LOGICAL_SERVICES_AVAILABLE else provider.upper()
                 entry = {"scheme": provider, "name": name, "count": count}
                 if provider == "aiv":
@@ -167,13 +176,20 @@ def _build_filters(conn: sqlite3.Connection) -> Dict[str, Any]:
     # Sports from genres_json
     sports: Dict[str, int] = {}
     cur = conn.cursor()
+    event_mode_clause = ""
+    if xtream_only:
+        event_mode_clause = (
+            " AND EXISTS (SELECT 1 FROM playables xp WHERE xp.event_id = events.id "
+            "AND LOWER(COALESCE(xp.provider, '')) = 'xtream')"
+        )
     try:
         cur.execute(
-            """
+            f"""
             SELECT genres_json, COUNT(*) AS event_count
             FROM events
             WHERE end_utc > datetime('now')
               AND genres_json IS NOT NULL AND genres_json != '[]'
+              {event_mode_clause}
             GROUP BY genres_json
             """
         )
@@ -195,11 +211,12 @@ def _build_filters(conn: sqlite3.Connection) -> Dict[str, Any]:
     leagues: Dict[str, int] = {}
     try:
         cur.execute(
-            """
+            f"""
             SELECT classification_json, COUNT(*) AS event_count
             FROM events
             WHERE end_utc > datetime('now')
               AND classification_json IS NOT NULL AND classification_json != '[]'
+              {event_mode_clause}
             GROUP BY classification_json
             """
         )

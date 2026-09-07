@@ -25,6 +25,7 @@ _DEFAULTS: Dict[str, Any] = {
     "service_priorities": {},
     "amazon_penalty": True,
     "amazon_master_enabled": True,
+    "xtream_only": False,
     "language_preference": "en",
     "prefer_favorite_team_broadcaster": False,
     "favorite_teams": [],
@@ -239,6 +240,11 @@ SETTINGS_DEFS: Dict[str, tuple] = {
         "to raise ADB lane counts per provider to avoid dropped duplicates. Requires a refresh "
         "to take effect.",
     ),
+    "xtream_only": (
+        "XTREAM_ONLY", "bool", False,
+        "Xtream Only",
+        "Use Xtream as the sole source for event discovery, selection, guide output, and playback. Existing multi-provider behavior resumes when disabled. Persistent Xtream channels are unaffected.",
+    ),
     "prefer_favorite_team_broadcaster": (
         None, "bool", False,
         "Prefer Favorite-Team Broadcaster",
@@ -375,7 +381,7 @@ SETTINGS_DEFS: Dict[str, tuple] = {
         "Model name exposed by the local OpenAI-compatible endpoint.",
     ),
     "local_ai_event_parsing_timeout_seconds": (
-        "LOCAL_AI_EVENT_PARSING_TIMEOUT_SECONDS", "int", 5,
+        "LOCAL_AI_EVENT_PARSING_TIMEOUT_SECONDS", "int", 60,
         "Local AI Request Timeout",
         "Maximum seconds for one optional local metadata request. A timeout never blocks the refresh.",
     ),

@@ -480,7 +480,7 @@ def ensure_events_schema(conn: sqlite3.Connection):
         airing_type TEXT, classification_json TEXT, genres_json TEXT, content_segments_json TEXT,
         is_free INTEGER, is_premium INTEGER, runtime_secs INTEGER, start_ms INTEGER, end_ms INTEGER,
         start_utc TEXT, end_utc TEXT, created_ms INTEGER, created_utc TEXT,
-        hero_image_url TEXT,
+        hero_image_url TEXT, normalized_name TEXT,
         last_seen_utc TEXT, raw_attributes_json TEXT)""")
 
     cur.execute("""CREATE TABLE IF NOT EXISTS event_images (
@@ -512,6 +512,8 @@ def ensure_events_schema(conn: sqlite3.Connection):
         for name, decl in cols.items():
             if name not in existing:
                 cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+    _ensure_cols("events", {"normalized_name": "TEXT"})
 
     _ensure_cols("playables", {
         "service_name": "TEXT",

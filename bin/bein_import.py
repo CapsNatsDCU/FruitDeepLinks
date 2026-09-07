@@ -19,6 +19,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 LOG = logging.getLogger("bein_import")
 
+try:
+    from event_naming import ensure_normalized_name_column
+except ImportError:
+    def ensure_normalized_name_column(conn):
+        return False
+
 # Schema version tracking
 _SCHEMA_ENSURED = False
 
@@ -87,6 +93,7 @@ def ensure_schema(conn: sqlite3.Connection):
             PRIMARY KEY (event_id, playable_id)
         )
     """)
+    ensure_normalized_name_column(conn)
     
     # Indexes
     cur.execute("CREATE INDEX IF NOT EXISTS idx_events_time ON events(start_utc, end_utc)")
@@ -672,6 +679,9 @@ def upsert_event(conn: sqlite3.Connection, event: Dict[str, Any], dry_run: bool 
         return
     
     cur = conn.cursor()
+    existing_name = cur.execute(
+        "SELECT normalized_name FROM events WHERE id = ?", (event["id"],)
+    ).fetchone()
     cur.execute("""
         INSERT OR REPLACE INTO events (
             id, pvid, slug, title, title_brief, synopsis, synopsis_brief,
@@ -679,8 +689,8 @@ def upsert_event(conn: sqlite3.Connection, event: Dict[str, Any], dry_run: bool 
             classification_json, genres_json, content_segments_json,
             is_free, is_premium, runtime_secs,
             start_ms, end_ms, start_utc, end_utc,
-            created_ms, created_utc, hero_image_url, last_seen_utc, raw_attributes_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            created_ms, created_utc, hero_image_url, normalized_name, last_seen_utc, raw_attributes_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         event["id"], event["pvid"], event["slug"], event["title"], event["title_brief"],
         event["synopsis"], event["synopsis_brief"], event["channel_name"],
@@ -688,7 +698,8 @@ def upsert_event(conn: sqlite3.Connection, event: Dict[str, Any], dry_run: bool 
         event["genres_json"], event["content_segments_json"], event["is_free"],
         event["is_premium"], event["runtime_secs"], event["start_ms"], event["end_ms"],
         event["start_utc"], event["end_utc"], event["created_ms"], event["created_utc"],
-        event["hero_image_url"], event["last_seen_utc"], event["raw_attributes_json"]
+        event["hero_image_url"], existing_name[0] if existing_name else event.get("normalized_name"),
+        event["last_seen_utc"], event["raw_attributes_json"]
     ))
 
 

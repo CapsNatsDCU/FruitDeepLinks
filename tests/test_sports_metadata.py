@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 from fruit_export_lanes import build_lanes_xmltv
 from sports_metadata import (applicable_rule, coverage, ensure_schema, resolve_source_event,
-                             save_rule, utc_instant, utc_text)
+                             save_rule, sync_legacy_events, utc_instant, utc_text)
 
 
 class SportsMetadataTests(unittest.TestCase):
@@ -88,6 +88,46 @@ class SportsMetadataTests(unittest.TestCase):
             programme = ET.parse(path).find("programme")
             parsed = datetime.strptime(programme.attrib["start"], "%Y%m%d%H%M%S %z").astimezone(timezone.utc)
         self.assertEqual(datetime(2026, 11, 1, 5, 30, tzinfo=timezone.utc), parsed)
+
+    def test_sync_accepts_production_default_tuple_rows(self):
+        """The lane builder opens SQLite without sqlite3.Row (regression for ValueError)."""
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.executescript("""
+              CREATE TABLE events (
+                id TEXT PRIMARY KEY, title TEXT, start_utc TEXT, end_utc TEXT,
+                raw_attributes_json TEXT, classification_json TEXT,
+                channel_provider_id TEXT
+              );
+              INSERT INTO events VALUES(
+                'xtream:realistic-event-id-12345', 'Washington Capitals at Philadelphia Flyers',
+                '2026-10-11T17:00:00Z', '2026-10-11T20:00:00Z',
+                '{"provider":"xtream","sport_name":"Ice hockey","league_name":"NHL"}', '[]', 'xtream'
+              );
+            """)
+            summary = sync_legacy_events(conn, ai_mode="disabled")
+            self.assertEqual(1, summary["resolved"])
+            self.assertEqual(1, conn.execute("SELECT COUNT(*) FROM canonical_events").fetchone()[0])
+        finally:
+            conn.close()
+
+    def test_sync_tolerates_legacy_list_in_provider_metadata_column(self):
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.executescript("""
+              CREATE TABLE events (
+                id TEXT PRIMARY KEY, title TEXT, start_utc TEXT, end_utc TEXT,
+                raw_attributes_json TEXT, classification_json TEXT,
+                channel_provider_id TEXT
+              );
+              INSERT INTO events VALUES(
+                'legacy-list-metadata', 'Unstructured sports feed',
+                '2026-10-11T17:00:00Z', '2026-10-11T20:00:00Z', '[]', '[]', 'legacy'
+              );
+            """)
+            self.assertEqual(1, sync_legacy_events(conn, ai_mode="disabled")["resolved"])
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

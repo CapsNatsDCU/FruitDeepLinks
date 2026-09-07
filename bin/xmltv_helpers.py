@@ -11,6 +11,12 @@ import re
 from typing import Dict, Optional, List
 import xml.etree.ElementTree as ET
 
+try:
+    from event_naming import programming_name
+except ImportError:  # pragma: no cover - minimal standalone fallback
+    def programming_name(event: Dict) -> str:
+        return event.get("normalized_name") or event.get("title") or "Sports Event"
+
 # -------------------- Provider Display Names --------------------
 def get_provider_display_name(provider_id: str) -> Optional[str]:
     """Map provider IDs to friendly display names"""
@@ -487,7 +493,14 @@ def build_enhanced_title(event: Dict) -> str:
     Returns:
         Enhanced title string
     """
-    title = event.get("title")
+    # A manual normalized_name always wins.  Otherwise use a generated
+    # matchup name when structured team/league metadata is available.
+    title = programming_name(event)
+    if event.get("normalized_name"):
+        return title
+    generated = title != (event.get("title") or "Sports Event")
+    if generated and " @ " in title:
+        return title
     synopsis = event.get("synopsis") or ""
     event_id = event.get("id", "")
     

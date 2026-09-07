@@ -45,8 +45,12 @@ def get_conn(db_path: Optional[Path] = None, row_factory=sqlite3.Row):
     if not path.exists():
         raise FileNotFoundError(f"Database not found: {path}")
 
-    conn = sqlite3.connect(str(path))
+    # Read routes use a separate connection from the refresh writer.  The
+    # timeout is only a small concurrency cushion; canonical materialization
+    # is intentionally never performed here.
+    conn = sqlite3.connect(str(path), timeout=30)
     conn.row_factory = row_factory
+    conn.execute("PRAGMA busy_timeout=30000")
     try:
         yield conn
     finally:
@@ -64,8 +68,9 @@ def get_conn_or_none(db_path: Optional[Path] = None, row_factory=sqlite3.Row):
         yield None
         return
 
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), timeout=30)
     conn.row_factory = row_factory
+    conn.execute("PRAGMA busy_timeout=30000")
     try:
         yield conn
     finally:

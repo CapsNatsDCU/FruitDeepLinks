@@ -53,6 +53,7 @@ services:
       - NO_NETWORK=${NO_NETWORK:-false}
       # Xtream IPTV (optional). Username/password remain environment-only and
       # are never persisted by the application.
+      - XTREAM_ONLY=${XTREAM_ONLY:-true}
       - XTREAM_ENABLED=${XTREAM_ENABLED:-false}
       - XTREAM_SERVER_URL=${XTREAM_SERVER_URL:-}
       - XTREAM_USERNAME=${XTREAM_USERNAME:-}

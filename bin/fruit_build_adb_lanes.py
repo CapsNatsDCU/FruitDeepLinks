@@ -523,6 +523,14 @@ def build_adb_lanes(db_path: str, provider_filter: Optional[str] = None) -> None
     providers = load_adb_enabled_providers(conn)
     if provider_filter:
         providers = [(c, n) for (c, n) in providers if c == provider_filter]
+    try:
+        from xtream_mode import is_xtream_only
+        if is_xtream_only(conn):
+            # Provider-lane configuration can outlive a mode switch. Do not
+            # materialize stale non-Xtream ADB lanes while Xtream-only is on.
+            providers = [(c, n) for (c, n) in providers if c.lower() == "xtream"]
+    except Exception:
+        pass
 
     if not providers:
         log.info("No ADB-enabled providers to build (provider_filter=%s).", provider_filter or "None")

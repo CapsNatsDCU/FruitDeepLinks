@@ -17,6 +17,7 @@ from server.services.favorite_teams import (
     StoredFavoriteTeamsMalformed,
     create_team,
     delete_team,
+    discover_team_options,
     export_favorite_team_settings,
     import_favorite_team_settings,
     load_favorite_team_settings,
@@ -103,6 +104,27 @@ class FavoriteTeamSettingsServiceTest(unittest.TestCase):
         create_team(self.conn, CAPITALS)
         with self.assertRaises(TeamPreferenceValidationError):
             create_team(self.conn, dict(CAPITALS, team=" washington capitals "))
+
+    def test_discover_team_options_uses_structured_event_metadata(self):
+        self.conn.execute(
+            "CREATE TABLE events (title TEXT, title_brief TEXT, classification_json TEXT, raw_attributes_json TEXT)"
+        )
+        self.conn.execute(
+            "INSERT INTO events VALUES (?, ?, ?, ?)",
+            (
+                "NHL | Capitals @ Lightning",
+                None,
+                json.dumps([{"type": "league", "value": "NHL"}]),
+                json.dumps({"competitors": [
+                    {"name": "Washington Capitals", "homeAway": "away"},
+                    {"name": "Tampa Bay Lightning", "homeAway": "home"},
+                ]}),
+            ),
+        )
+        options = discover_team_options(self.conn)
+        by_team = {option["team"]: option for option in options}
+        self.assertEqual("NHL", by_team["Washington Capitals"]["league"])
+        self.assertEqual(1, by_team["Tampa Bay Lightning"]["event_count"])
 
     def test_edit_enable_disable_and_delete(self):
         create_team(self.conn, CAPITALS)
@@ -233,6 +255,9 @@ class FavoriteTeamSettingsApiTest(unittest.TestCase):
         empty = self.client.get("/api/settings/favorite-teams")
         self.assertEqual(200, empty.status_code)
         self.assertEqual([], empty.get_json()["teams"])
+        options = self.client.get("/api/settings/favorite-teams/options")
+        self.assertEqual(200, options.status_code)
+        self.assertEqual([], options.get_json()["options"])
 
         created = self.client.post("/api/settings/favorite-teams", json=CAPITALS)
         self.assertEqual(201, created.status_code)

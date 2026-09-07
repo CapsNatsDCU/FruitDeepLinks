@@ -44,6 +44,7 @@ def api_filters():
 def api_filter_priorities():
     if request.method == "GET":
         prefs = get_preferences()
+        xtream_only = bool(prefs.get("xtream_only", False))
         return jsonify({
             "service_priorities": prefs.get("service_priorities", {}),
             "amazon_penalty": prefs.get("amazon_penalty", True),
@@ -108,6 +109,9 @@ def api_selection_examples():
                 """
                 params.extend(enabled_expanded)
 
+            if xtream_only:
+                enabled_filter_sql += " AND LOWER(COALESCE(p.provider, '')) = 'xtream'"
+
             cur.execute(f"""
                 SELECT e.id, e.title, e.channel_name, e.start_utc,
                        COUNT(DISTINCT p.logical_service) AS service_count
@@ -115,6 +119,7 @@ def api_selection_examples():
                 JOIN playables p ON e.id = p.event_id
                 WHERE datetime(e.end_utc) > datetime('now')
                   AND p.logical_service IS NOT NULL
+                  {"AND LOWER(COALESCE(p.provider, '')) = 'xtream'" if xtream_only else ""}
                   {enabled_filter_sql}
                 GROUP BY e.id
                 HAVING service_count > 1
@@ -127,11 +132,12 @@ def api_selection_examples():
                 event_id = row["id"]
 
                 # Get all playables for this event
-                cur.execute("""
+                cur.execute(f"""
                     SELECT DISTINCT logical_service, provider, deeplink_play, http_deeplink_url
                     FROM playables
                     WHERE event_id = ?
                       AND logical_service IS NOT NULL
+                      {"AND LOWER(COALESCE(provider, '')) = 'xtream'" if xtream_only else ""}
                     ORDER BY priority ASC
                 """, (event_id,))
                 playable_rows = cur.fetchall()

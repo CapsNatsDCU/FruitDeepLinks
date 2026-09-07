@@ -404,14 +404,14 @@ curl -X POST "$BASE/api/filters/preferences" \
 
 <div class="note">
   <div class="note-title">What is Event Inspector?</div>
-  These endpoints power the <code>/events</code> admin page and provide read-only access to the raw event row plus all related playables.
+  These endpoints power the <code>/events</code> admin page and provide access to the raw event row plus all related playables. Event programming-name overrides are also supported.
   Use them to search the DB, inspect raw JSON columns, and debug service selection / deeplink fallbacks.
 </div>
 
 <div class="card" style="margin-bottom:14px">
   <h2>List Events (Search / Filters / Paging)</h2>
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/api/events</code></div>
-  <p class="description">Returns a paginated list of events with summary fields (title, times, providers, playables count). Supports search + common admin filters.</p>
+  <p class="description">Returns a paginated list of events with summary fields (source title, normalized programming name, times, providers, playables count). Supports search + common admin filters.</p>
   <div class="params">
     <div><span class="param-name">q</span>: Search text (matches id, pvid, slug, title, synopsis)</div>
     <div><span class="param-name">live</span>: <code>1</code> to restrict to events live right now</div>
@@ -440,6 +440,13 @@ curl "$BASE/api/events/appletv-umc.cse.12345" | jq
 
 # Quick look at just playables
 curl "$BASE/api/events/appletv-umc.cse.12345" | jq '.playables[] | {provider, service_name, priority, deeplink_play, http_deeplink_url}'</pre>
+  <p class="description">Use <code>PATCH /api/events/&lt;event_id&gt;</code> with <code>{"normalized_name":"[League] Road Team @ Home Team (Broadcast)"}</code> to save an operator override. Send <code>null</code> to clear it.</p>
+</div>
+
+<div class="card" style="margin-bottom:14px">
+  <h2>Favorite Team Metadata Options</h2>
+  <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/api/settings/favorite-teams/options</code> Teams observed in imported event and EPG metadata</div>
+  <p class="description">Returns safe dropdown options with the observed team name, sport, league, and event count. The settings page uses these options to pre-fill favorite-team identities; manually entered teams remain supported.</p>
 </div>
 
 <div class="card" style="margin-bottom:14px">

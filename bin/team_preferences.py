@@ -7,6 +7,12 @@ import re
 import unicodedata
 from typing import Any, Iterable, Mapping
 
+try:
+    from event_naming import extract_team_names
+except ImportError:  # pragma: no cover - minimal standalone installs
+    def extract_team_names(event: Mapping[str, Any]) -> list[str]:
+        return []
+
 TEAM_FEED_SCORE, PREFERRED_TERM_SCORE, TEAM_ROLE_SCORE = 100, 70, 40
 NEUTRAL_FEED_SCORE, OPPONENT_FEED_SCORE, AVOID_TERM_SCORE = 10, -30, -50
 _MATCHUP_RE = re.compile(r"\s+(vs\.?|versus|at|@)\s+|\s+[-\u2013\u2014]\s+", re.I)
@@ -155,13 +161,19 @@ def _safe_alias(alias: str) -> tuple[bool, str | None]:
 def match_favorite_teams(event: Mapping[str, Any], favorite_teams: Any) -> list[dict[str, Any]]:
     """Return only high-confidence canonical or safe phrase-alias matches."""
     text, matches = _event_text(event), []
+    structured_markers = {_normalize_text(name) for name in extract_team_names(dict(event))}
     for team in (x for x in normalize_favorite_teams(favorite_teams) if x["enabled"]):
         context_ok, _ = _context_matches(event, team)
         if not context_ok: continue
+        canonical_marker = _normalize_text(team["canonical_name"])
+        if canonical_marker in structured_markers:
+            matches.append({"team": team, "matched_term": team["canonical_name"], "matched_by": "structured_metadata", "confidence": "high", "matched_text": team["canonical_name"]}); continue
         if _contains_term(text, team["canonical_name"]):
             matches.append({"team": team, "matched_term": team["canonical_name"], "matched_by": "canonical_name", "confidence": "high", "matched_text": team["canonical_name"]}); continue
         for alias in team["aliases"]:
             safe, _ = _safe_alias(alias)
+            if safe and _normalize_text(alias) in structured_markers:
+                matches.append({"team": team, "matched_term": alias, "matched_by": "structured_metadata", "confidence": "high", "matched_text": alias}); break
             if safe and _contains_term(text, alias):
                 matches.append({"team": team, "matched_term": alias, "matched_by": "phrase_alias", "confidence": "high", "matched_text": alias}); break
     return matches

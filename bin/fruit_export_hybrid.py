@@ -314,9 +314,11 @@ def get_direct_events(
     cur = conn.cursor()
     now = datetime.now(timezone.utc)
     window_end = now + timedelta(hours=hours_window)
+    event_columns = {row[1] for row in cur.execute("PRAGMA table_info(events)")}
+    normalized_select = "e.normalized_name," if "normalized_name" in event_columns else ""
     cur.execute(
-        """
-        SELECT e.id, e.pvid, e.slug, e.title, e.channel_name,
+        f"""
+        SELECT e.id, e.pvid, e.slug, e.title, {normalized_select} e.channel_name,
                e.synopsis, e.synopsis_brief, e.genres_json, e.classification_json,
                e.start_utc, e.end_utc, e.raw_attributes_json, e.hero_image_url
           FROM events e
@@ -672,7 +674,7 @@ def build_direct_m3u(
             if not pvid:
                 continue
 
-            title = event.get("title") or f"Sports Event {idx}"
+            title = build_enhanced_title(event) or f"Sports Event {idx}"
             channel_name = event.get("channel_name") or "Sports"
             provider = get_provider_from_channel(channel_name)
 

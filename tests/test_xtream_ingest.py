@@ -24,6 +24,7 @@ from xtream_ingest import (  # noqa: E402
     redact_credentials,
     stable_event_id,
 )
+from event_naming import programming_name  # noqa: E402
 
 
 def config(**overrides):
@@ -124,6 +125,49 @@ class XtreamParsingTest(unittest.TestCase):
         self.assertEqual(client.get_live_categories(), [{"category_id": "10"}])
         self.assertEqual(len(runner.calls), 1)
 
+    def test_short_epg_accepts_enveloped_rows_and_stream_id(self):
+        session = FakeSession({
+            "epg_listings": [{
+                "id": "epg-555",
+                "title": "Capitals @ Lightning",
+                "description": "NHL live coverage",
+                "start_timestamp": "1788375600",
+                "stop_timestamp": "1788382800",
+            }]
+        })
+        runner = FakeRunner(error=AssertionError("curl must not run on requests success"))
+        client = XtreamClient(config(), session=session, subprocess_runner=runner)
+        rows = client.get_short_epg("555")
+        self.assertEqual(rows[0]["title"], "Capitals @ Lightning")
+        _, params, _ = session.calls[0]
+        self.assertEqual(params["action"], "get_short_epg")
+        self.assertEqual(params["stream_id"], "555")
+        self.assertNotIn("category_id", params)
+
+    def test_snapshot_enriches_each_stream_when_epg_is_available(self):
+        class Client:
+            def __init__(self):
+                self.epg_calls = []
+
+            def get_live_categories(self):
+                return [{"category_id": "10", "category_name": "NHL"}]
+
+            def get_live_streams(self, category_id):
+                return [
+                    {"stream_id": "555", "name": "Match channel 1"},
+                    {"stream_id": "556", "name": "Match channel 2"},
+                ]
+
+            def get_short_epg(self, stream_id):
+                self.epg_calls.append(stream_id)
+                return [{"title": f"Team {stream_id} @ Home", "start_timestamp": "1788375600"}]
+
+        client = Client()
+        _, streams = fetch_snapshot(client, config(category_ids=("10",)))
+        self.assertEqual(client.epg_calls, ["555", "556"])
+        self.assertEqual(streams["10"][0]["epg_title"], "Team 555 @ Home")
+        self.assertEqual(streams["10"][1]["epg_title"], "Team 556 @ Home")
+
     def test_invalid_curl_json_is_safe(self):
         session = FakeSession({"not": "a list"})
         runner = FakeRunner(FakeCompleted(stdout="not-json user name p@ss/word"))
@@ -209,6 +253,33 @@ class XtreamParsingTest(unittest.TestCase):
         self.assertEqual(metadata["category_id"], "10")
         self.assertEqual(metadata["epg_channel_id"], "nhl.555")
         self.assertTrue(metadata["duration_inferred"])
+
+    def test_epg_match_title_and_timing_drive_normalization(self):
+        stream = {
+            "stream_id": 557,
+            "name": "Match channel 557",
+            "xtream_epg": {
+                "title": "NHL | Capitals @ Lightning",
+                "description": "NHL live coverage",
+                "channel_name": "ESPN+",
+                "start_timestamp": "1788375600",
+                "stop_timestamp": "1788382800",
+            },
+        }
+        normalized = normalize_stream(
+            stream,
+            "10",
+            "Sports",
+            config(),
+            now=datetime(2026, 9, 2, 12, tzinfo=timezone.utc),
+        )
+        self.assertEqual(normalized["event"]["title"], "NHL | Capitals @ Lightning")
+        self.assertEqual(normalized["event"]["synopsis"], "NHL live coverage")
+        self.assertEqual(normalized["event"]["start_utc"], "2026-09-02T19:00:00Z")
+        self.assertEqual(
+            programming_name(normalized["event"]),
+            "[NHL] Capitals @ Lightning (ESPN+)",
+        )
 
     def test_embedded_stop_time_is_provider_timing(self):
         stream = {

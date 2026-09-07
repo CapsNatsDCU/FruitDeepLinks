@@ -100,7 +100,7 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
 {% block content %}
 <section class="card favorite-settings" aria-labelledby="favorite-settings-title">
   <h2 id="favorite-settings-title">Favorite Teams &amp; Broadcasters</h2>
-  <p class="favorite-intro">When multiple streams are available for the same event, FruitDeepLinks can prefer feeds associated with your favorite team or broadcaster. These preferences affect ranking only; other streams remain available as fallbacks.</p>
+  <p class="favorite-intro">When multiple streams are available for the same event, FruitDeepLinks can prefer feeds associated with your favorite team or broadcaster. Imported event and Xtream EPG metadata can pre-fill the team identity, sport, and league. These preferences affect ranking only; other streams remain available as fallbacks.</p>
   <label class="favorite-toggle" for="favorite-global-enabled">
     <input id="favorite-global-enabled" type="checkbox" onchange="setFavoriteGlobalEnabled(this.checked)">
     <span><strong>Prefer favorite-team broadcasters</strong><span class="field-help">Turn this off to keep the configuration without changing normal playable ranking.</span></span>
@@ -178,7 +178,7 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
 <script>
 const GROUPS = {
   'Server': ['server_url', 'channels_dvr_ip', 'channels_source_name', 'timezone', 'app_primary_color'],
-  'Lanes': ['num_lanes', 'expand_all_playables'],
+  'Lanes': ['num_lanes', 'expand_all_playables', 'xtream_only'],
   'Pipeline': ['days_ahead', 'padding_minutes', 'max_event_minutes'],
   'Auto Refresh': ['auto_refresh_enabled', 'auto_refresh_time'],
   'Scrapers': ['kayo_enabled', 'fanatiz_enabled', 'bein_enabled', 'nesn_enabled', 'victory_enabled', 'gotham_enabled', 'espn_enabled'],
@@ -194,6 +194,7 @@ const ADVANCED = {
 let _schema = {};
 let _current = {};
 let _favoriteState = {enabled:false, teams:[], malformed:false, errors:[]};
+let _favoriteOptions = [];
 let _persistentChannels = [];
 let _persistentResults = [];
 let _persistentPage = 1;
@@ -573,6 +574,15 @@ async function loadFavoriteTeams() {
   }
 }
 
+async function loadFavoriteTeamOptions() {
+  try {
+    const data = await favoriteRequest('/api/settings/favorite-teams/options');
+    _favoriteOptions = Array.isArray(data.options) ? data.options : [];
+  } catch (err) {
+    _favoriteOptions = [];
+  }
+}
+
 function linesToValues(value) {
   const seen = new Set();
   const result = [];
@@ -594,6 +604,17 @@ function teamFormHtml(team, key, isNew = false) {
   const avoid = Array.isArray(team?.avoid_terms) ? team.avoid_terms.join('\n') : '';
   const prefix = `team-${key}`;
   return `<div class="team-form-grid">
+    <label class="full" for="${prefix}-preset">Choose from imported event metadata
+      <select id="${prefix}-preset" onchange="applyFavoriteTeamPreset('${key}', this.value)">
+        <option value="">${_favoriteOptions.length ? 'Select an observed team…' : 'No imported team metadata yet'}</option>
+        ${_favoriteOptions.map(option => {
+          const detail = [option.league, option.sport].filter(Boolean).join(' · ');
+          const count = option.event_count ? ` · ${option.event_count} event${option.event_count === 1 ? '' : 's'}` : '';
+          return `<option value="${escHtml(option.team)}" ${option.team === name ? 'selected' : ''}>${escHtml(option.team)}${detail ? ` — ${escHtml(detail)}` : ''}${count}</option>`;
+        }).join('')}
+      </select>
+      <span class="field-help">Choices come from persisted event/API metadata. You can still type a team that is not currently imported.</span>
+    </label>
     <label class="full" for="${prefix}-name">Team display name <span aria-hidden="true">*</span>
       <input id="${prefix}-name" type="text" required value="${escHtml(name)}" placeholder="Example City Comets">
       <span class="field-help">Required. The exact display name is added as an alias for new teams.</span>
@@ -617,6 +638,19 @@ function teamFormHtml(team, key, isNew = false) {
     <button class="btn" type="button" onclick="${isNew ? 'createFavoriteTeam()' : `saveFavoriteTeam(${key})`}">Save</button>
     <button class="btn btn-secondary" type="button" onclick="${isNew ? 'cancelAddTeam()' : 'renderFavoriteTeamList()'}">Cancel</button>
   </div>`;
+}
+
+function applyFavoriteTeamPreset(key, selectedName) {
+  const option = _favoriteOptions.find(item => item.team === selectedName);
+  if (!option) return;
+  const setValue = (id, value, onlyIfEmpty = false) => {
+    const field = document.getElementById(id);
+    if (field && value && (!onlyIfEmpty || !field.value.trim())) field.value = value;
+  };
+  setValue(`team-${key}-name`, option.team);
+  setValue(`team-${key}-sport`, option.sport || '', true);
+  setValue(`team-${key}-league`, option.league || '', true);
+  setValue(`team-${key}-aliases`, option.team, true);
 }
 
 function renderFavoriteTeamList() {
@@ -670,11 +704,12 @@ function toggleTeamPanel(index, button) {
   if (opening) document.getElementById(`team-${index}-name`).focus();
 }
 
-function showAddTeamForm() {
+async function showAddTeamForm() {
   if (_favoriteState.malformed) {
     favoriteError('Import valid favorite-team settings or reset them before adding a team.');
     return;
   }
+  if (!_favoriteOptions.length) await loadFavoriteTeamOptions();
   const panel = document.getElementById('favorite-add-panel');
   panel.hidden = false;
   panel.innerHTML = `<div class="team-card"><div class="team-panel" style="border-top:0"><h3 style="margin-top:0">Add Favorite Team</h3>${teamFormHtml({}, 'new', true)}</div></div>`;
@@ -875,6 +910,7 @@ document.addEventListener('change', e => {
 
 loadSettings();
 loadFavoriteTeams();
+loadFavoriteTeamOptions();
 loadPersistentChannels();
 loadXtreamCategories();
 </script>

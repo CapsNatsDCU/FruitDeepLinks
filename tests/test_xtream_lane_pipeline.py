@@ -125,7 +125,7 @@ class XtreamLanePipelineTest(unittest.TestCase):
         path = Path(self.tmp.name) / "lanes.xml"
         build_lanes_xmltv(self.conn, str(path))
         content = path.read_text(encoding="utf-8")
-        self.assertIn(self.provider_name, content)
+        self.assertIn("[NFL] Commanders @ Ravens (NFL PPV)", content)
         self.assertIn("Xtream IPTV", content)
         self.assertNotIn("demo user", content)
         self.assertNotIn("secret", content)
@@ -166,7 +166,7 @@ class XtreamLanePipelineTest(unittest.TestCase):
         m3u_path = Path(self.tmp.name) / "live-shaped.m3u"
         build_lanes_xmltv(self.conn, str(xml_path))
         build_lanes_m3u(self.conn, str(m3u_path), "http://fruit.local:6655")
-        self.assertIn(self.provider_name, xml_path.read_text(encoding="utf-8"))
+        self.assertIn("[NFL] Commanders @ Ravens (NFL PPV)", xml_path.read_text(encoding="utf-8"))
         self.assertIn(
             "http://fruit.local:6655/lane/1/stream.m3u8",
             m3u_path.read_text(encoding="utf-8"),

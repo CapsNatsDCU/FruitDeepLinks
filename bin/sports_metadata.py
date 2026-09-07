@@ -15,6 +15,8 @@ import json
 import logging
 import re
 import sqlite3
+import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
@@ -126,6 +128,17 @@ def _source_input_fingerprint(data: Mapping[str, Any], raw: Mapping[str, Any]) -
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create idempotent canonical tables without altering legacy records."""
+    # This function is a refresh/migration boundary.  It is deliberately not
+    # called by read routes: changing journal mode can acquire a write lock.
+    # WAL lets independently opened read connections keep serving a materialized
+    # catalog while the importer owns short write transactions.
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+    except sqlite3.DatabaseError:
+        # In-memory and read-only compatibility databases may not support WAL;
+        # the additive schema below remains useful there.
+        pass
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS sports (
       id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -142,6 +155,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     CREATE TABLE IF NOT EXISTS canonical_events (
       id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, sport_id TEXT REFERENCES sports(id),
       league_id TEXT REFERENCES leagues(id), season TEXT, competition TEXT, stage TEXT, round TEXT,
+      recurring_event_id TEXT,
       event_type TEXT, start_utc TEXT NOT NULL, end_utc TEXT, venue TEXT, status TEXT NOT NULL DEFAULT 'discovered',
       title TEXT, metadata_json TEXT NOT NULL DEFAULT '{}', created_utc TEXT NOT NULL, updated_utc TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS canonical_event_participants (
@@ -182,6 +196,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_rules_target ON sports_rules(target_type, target_id, enabled);
     CREATE INDEX IF NOT EXISTS idx_canonical_events_time ON canonical_events(start_utc);
     """)
+    # Existing Fruit databases already have canonical_events.  Keep the racing
+    # catalog link additive and idempotent rather than asking operators to
+    # rebuild their schedule history.
+    canonical_columns = {row[1] for row in conn.execute("PRAGMA table_info(canonical_events)")}
+    if "recurring_event_id" not in canonical_columns:
+        conn.execute("ALTER TABLE canonical_events ADD COLUMN recurring_event_id TEXT")
     # The knowledge catalog is additive and local-only at runtime.  Installing
     # its indexes here keeps every existing importer on the same schema without
     # making event resolution depend on a network refresh.
@@ -378,6 +398,7 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
                          data: Mapping[str, Any], commit: bool = True,
                          schema_ready: bool = False, ai_config=None,
                          ai_requester=None, ai_budget: list[int] | None = None,
+                         ai_mode: str = "bounded",
                          recheck_inferred_mapping: bool = True) -> dict[str, Any]:
     """Resolve one structured source record to Fruit-owned canonical identity."""
     if not schema_ready:
@@ -385,6 +406,12 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     source = _norm(source) or "unknown"
     prior = conn.execute("SELECT canonical_event_id,resolution_kind,evidence_json FROM source_event_records WHERE source=? AND source_event_id=?", (source, str(source_event_id))).fetchone()
     raw = _json(data.get("raw_attributes_json"))
+    # Legacy databases occasionally contain a JSON list (or other valid JSON)
+    # in a field intended for a provider metadata object.  It is not resolver
+    # evidence; normalize it to an empty mapping rather than letting `.get()`
+    # abort a refresh-time canonical sync.
+    if not isinstance(raw, Mapping):
+        raw = {}
     source_fingerprint = _source_input_fingerprint(data, raw)
     prior_evidence = _json(prior[2]) if prior else {}
     prior_is_current = bool(prior and (not recheck_inferred_mapping or prior[1] == "manual_override" or not prior_evidence.get("source_input_fingerprint")
@@ -405,11 +432,17 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     event_type = data.get("event_type") or raw.get("event_type") or raw.get("eventType") or "event"
     competition = data.get("competition") or raw.get("competition")
     ai_result = {"status": "not_needed", "interpretation": None}
+    if ai_mode not in {"disabled", "bounded", "unlimited"}:
+        raise ValueError("ai_mode must be disabled, bounded, or unlimited")
     try:
         from local_ai_event_parser import load_config
         active_ai_config = ai_config or load_config(conn)
     except Exception:
         active_ai_config = ai_config
+    if ai_mode == "disabled" and active_ai_config is not None:
+        # Keep deterministic parsing/catalog resolution intact while making a
+        # refresh context incapable of opening a model connection.
+        active_ai_config = replace(active_ai_config, enabled=False)
     strategy = getattr(active_ai_config, "interpretation_strategy", "deterministic_first")
     if strategy not in {"deterministic_first", "ai_first"}:
         strategy = "deterministic_first"
@@ -515,9 +548,9 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
         metadata["local_ai"] = {"status": ai_result.get("status"), "model": getattr(active_ai_config, "model", None),
                                 "used": bool(ai_result.get("interpretation"))}
     fingerprint = event_fingerprint(sport=sport, league=league, participants=participants, event_type=str(event_type), start_utc=start_text)
-    conn.execute("INSERT INTO canonical_events(id,fingerprint,sport_id,league_id,season,competition,stage,round,event_type,start_utc,end_utc,venue,status,title,metadata_json,created_utc,updated_utc) "
-                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET end_utc=COALESCE(excluded.end_utc,canonical_events.end_utc), status=excluded.status,title=COALESCE(excluded.title,canonical_events.title),metadata_json=excluded.metadata_json,updated_utc=excluded.updated_utc",
-                 (canonical_id, fingerprint, sport_id, league_id, data.get("season") or raw.get("season"), competition, data.get("stage") or raw.get("stage"), data.get("round") or raw.get("round"), str(event_type), start_text, end_text, data.get("venue") or raw.get("venue"), data.get("status") or raw.get("status") or "discovered", data.get("title"), json.dumps(metadata), utc_now(), utc_now()))
+    conn.execute("INSERT INTO canonical_events(id,fingerprint,sport_id,league_id,season,competition,stage,round,recurring_event_id,event_type,start_utc,end_utc,venue,status,title,metadata_json,created_utc,updated_utc) "
+                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET end_utc=COALESCE(excluded.end_utc,canonical_events.end_utc), status=excluded.status,title=COALESCE(excluded.title,canonical_events.title),recurring_event_id=COALESCE(excluded.recurring_event_id,canonical_events.recurring_event_id),metadata_json=excluded.metadata_json,updated_utc=excluded.updated_utc",
+                 (canonical_id, fingerprint, sport_id, league_id, data.get("season") or raw.get("season"), competition, data.get("stage") or raw.get("stage"), data.get("round") or raw.get("round"), recurring_event["id"] if recurring_event else None, str(event_type), start_text, end_text, data.get("venue") or raw.get("venue"), data.get("status") or raw.get("status") or "discovered", data.get("title"), json.dumps(metadata), utc_now(), utc_now()))
     conn.execute("DELETE FROM canonical_event_participants WHERE event_id=?", (canonical_id,))
     for participant, team_id in team_rows:
         conn.execute("INSERT INTO canonical_event_participants(event_id,team_id,display_name,role,source_identifier) VALUES(?,?,?,?,?)",
@@ -529,7 +562,8 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     if commit:
         conn.commit()
     return {"resolved": True, "canonical_event_id": canonical_id, "confidence": confidence, "resolution_kind": kind, "start_utc": start_text,
-            "local_ai": {"status": ai_result.get("status"), "used": bool(ai_result.get("interpretation"))}}
+            "local_ai": {"status": ai_result.get("status"), "used": bool(ai_result.get("interpretation")),
+                         "failure_kind": ai_result.get("failure_kind")}}
 
 
 def _legacy_sync_fingerprint(conn: sqlite3.Connection) -> str:
@@ -540,8 +574,15 @@ def _legacy_sync_fingerprint(conn: sqlite3.Connection) -> str:
     return "|".join(map(str, row))
 
 
-def sync_legacy_events(conn: sqlite3.Connection) -> dict[str, int]:
-    """Incrementally backfill canonical records from existing imported events."""
+def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded") -> dict[str, int]:
+    """Incrementally materialize canonical records during refresh/import only.
+
+    ``unlimited`` is represented by a ``None`` budget, never a fabricated
+    giant integer.  The caller selects the context: scheduled refreshes use
+    unlimited, manual refreshes bounded, and export/apply-only jobs disabled.
+    """
+    if ai_mode not in {"disabled", "bounded", "unlimited"}:
+        raise ValueError("ai_mode must be disabled, bounded, or unlimited")
     ensure_schema(conn)
     columns = {r[1] for r in conn.execute("PRAGMA table_info(events)")}
     if not {"id", "start_utc"}.issubset(columns): return {"resolved": 0, "skipped": 0}
@@ -552,18 +593,34 @@ def sync_legacy_events(conn: sqlite3.Connection) -> dict[str, int]:
     except Exception:
         ai_config = None
         ai_state = "local-ai-unavailable"
-    fingerprint = f"{_legacy_sync_fingerprint(conn)}|{ai_state}"
+    # Context is part of completion state.  A disabled read/export pass must
+    # never make a later bounded or overnight-unlimited refresh believe its AI
+    # backlog was already processed.
+    fingerprint = f"{_legacy_sync_fingerprint(conn)}|{ai_state}|{ai_mode}"
     state = conn.execute("SELECT value FROM sports_metadata_state WHERE key='legacy_events_fingerprint'").fetchone()
     if state and state[0] == fingerprint:
         return {"resolved": 0, "skipped": 0, "unchanged": 1}
-    rows = conn.execute("SELECT * FROM events WHERE start_utc IS NOT NULL").fetchall()
+    cursor = conn.execute("SELECT * FROM events WHERE start_utc IS NOT NULL")
+    columns = [column[0] for column in (cursor.description or ())]
+    rows = cursor.fetchall()
     # One bounded budget covers this incremental sync.  Cache hits are free,
     # while a large provider catalog cannot cause an unbounded model walk.
-    ai_budget = [ai_config.max_requests_per_refresh] if ai_config else [0]
+    ai_budget = (None if ai_mode == "unlimited" else
+                 [ai_config.max_requests_per_refresh if ai_mode == "bounded" and ai_config else 0])
     resolved = skipped = pending_ai = 0
+    summary = {"eligible": 0, "cache_hits": 0, "requests": 0, "valid": 0,
+               "low_confidence": 0, "failures": 0, "timeouts": 0,
+               "transport_failures": 0, "validation_failures": 0,
+               "budget_exhausted": 0}
+    started = time.monotonic()
     for row in rows:
-        data = dict(row)
+        # sqlite3.Row supports dict(row); the production lane builder uses the
+        # default tuple row factory.  Zip cursor metadata in that case so a
+        # normal event-id string can never be interpreted as a dict sequence.
+        data = dict(row) if isinstance(row, sqlite3.Row) else dict(zip(columns, row))
         raw = _json(data.get("raw_attributes_json"))
+        if not isinstance(raw, Mapping):
+            raw = {}
         classifications = _json(data.get("classification_json"))
         classified = {str(item.get("type")): item.get("value") for item in classifications if isinstance(item, Mapping)} if isinstance(classifications, list) else {}
         sport = raw.get("sport_name") or raw.get("sport") or classified.get("sport")
@@ -574,17 +631,34 @@ def sync_legacy_events(conn: sqlite3.Connection) -> dict[str, int]:
                   else "xtream" if raw.get("provider") == "xtream" or str(data.get("id", "")).startswith("xtream:")
                   else str(data.get("channel_provider_id") or "legacy"))
         result = resolve_source_event(conn, source=source, source_event_id=str(data["id"]), data=data, commit=False, schema_ready=True,
-                                      ai_budget=ai_budget, recheck_inferred_mapping=False)
+                                      ai_budget=ai_budget, ai_mode=ai_mode,
+                                      recheck_inferred_mapping=False)
         resolved += int(bool(result.get("resolved"))); skipped += int(not result.get("resolved"))
-        pending_ai += int(bool(ai_config and ai_config.max_requests_per_refresh > 0)
-                          and result.get("local_ai", {}).get("status") == "budget_exhausted")
+        status = result.get("local_ai", {}).get("status")
+        if status not in {"not_needed", "disabled", "missing_title"}:
+            summary["eligible"] += 1
+        summary["cache_hits"] += int(status == "cache_hit")
+        summary["requests"] += int(status in {"fresh", "low_confidence", "invalid_schema", "invalid_confidence", "invalid_participants", "transport_failure"})
+        summary["valid"] += int(status in {"fresh", "cache_hit"} and bool(result.get("local_ai", {}).get("used")))
+        summary["low_confidence"] += int(status == "low_confidence")
+        summary["timeouts"] += int(result.get("local_ai", {}).get("failure_kind") == "timeout")
+        summary["transport_failures"] += int(status == "transport_failure")
+        summary["validation_failures"] += int(status in {"invalid_schema", "invalid_confidence", "invalid_participants"})
+        summary["failures"] += int(status in {"transport_failure", "parser_error", "invalid_schema", "invalid_confidence", "invalid_participants"})
+        summary["budget_exhausted"] += int(status == "budget_exhausted")
+        pending_ai += int(status == "budget_exhausted")
     # A capped run is intentionally not marked complete.  On the next refresh
     # cache hits cost nothing and the next bounded slice can be interpreted.
     if not pending_ai:
         conn.execute("INSERT INTO sports_metadata_state(key,value,updated_utc) VALUES('legacy_events_fingerprint',?,?) "
                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_utc=excluded.updated_utc", (fingerprint, utc_now()))
     conn.commit()
-    return {"resolved": resolved, "skipped": skipped, "pending_local_ai": pending_ai, "unchanged": 0}
+    summary["duration"] = round(time.monotonic() - started, 3)
+    LOG.info("Canonical local-AI summary mode=%s eligible=%d cache_hits=%d requests=%d valid=%d low_confidence=%d failures=%d duration=%.3fs timeouts=%d transport_failures=%d validation_failures=%d budget_exhausted=%d",
+             ai_mode, summary["eligible"], summary["cache_hits"], summary["requests"], summary["valid"],
+             summary["low_confidence"], summary["failures"], summary["duration"], summary["timeouts"],
+             summary["transport_failures"], summary["validation_failures"], summary["budget_exhausted"])
+    return {"resolved": resolved, "skipped": skipped, "pending_local_ai": pending_ai, "unchanged": 0, **summary}
 
 
 def save_rule(conn: sqlite3.Connection, *, target_type: str, target_id: str, policy: str,
@@ -609,7 +683,7 @@ def applicable_rule(conn: sqlite3.Connection, canonical_event_id: str) -> dict[s
     event = dict(event)
     team_ids = [r[0] for r in conn.execute("SELECT team_id FROM canonical_event_participants WHERE event_id=? AND team_id IS NOT NULL", (canonical_event_id,))]
     candidates = [("event", canonical_event_id, 5), *[("team", t, 4) for t in team_ids],
-                  ("league", event.get("league_id") or "", 3), ("competition", event.get("competition") or "", 2),
+                  ("league", event.get("league_id") or "", 3), ("competition", event.get("recurring_event_id") or "", 2),
                   ("sport", event.get("sport_id") or "", 1)]
     for target_type, target_id, specificity in candidates:
         if not target_id: continue
@@ -622,7 +696,8 @@ def applicable_rule(conn: sqlite3.Connection, canonical_event_id: str) -> dict[s
 
 def coverage(conn: sqlite3.Connection, *, days: int = 14) -> list[dict[str, Any]]:
     """Starts with wanted canonical events, then reports source/lane coverage."""
-    ensure_schema(conn)
+    # Coverage is used by GET endpoints.  Its tables are materialized by the
+    # refresh/migration path, so this function must remain strictly read-only.
     rows = conn.execute("SELECT ce.* FROM canonical_events ce WHERE datetime(ce.start_utc) BETWEEN datetime('now','-1 day') AND datetime('now', ?)", (f"+{max(1, min(days, 90))} days",)).fetchall()
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     result = []

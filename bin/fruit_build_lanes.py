@@ -23,6 +23,8 @@ except ImportError:
     def get_setting(conn, key, fallback=None):
         return fallback
 
+from xtream_mode import is_xtream_only
+
 
 def _get_int_env(names, default):
     """Try a list of env var names and return the first int value found."""
@@ -104,7 +106,7 @@ def derive_times_from_attrs(
     return start_ms, end_ms, runtime_seconds
 
 
-def load_future_events(conn: sqlite3.Connection, days_ahead: int) -> List[Event]:
+def load_future_events(conn: sqlite3.Connection, days_ahead: int, *, canonical_ai_mode: str = "disabled") -> List[Event]:
     """Load future events with optional sports/league filtering."""
     now = datetime.now(timezone.utc)
     cutoff = now + timedelta(days=days_ahead)
@@ -114,7 +116,7 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int) -> List[Event]
     # changing their provider IDs or creating another event scheduler.
     try:
         from sports_metadata import applicable_rule, sync_legacy_events
-        sync_legacy_events(conn)
+        sync_legacy_events(conn, ai_mode=canonical_ai_mode)
     except Exception as exc:
         # Canonical enrichment must never silently alter legacy availability.
         # Continue with the existing rows, but leave an actionable diagnostic.
@@ -139,14 +141,29 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int) -> List[Event]
     cur = conn.cursor()
     
     # CRITICAL FIX: Include genres_json and classification_json for filtering
-    cur.execute(
+    xtream_only = is_xtream_only(conn)
+    event_source_sql = ""
+    if xtream_only:
+        # An event is eligible only if a playable Xtream stream identity exists.
+        # This prevents stale non-Xtream rows from entering a lane after mode
+        # activation and guarantees a real lane slot can tune by stream_id.
+        event_source_sql = """
+          AND EXISTS (
+              SELECT 1 FROM playables p
+              WHERE p.event_id = events.id
+                AND LOWER(COALESCE(p.provider, '')) = 'xtream'
+                AND COALESCE(TRIM(p.stream_id), '') != ''
+          )
         """
+    cur.execute(
+        f"""
         SELECT id, pvid, slug, title, channel_name, start_utc, end_utc, 
                raw_attributes_json, genres_json, classification_json
         FROM events 
         WHERE pvid IS NOT NULL 
           AND start_utc IS NOT NULL
           AND end_utc IS NOT NULL
+          {event_source_sql}
         """
     )
 
@@ -368,9 +385,31 @@ def build_lanes_with_placeholders(
             prefer_favorite_team_broadcaster = False
             favorite_teams = []
 
-    # Precompute best playables per event (when filter integration is available)
-    playable_cache: Dict[str, Optional[Dict[str, Any]]] = {}
-    if FILTERING_AVAILABLE:
+    xtream_only = is_xtream_only(conn)
+    # Precompute best playables per event. Xtream-only bypasses preferences and
+    # deterministically selects an Xtream playable with a stream_id.
+    # Candidate key -> ranked, eligible playables.  Ranking is still supplied
+    # by filter_integration; capacity merely chooses the first currently viable
+    # member of that existing fallback order.
+    playable_cache: Dict[str, List[Dict[str, Any]]] = {}
+    if xtream_only:
+        for ev in events:
+            row = conn.execute(
+                """
+                SELECT playable_id, provider, logical_service, deeplink_play,
+                       deeplink_open, playable_url
+                FROM playables
+                WHERE event_id = ?
+                  AND LOWER(COALESCE(provider, '')) = 'xtream'
+                  AND COALESCE(TRIM(stream_id), '') != ''
+                ORDER BY COALESCE(priority, 0) ASC, playable_id ASC
+                LIMIT 1
+                """,
+                (ev.event_id,),
+            ).fetchone()
+            playable_cache[ev.event_id] = [dict(row)] if row else []
+        events = [ev for ev in events if playable_cache.get(ev.event_id)]
+    elif FILTERING_AVAILABLE:
         for ev in events:
             ranked: List[Dict[str, Any]] = []
             seen_playables = set()
@@ -680,13 +719,15 @@ def main():
     ap.add_argument(
         "--days-ahead", type=int, default=int(env_days) if env_days else 7
     )
+    ap.add_argument("--canonical-ai-mode", choices=("disabled", "bounded", "unlimited"), default="disabled",
+                    help="Canonical sync AI mode; refresh selects this explicitly.")
     args = ap.parse_args()
     conn = sqlite3.connect(args.db)
     ensure_lane_schema(conn)
     reset_lanes(conn)
     create_lanes(conn, args.lanes)
 
-    events = load_future_events(conn, args.days_ahead)
+    events = load_future_events(conn, args.days_ahead, canonical_ai_mode=args.canonical_ai_mode)
     print(f"Loaded {len(events)} future events (after sports/league filtering)")
     build_lanes_with_placeholders(conn, events, args.lanes)
 

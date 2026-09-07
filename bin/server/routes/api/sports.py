@@ -7,7 +7,7 @@ from flask import Blueprint, jsonify, request
 
 from db.connection import db_exists, get_conn
 from sports_metadata import (applicable_rule, coverage, ensure_schema, resolve_source_event,
-                             save_rule, sync_legacy_events, normalize_provider)
+                             save_rule, normalize_provider)
 from local_ai_event_parser import clear_cache as clear_local_ai_cache
 
 try:
@@ -19,30 +19,38 @@ except ImportError:
 bp = Blueprint("sports_api", __name__)
 
 
-def _prepare(conn):
+def _prepare_write(conn):
+    """Schema/materialization boundary for explicit write tools only.
+
+    My Sports GETs intentionally do not call this helper.  The refresh/import
+    pipeline materializes canonical records before the UI reads them.
+    """
     ensure_schema(conn)
-    # Backfill is idempotent and lets the UI expose metadata discovered by the
-    # existing Apple/Xtream pipeline without requiring a disruptive reimport.
-    sync_legacy_events(conn)
 
 
 @bp.route("/api/sports/catalog")
 def catalog():
     if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
     with get_conn() as conn:
-        conn.row_factory = sqlite3.Row; _prepare(conn)
+        conn.row_factory = sqlite3.Row
         sports = [dict(r) for r in conn.execute("SELECT * FROM sports ORDER BY name")]
         leagues = [dict(r) for r in conn.execute("SELECT * FROM leagues ORDER BY name")]
         teams = [dict(r) for r in conn.execute("SELECT * FROM teams ORDER BY name")]
-    return jsonify({"ok": True, "sports": sports, "leagues": leagues, "teams": teams})
+        aliases = [dict(r) for r in conn.execute("SELECT entity_type,fruit_id,alias,source,confidence,operator_confirmed,last_verified_utc FROM catalog_aliases ORDER BY entity_type,alias")]
+        provenance = [dict(r) for r in conn.execute("SELECT entity_type,fruit_id,source,external_id,source_url,details_json,operator_confirmed,last_verified_utc FROM catalog_entity_provenance ORDER BY entity_type,source,external_id")]
+        racing_events = [dict(r) for r in conn.execute("SELECT * FROM catalog_recurring_events ORDER BY name")]
+    return jsonify({"ok": True, "sports": sports, "leagues": leagues, "teams": teams,
+                    "racing_events": racing_events, "aliases": aliases, "provenance": provenance,
+                    "materialization": "refresh_pipeline"})
 
 
 @bp.route("/api/sports/rules", methods=["GET", "POST", "DELETE"])
 def rules():
     if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
     with get_conn() as conn:
-        conn.row_factory = sqlite3.Row; _prepare(conn)
+        conn.row_factory = sqlite3.Row
         if request.method == "POST":
+            _prepare_write(conn)
             body = request.get_json(silent=True) or {}
             try:
                 rule_id = save_rule(conn, target_type=str(body.get("target_type", "")), target_id=str(body.get("target_id", "")),
@@ -65,7 +73,7 @@ def upcoming_coverage():
     if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
     days = min(max(request.args.get("days", 14, type=int), 1), 90)
     with get_conn() as conn:
-        conn.row_factory = sqlite3.Row; _prepare(conn); items = coverage(conn, days=days)
+        conn.row_factory = sqlite3.Row; items = coverage(conn, days=days)
     summary = {"wanted": len(items), "ready": sum(x["coverage_state"] == "scheduled" for x in items),
                "awaiting_source": sum(x["coverage_state"] == "awaiting_source" for x in items)}
     return jsonify({"ok": True, "days": days, "items": items, "summary": summary})
@@ -75,7 +83,7 @@ def upcoming_coverage():
 def inspect_event(canonical_event_id):
     if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
     with get_conn() as conn:
-        conn.row_factory = sqlite3.Row; _prepare(conn)
+        conn.row_factory = sqlite3.Row
         event = conn.execute("SELECT ce.*,s.name AS sport,l.name AS league FROM canonical_events ce LEFT JOIN sports s ON s.id=ce.sport_id LEFT JOIN leagues l ON l.id=ce.league_id WHERE ce.id=?", (canonical_event_id,)).fetchone()
         if not event: return jsonify({"ok": False, "error": "Not found"}), 404
         sources = [dict(r) for r in conn.execute("SELECT source,source_event_id,confidence,resolution_kind,evidence_json,last_seen_utc FROM source_event_records WHERE canonical_event_id=?", (canonical_event_id,))]
@@ -115,7 +123,7 @@ def resolver_bench():
     if not body.get("source") or not body.get("source_event_id"):
         return jsonify({"ok": False, "error": "source and source_event_id are required"}), 400
     with get_conn() as conn:
-        conn.row_factory = sqlite3.Row; _prepare(conn)
+        conn.row_factory = sqlite3.Row; _prepare_write(conn)
         result = resolve_source_event(conn, source=str(body["source"]), source_event_id=str(body["source_event_id"]), data=body.get("event") or {})
     return jsonify({"ok": True, "result": result})
 
@@ -128,7 +136,8 @@ def clear_local_ai_interpretations():
     provider = str(body.get("provider") or "").strip().casefold() or None
     source_event_id = str(body.get("source_event_id") or "").strip() or None
     with get_conn() as conn:
-        _prepare(conn)
+        if request.method == "POST":
+            _prepare_write(conn)
         cleared = clear_local_ai_cache(conn, provider=provider, source_event_id=source_event_id)
         conn.commit()
     return jsonify({"ok": True, "cleared": cleared, "reparse": "Run the next refresh or resolver request to reparse eligible records."})
@@ -143,7 +152,7 @@ def manual_mapping():
     if not all((source, source_event_id, canonical_event_id)):
         return jsonify({"ok": False, "error": "source, source_event_id, and canonical_event_id are required"}), 400
     with get_conn() as conn:
-        _prepare(conn)
+        _prepare_write(conn)
         if not conn.execute("SELECT 1 FROM canonical_events WHERE id=?", (canonical_event_id,)).fetchone():
             return jsonify({"ok": False, "error": "Canonical event not found"}), 404
         conn.execute("INSERT INTO source_event_records(source,source_event_id,canonical_event_id,confidence,resolution_kind,evidence_json,raw_json,last_seen_utc) VALUES(?,?,?,?,?,?,?,datetime('now')) "
@@ -161,7 +170,7 @@ def schedule_simulation():
     lanes = min(max(int(body.get("lanes", 50)), 1), 500)
     days = min(max(int(body.get("days", 14)), 1), 90)
     with get_conn() as conn:
-        _prepare(conn)
+        _prepare_write(conn)
         from sports_scheduler import simulate
         result = simulate(conn, lanes, days)
     return jsonify({"ok": True, "lanes": lanes, "days": days, **result})
@@ -177,8 +186,8 @@ def _safe_metadata(value):
 def provider_capacities():
     if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
     with get_conn() as conn:
-        _prepare(conn)
         if request.method == "POST":
+            _prepare_write(conn)
             body = request.get_json(silent=True) or {}
             provider = normalize_provider(body.get("provider"))
             try: maximum = int(body.get("max_concurrent"))
@@ -193,7 +202,7 @@ def provider_capacities():
 def health():
     if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
     with get_conn() as conn:
-        conn.row_factory = sqlite3.Row; _prepare(conn)
+        conn.row_factory = sqlite3.Row
         counts = {name: conn.execute(sql).fetchone()[0] for name, sql in {
             "sports": "SELECT COUNT(*) FROM sports", "leagues": "SELECT COUNT(*) FROM leagues", "teams": "SELECT COUNT(*) FROM teams",
             "upcoming_events": "SELECT COUNT(*) FROM canonical_events WHERE datetime(start_utc)>=datetime('now')",

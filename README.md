@@ -190,6 +190,23 @@ rejects that request or returns an unusable response, the adapter retries with
 `curl -4 -sS -L`. Neither transport's credential-bearing URL or error text is
 written to application logs.
 
+For every selected Xtream stream, refresh also calls the provider's
+`get_short_epg` endpoint (once per unique `stream_id`). When available, the
+returned match title, description, and start/stop times become the event's
+source metadata and feed automatic programming-name generation. Providers that
+return no EPG row continue through the existing stream-name/date parser, and a
+provider that does not support the endpoint does not fail the whole refresh.
+
+### Normalized programming names
+
+Event programming names are derived conservatively from available league/team
+metadata as `[League] Road Team @ Home Team (Broadcast)` when a broadcast,
+network, or feed label is available. The provider title is retained as source
+data. In the Event Inspector, use **Programming name** to save an optional
+per-event override for XMLTV, guide, direct, and ADB exports; clearing the field
+returns to automatic naming. This is useful for social/manual event records
+that are not present in ESPN+ metadata.
+
 ### Xtream motorsports events
 
 Configured Xtream categories can also supply scheduled Formula 1 sessions in a
@@ -253,7 +270,9 @@ favorite-team entries keep the pre-feature ordering exactly.
 
 Add one or more entries under **Settings → Favorite Teams & Broadcasters**.
 The responsive card editor works without editing JSON, environment variables,
-or SQLite. Each entry supports:
+or SQLite. After events have been imported, the editor also offers a dropdown
+of teams observed in structured event/EPG metadata, including sport, league,
+and event counts. Each entry supports:
 
 - a display/canonical team name;
 - one-per-line event aliases;
@@ -286,8 +305,9 @@ environment-variable fallback for either value. The exported backup shape is:
 ```
 
 Matching is case-insensitive and token/phrase based, not a raw substring
-search. Event titles and available team/sport/provider metadata identify which
-favorite teams are involved. Feed scoring uses service/provider/title,
+search. Structured team fields are treated as high-confidence identity data;
+event titles and available team/sport/provider metadata provide additional
+evidence. Feed scoring uses service/provider/title,
 `feed_name`/`feed_type`, network/category fields, and Xtream's non-secret
 `stream_metadata_json` (including original stream and category names).
 

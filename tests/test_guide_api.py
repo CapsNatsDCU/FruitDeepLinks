@@ -70,7 +70,7 @@ class GuideApiTest(unittest.TestCase):
         payload = self.guide().get_json()
         event = next(row for row in payload["programmes"] if not row["is_placeholder"])
         self.assertEqual(event["lane_id"], 1)
-        self.assertEqual(event["title"], "Washington Commanders at Ravens")
+        self.assertEqual(event["title"], "Washington Commanders @ Ravens (NFL PPV)")
         self.assertEqual(event["start_utc"], (self.start + timedelta(minutes=30)).isoformat())
         self.assertEqual(event["xtream_category_name"], "NFL PPV")
         self.assertEqual(event["xtream_category_id"], "10")

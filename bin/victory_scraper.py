@@ -45,6 +45,12 @@ except ImportError:
     def normalize_genres(genres):
         return genres
 
+try:
+    from event_naming import ensure_normalized_name_column
+except ImportError:
+    def ensure_normalized_name_column(conn):
+        return False
+
 # Victory+ API Configuration
 BASE_URL = "https://api.sports.aparentmedia.com/api/2.0"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -72,6 +78,7 @@ def log(msg: str):
 def ensure_victory_schema(conn: sqlite3.Connection):
     """Ensure victory_auth table exists for storing session tokens"""
     cur = conn.cursor()
+    ensure_normalized_name_column(conn)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS victory_auth (
             id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -355,6 +362,12 @@ def import_victory_events(conn: sqlite3.Connection, events: List[Dict], dry_run:
         synopsis = event.get("summary", "")
         synopsis_brief = event.get("shortSummary", "")
         
+        # Preserve an operator-owned programming-name override across the
+        # legacy INSERT OR REPLACE refresh path.
+        existing_name = cur.execute(
+            "SELECT normalized_name FROM events WHERE id = ?", (event_id,)
+        ).fetchone()
+
         # Insert/update event using ACTUAL schema
         cur.execute("""
             INSERT OR REPLACE INTO events 
@@ -362,8 +375,8 @@ def import_victory_events(conn: sqlite3.Connection, events: List[Dict], dry_run:
              channel_name, channel_provider_id, genres_json, classification_json,
              is_free, is_premium, runtime_secs, 
              start_ms, end_ms, start_utc, end_utc, 
-             created_ms, created_utc, hero_image_url, last_seen_utc)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             created_ms, created_utc, hero_image_url, normalized_name, last_seen_utc)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             event_id,
             str(event['id']),  # pvid
@@ -385,6 +398,7 @@ def import_victory_events(conn: sqlite3.Connection, events: List[Dict], dry_run:
             now_ms,
             now,
             hero_image_url,
+            existing_name[0] if existing_name else None,
             now,  # last_seen_utc
         ))
         

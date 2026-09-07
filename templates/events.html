@@ -166,7 +166,7 @@ async function loadEvents() {
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td><div class="mono">${escH(e.start_utc)}</div><div class="mono small" style="color:var(--text-muted)">${escH(e.end_utc)}</div></td>
-        <td><div><b>${escH(e.title)}</b></div><div class="mono small" style="color:var(--text-muted)">${escH(e.id)}</div></td>
+        <td><div><b>${escH(e.programming_name || e.title)}</b></div><div class="mono small" style="color:var(--text-muted)">${escH(e.id)}</div></td>
         <td><div class="chips">${(e.providers||[]).map(x=>`<span class="chip">${escH(x)}</span>`).join("")||'<span class="small">—</span>'}</div></td>
         <td><span class="mono">${e.playables_count}</span></td>
         <td><span class="small">${escH(e.channel_name||"")}</span></td>

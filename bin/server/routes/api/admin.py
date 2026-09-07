@@ -38,6 +38,7 @@ from server.services.favorite_teams import (
     StoredFavoriteTeamsMalformed,
     create_team,
     delete_team,
+    discover_team_options,
     export_favorite_team_settings,
     import_favorite_team_settings,
     load_favorite_team_settings,
@@ -71,13 +72,14 @@ def health():
 @bp.route("/api/status")
 def api_status():
     stats = get_db_stats()
-    operational = {"live_events": 0, "xtream_enabled": False, "xtream_categories": 0}
+    operational = {"live_events": 0, "xtream_enabled": False, "xtream_only": False, "xtream_categories": 0}
     try:
         with get_conn() as conn:
             operational["live_events"] = conn.execute(
                 "SELECT COUNT(*) FROM events WHERE start_utc <= datetime('now') AND end_utc > datetime('now')"
             ).fetchone()[0]
             operational["xtream_enabled"] = bool(get_setting(conn, "xtream_enabled", False))
+            operational["xtream_only"] = bool(get_setting(conn, "xtream_only", False))
             categories = str(get_setting(conn, "xtream_category_ids", "") or "")
             operational["xtream_categories"] = len([value for value in categories.split(",") if value.strip()])
     except Exception:
@@ -111,6 +113,14 @@ def api_status():
         "KAYO_DAYS", "NESN_DAYS", "ESPN_DAYS", "GOTHAM_DAYS", "GOTHAM_ZONE",
         "APPLE_AUTH_BOOTSTRAP", "DB_MAINTENANCE",
     ]
+    # This is a non-secret diagnostics endpoint.  Xtream credentials are never
+    # included here, and Xtream-only intentionally hides irrelevant provider
+    # status/configuration from the dashboard response.
+    if operational["xtream_only"]:
+        _env_keys = [key for key in _env_keys if key not in {
+            "KAYO_ENABLED", "FANATIZ_ENABLED", "BEIN_ENABLED", "NESN_ENABLED",
+            "VICTORY_ENABLED", "GOTHAM_ENABLED", "ESPN_ENABLED",
+        }]
     env_vars = {k: os.getenv(k, "") for k in _env_keys if os.getenv(k)}
 
     return jsonify({
@@ -392,6 +402,17 @@ def api_favorite_teams():
                 return jsonify({"status": "success", **state})
             state = reset_favorite_team_settings(conn)
             return jsonify({"status": "success", **state})
+    except Exception as exc:
+        return _favorite_error_response(exc)
+
+
+@bp.route("/api/settings/favorite-teams/options", methods=["GET"])
+def api_favorite_team_options():
+    """Return team choices observed in imported event/EPG metadata."""
+    try:
+        with get_conn_or_none() as conn:
+            options = discover_team_options(conn) if conn else []
+        return jsonify({"status": "success", "options": options})
     except Exception as exc:
         return _favorite_error_response(exc)
 

@@ -7,6 +7,25 @@ The catalog is identity data, not a schedule: sports, leagues, teams, safe
 aliases, source IDs, and recurring racing-event/venue/session vocabulary.  A
 live event still enters through the normal canonical-event pipeline.
 
+## Refresh, rules, and Local AI
+
+Refresh is the only canonical materialization boundary: provider observations
+are resolved to canonical events, their playables are grouped, then Sports
+Rules set event scheduling priority.  Playable ranking is separate and chooses
+the best broadcast only after the scheduler selects the real-world event.
+Provider capacity is checked across overlapping selected playables, so Fruit
+tries the next broadcast for the same canonical event before dropping it.
+
+My Sports and catalog GET APIs only read this materialized state. They never
+refresh providers, synchronize canonical events, invoke Local AI, or write the
+database. Manual refreshes use the configured bounded Local AI request budget;
+overnight scheduled refreshes use unlimited eligible cache misses. Local AI is
+optional: `deterministic_first` uses trustworthy provider/catalog evidence
+before asking it, while `ai_first` can interpret weak titles earlier. In both
+modes, its output is untrusted metadata that the local deterministic resolver
+must validate; it cannot create canonical authority, select a stream, or
+schedule a lane.
+
 ## Ownership and precedence
 
 Fruit-generated IDs remain the canonical IDs.  Upstream IDs (including a
@@ -23,10 +42,11 @@ such as `Capitals` or `Nationals` unresolved instead of risking a false merge.
 
 ## Sources
 
-- **Wikidata** is the preferred broad baseline.  Supply a bounded SPARQL query
-  whose rows contain `entity`, `entityLabel`, optional `entityType`,
-  `sportLabel`, `leagueLabel`, and `alias`; the importer records Q-IDs strictly
-  as provenance.
+- **Wikidata** is the preferred broad baseline.  The included bounded query at
+  `docs/sources/wikidata-major-sports.rq` seeds the requested leagues.  The
+  separately bounded TheSportsDB source verifies/refreshes current major-team
+  rosters; a custom bounded Wikidata query can add source-backed aliases or
+  locations when expanding scope.  Q-IDs remain provenance only.
 - **TheSportsDB** is optional bounded enrichment for league membership, team
   names, alternates, and source IDs.  Its results are cached and rate-spaced;
   no credential is stored in Fruit.  `THESPORTSDB_API_KEY`, when set by the
@@ -37,9 +57,10 @@ such as `Capitals` or `Nationals` unresolved instead of risking a false merge.
   JSON record format and supplied with `--source json --records ...`; this is
   an update boundary, not a live scraper dependency.
 
-The compact bootstrap seeds only the requested major league/series and stable
-racing event identities.  It does not hand-maintain a team roster.  Run source
-updates to obtain teams and aliases with provenance.
+The compact bootstrap seeds the requested major league/series, stable racing
+event identities, and a small offline My Sports usability set (including the
+Washington teams and D.C. United).  It is not a full hand-maintained roster;
+run source updates to obtain wider team coverage and imported provenance.
 
 ## Updating
 
@@ -50,8 +71,8 @@ plan.  The database path must be the normal Fruit database, not a copied guide.
 python3 bin/update_sports_catalog.py --db data/fruit.db
 python3 bin/update_sports_catalog.py --db data/fruit.db --source bootstrap --apply
 python3 bin/update_sports_catalog.py --db data/fruit.db --source thesportsdb
-python3 bin/update_sports_catalog.py --db data/fruit.db --source wikidata \
-  --wikidata-query-file data/wikidata-major-sports.rq
+python3 bin/update_sports_catalog.py --db data/fruit.db --source bootstrap \
+  --source wikidata --source thesportsdb
 python3 bin/update_sports_catalog.py --db data/fruit.db --source openligadb \
   --openligadb-league bl1 --season 2026
 ```

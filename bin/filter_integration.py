@@ -413,6 +413,11 @@ def get_filtered_playables(
         rows = cur.fetchall()
 
         playables: List[Dict[str, Any]] = []
+        try:
+            from xtream_mode import is_xtream_only
+            xtream_only = is_xtream_only(conn)
+        except Exception:
+            xtream_only = False
         for row in rows:
             playable: Dict[str, Any] = dict(zip(select_cols, row))
             for column in base_cols:
@@ -421,6 +426,12 @@ def get_filtered_playables(
             playable.setdefault("feed_name", None)
             playable.setdefault("feed_type", None)
             playable["event_id"] = event_id
+
+            # This is the shared selection boundary used by lane generation,
+            # event inspection, ADB resolution, and direct exports. Keep it
+            # provider-based: logical_service may be absent or legacy-tagged.
+            if xtream_only and (playable.get("provider") or "").lower() != "xtream":
+                continue
 
             # Language filtering for ESPN feeds.
             # Prefer the locale column (populated by migrate_add_locale.py from

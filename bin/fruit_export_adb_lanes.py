@@ -197,6 +197,12 @@ def cleanup_disabled_adb_files(conn: sqlite3.Connection, out_dir: Path, log: log
         WHERE adb_enabled = 1
     """)
     enabled_providers = {row[0] for row in cur.fetchall()}
+    try:
+        from xtream_mode import is_xtream_only
+        if is_xtream_only(conn):
+            enabled_providers = {code for code in enabled_providers if code.lower() == "xtream"}
+    except Exception:
+        pass
     
     if not out_dir.exists():
         return
@@ -244,6 +250,11 @@ def export_adb_lanes(db_path: Path, out_dir: Path, server_url: str) -> Path:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
+        try:
+            from xtream_mode import is_xtream_only
+            xtream_only = is_xtream_only(conn)
+        except Exception:
+            xtream_only = False
         # Clean up files for disabled services FIRST
         cleanup_disabled_adb_files(conn, out_dir, log)
         cur = conn.cursor()
@@ -274,7 +285,11 @@ def export_adb_lanes(db_path: Path, out_dir: Path, server_url: str) -> Path:
                AND COALESCE(adb_lane_count, 0) > 0
             """
         )
-        configured_lanes: Dict[str, int] = {row["provider_code"]: row["lane_count"] for row in cur.fetchall()}
+        configured_lanes: Dict[str, int] = {
+            row["provider_code"]: row["lane_count"]
+            for row in cur.fetchall()
+            if not xtream_only or row["provider_code"].lower() == "xtream"
+        }
 
         # Build channels: start from lanes that have events, then fill in any
         # configured lanes that are empty so the guide always shows the full set.
@@ -286,7 +301,10 @@ def export_adb_lanes(db_path: Path, out_dir: Path, server_url: str) -> Path:
              ORDER BY provider_code, lane_number;
             """
         )
-        event_channels_raw = cur.fetchall()
+        event_channels_raw = [
+            row for row in cur.fetchall()
+            if not xtream_only or row["provider_code"].lower() == "xtream"
+        ]
 
         # Track which (provider, lane) combos already have events
         event_lane_set: set[tuple[str, int]] = set()
@@ -338,7 +356,7 @@ def export_adb_lanes(db_path: Path, out_dir: Path, server_url: str) -> Path:
         # which feed it is. Both are NULL for pre-expand-mode rows, where the
         # lane just tracks "this event has a playable here".
         cur.execute(
-            """
+            f"""
             SELECT
                    a.channel_id,
                    a.provider_code,
@@ -351,6 +369,7 @@ def export_adb_lanes(db_path: Path, out_dir: Path, server_url: str) -> Path:
               FROM adb_lanes a
               JOIN events e
                 ON e.id = a.event_id
+             {"WHERE LOWER(COALESCE(a.provider_code, '')) = 'xtream'" if xtream_only else ""}
              ORDER BY a.channel_id, a.start_utc;
             """
         )
@@ -569,6 +588,11 @@ def build_adb_m3u(
                      'http' (Apple TV — https://app.primevideo.com/ style)
     """
     cur = conn.cursor()
+    try:
+        from xtream_mode import is_xtream_only
+        xtream_only = is_xtream_only(conn)
+    except Exception:
+        xtream_only = False
 
     # Build the full lane list: lanes that have events + configured-but-empty lanes.
     cur.execute(
@@ -580,7 +604,10 @@ def build_adb_m3u(
          GROUP BY provider_code, lane_number, channel_id
         """
     )
-    event_rows = cur.fetchall()
+    event_rows = [
+        row for row in cur.fetchall()
+        if not xtream_only or row["provider_code"].lower() == "xtream"
+    ]
     event_set: set[tuple[str, int]] = {(r["provider_code"], r["lane_number"]) for r in event_rows}
 
     # All configured providers and their lane counts
@@ -592,7 +619,11 @@ def build_adb_m3u(
            AND COALESCE(adb_lane_count, 0) > 0
         """
     )
-    configured: dict[str, int] = {r["provider_code"]: r["lane_count"] for r in cur.fetchall()}
+    configured: dict[str, int] = {
+        r["provider_code"]: r["lane_count"]
+        for r in cur.fetchall()
+        if not xtream_only or r["provider_code"].lower() == "xtream"
+    }
 
     # Merge: start from event rows, add empty lanes to reach the configured count
     all_lanes: list[tuple[str, int, str]] = [

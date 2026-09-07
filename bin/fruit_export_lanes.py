@@ -122,9 +122,12 @@ def build_lanes_xmltv(conn: sqlite3.Connection, xml_path: str, epg_prefix: str =
     print(f"Lanes XMLTV: {len(lanes)} virtual channels")
     
     # Get all lane events (include raw_attributes_json so we can use Apple images)
-    cur.execute("""
+    event_columns = {row[1] for row in cur.execute("PRAGMA table_info(events)")}
+    normalized_select = "e.normalized_name," if "normalized_name" in event_columns else ""
+    cur.execute(f"""
         SELECT le.*,
                e.title,
+               {normalized_select}
                e.synopsis,
                e.channel_name,
                e.genres_json,
@@ -463,4 +466,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-

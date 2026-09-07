@@ -1,0 +1,31 @@
+# Bounded baseline for Fruit's requested major-sports catalog.
+#
+# It returns only stable league identity, not schedules, results, players, or
+# rosters.  Current team rosters come from the separately bounded TheSportsDB
+# refresh, which is more suitable for that volatile dataset.  A richer custom
+# WDQS query may be supplied through --wikidata-query-file when needed.
+# `fruitName` keeps Fruit's established display spelling while Q-IDs remain
+# provenance in the catalog import.
+PREFIX wd: <http://www.wikidata.org/entity/>
+PREFIX wdt: <http://www.wikidata.org/prop/direct/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+SELECT ?entity ?entityType ?fruitName ?sportLabel ?leagueLabel WHERE {
+  VALUES (?leagueName ?fruitName ?sportLabel) {
+    ("National Football League"@en "NFL" "American football")
+    ("National Hockey League"@en "NHL" "Ice hockey")
+    ("Major League Baseball"@en "MLB" "Baseball")
+    ("National Basketball Association"@en "NBA" "Basketball")
+    ("Women's National Basketball Association"@en "WNBA" "Basketball")
+    ("Major League Soccer"@en "MLS" "Soccer")
+    ("Formula One"@en "Formula 1" "Motorsport")
+    ("NASCAR Cup Series"@en "NASCAR Cup Series" "Motorsport")
+    ("IndyCar Series"@en "IndyCar Series" "Motorsport")
+    ("IMSA SportsCar Championship"@en "IMSA SportsCar Championship" "Motorsport")
+    ("FIA World Endurance Championship"@en "FIA World Endurance Championship" "Motorsport")
+  }
+  ?entity rdfs:label ?leagueName .
+  ?entity wdt:P31/wdt:P279* wd:Q623109 .
+  BIND("league" AS ?entityType)
+  BIND(?fruitName AS ?leagueLabel)
+}

@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any
 
 from db.preferences import save_settings
+from event_naming import extract_team_names
 from team_preferences import (
     TeamPreferenceValidationError,
     normalize_favorite_teams,
@@ -19,6 +20,67 @@ from team_preferences import (
 _PREFIX = "setting:"
 _ENABLED_KEY = f"{_PREFIX}prefer_favorite_team_broadcaster"
 _TEAMS_KEY = f"{_PREFIX}favorite_teams"
+
+
+def _metadata_dimension(event: dict[str, Any], dimension: str) -> str | None:
+    value = event.get(dimension)
+    if value:
+        return str(value).strip() or None
+    raw = event.get("classification_json")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            raw = None
+    if isinstance(raw, dict):
+        return str(raw.get(dimension) or raw.get(f"{dimension}_name") or "").strip() or None
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict) and str(item.get("type", "")).casefold() == dimension.casefold():
+                return str(item.get("value") or item.get("name") or "").strip() or None
+    return None
+
+
+def discover_team_options(conn: sqlite3.Connection, limit: int = 500) -> list[dict[str, Any]]:
+    """Build safe dropdown options from persisted event/API metadata."""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='events'"
+    ).fetchone()
+    if not exists:
+        return []
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    wanted = [name for name in (
+        "title", "title_brief", "classification_json", "raw_attributes_json",
+    ) if name in columns]
+    if not wanted:
+        return []
+
+    options: dict[str, dict[str, Any]] = {}
+    for row in conn.execute(f"SELECT {', '.join(wanted)} FROM events"):
+        event = dict(zip(wanted, row))
+        names = extract_team_names(event)
+        league = _metadata_dimension(event, "league")
+        sport = _metadata_dimension(event, "sport")
+        for name in names:
+            marker = " ".join(name.casefold().split())
+            if len(marker.replace(" ", "")) < 3:
+                continue
+            option = options.setdefault(marker, {
+                "team": name,
+                "sport": sport,
+                "league": league,
+                "event_count": 0,
+            })
+            option["event_count"] += 1
+            if not option.get("sport") and sport:
+                option["sport"] = sport
+            if not option.get("league") and league:
+                option["league"] = league
+
+    return sorted(
+        options.values(),
+        key=lambda option: (-option["event_count"], option["team"].casefold()),
+    )[:max(1, int(limit))]
 
 
 class StoredFavoriteTeamsMalformed(RuntimeError):

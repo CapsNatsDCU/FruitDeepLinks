@@ -428,6 +428,15 @@ def _provider_enabled(setting_key: str, logical_services: tuple, enabled_service
 
 
 def _build_provider_plan(enabled_services: list) -> dict:
+    # Xtream-only is an authoritative mode, not just a presentation filter.
+    # It stops every non-Xtream scraper/import before it can create future
+    # event playables.  Existing historical rows are retained for a reversible
+    # switch back to multi-provider operation, but lane planning excludes them.
+    if bool(_get_db_setting("xtream_only", False)):
+        providers = {key: key == "xtream" for key in PROVIDER_SPECS}
+        providers["apple_base"] = False
+        providers["amazon_enrichment"] = False
+        return providers
     providers = {
         key: _provider_enabled(setting_key, logical_services, enabled_services)
         for key, (_display, setting_key, logical_services) in PROVIDER_SPECS.items()
@@ -484,6 +493,8 @@ def main(argv=None):
         action="store_true",
         help="Force Apple TV import even if database hasn't changed (used with --skip-scrape).",
     )
+    parser.add_argument("--canonical-ai-mode", choices=("disabled", "bounded", "unlimited"), default="bounded",
+                        help="Local-AI budget for refresh-time canonical synchronization.")
     args = parser.parse_args(argv)
 
     print(f"FruitDeepLinks version: {get_version()}")
@@ -515,13 +526,14 @@ def main(argv=None):
     print("=" * 60)
 
     # Total steps in this pipeline (updated for beIN Sports)
-    total_steps = 16  # Includes optional Xtream fetch/import before lane planning
+    total_steps = 17  # Includes local catalog seed before canonical lane planning
     emit_progress(
         "refresh_start",
         total_steps=total_steps,
         started_at=start_time.isoformat(),
         version=get_version(),
         skip_scrape=args.skip_scrape,
+        canonical_ai_mode=args.canonical_ai_mode,
     )
 
     # Get flags from parsed arguments
@@ -681,6 +693,13 @@ def main(argv=None):
         "python3", "migrate_add_playables.py",
         "--db", str(DB_PATH),
         "--yes",
+    ]):
+        return 1
+
+    # Optional operator override used by all programming/XMLTV exporters.
+    if not run_step("3n", total_steps, "Ensuring normalized programming-name column", [
+        "python3", "migrate_add_normalized_name_column.py",
+        "--db", str(DB_PATH),
     ]):
         return 1
 
@@ -1104,6 +1123,14 @@ def main(argv=None):
     ]):
         return 1
 
+    # This local-only seed has no network dependency and no destructive merge.
+    # It gives a new/offline installation its major-sport selectors and racing
+    # vocabulary before imported observations are canonically materialized.
+    if not run_step("8c", total_steps, "Applying offline Sports Catalog bootstrap", [
+        "python3", "update_sports_catalog.py", "--db", str(DB_PATH), "--source", "bootstrap", "--apply",
+    ]):
+        return 1
+
 # Step 9: Build virtual lanes (Channels-style direct lanes)
     # num_lanes is a known settings key, so this resolves DB -> FRUIT_LANES env -> default (50).
     lanes = str(_get_db_setting("num_lanes"))
@@ -1111,6 +1138,7 @@ def main(argv=None):
         "python3", "fruit_build_lanes.py",
         "--db", str(DB_PATH),
         "--lanes", lanes,
+        "--canonical-ai-mode", args.canonical_ai_mode,
     ]):
         return 1
 

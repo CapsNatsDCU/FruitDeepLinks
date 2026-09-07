@@ -290,11 +290,15 @@ async function loadStatus() {
     // Provider summary deliberately avoids raw environment/config values.
     const envEl = document.getElementById('env-vars');
     const op = data.operational || {};
-    envEl.innerHTML = [
+    const providerSummary = [
+      ['Mode', op.xtream_only ? 'Xtream Only' : 'Multi-provider'],
       ['Xtream', op.xtream_enabled ? 'Enabled' : 'Disabled'],
       ['Selected Xtream categories', op.xtream_categories || 0],
-      ['Other event sources', (data.database.top_providers || []).map(row => row.name).filter(name => !/xtream/i.test(name)).join(', ') || 'None detected'],
-    ].map(([l,v]) => `<div class="stat"><span class="stat-label">${_escapeHtml(l)}</span><span class="stat-value">${_escapeHtml(String(v))}</span></div>`).join('');
+    ];
+    if (!op.xtream_only) {
+      providerSummary.push(['Other event sources', (data.database.top_providers || []).map(row => row.name).filter(name => !/xtream/i.test(name)).join(', ') || 'None detected']);
+    }
+    envEl.innerHTML = providerSummary.map(([l,v]) => `<div class="stat"><span class="stat-label">${_escapeHtml(l)}</span><span class="stat-value">${_escapeHtml(String(v))}</span></div>`).join('');
 
   } catch (err) {
     console.error('loadStatus:', err);

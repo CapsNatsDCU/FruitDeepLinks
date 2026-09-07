@@ -10,7 +10,7 @@ Routes:
 
 import sqlite3
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 
 from db.connection import db_exists, get_conn
 from server.logging_setup import log
@@ -35,6 +35,15 @@ except ImportError:
     def get_display_name(code):
         return code
 
+try:
+    from event_naming import ensure_normalized_name_column, programming_name
+except ImportError:  # pragma: no cover - minimal installs
+    def ensure_normalized_name_column(conn):
+        return False
+
+    def programming_name(event):
+        return event.get("normalized_name") or event.get("title") or "Sports Event"
+
 
 @bp.route("/api/events")
 def api_events():
@@ -58,7 +67,9 @@ def api_events():
         with get_conn() as conn:
             conn.row_factory = sqlite3.Row
             has_logical = db_has_column(conn, "playables", "logical_service")
+            has_normalized_name = db_has_column(conn, "events", "normalized_name")
             svc = "COALESCE(p.logical_service, p.provider)" if has_logical else "p.provider"
+            playable_mode_clause = " AND LOWER(COALESCE(p.provider, '')) = 'xtream'" if _is_xtream_only(conn) else ""
 
             where, params = _build_where(
                 q, provider, svc, days_back, days_forward,
@@ -75,10 +86,12 @@ def api_events():
             offset = (page - 1) * page_size
             cur.execute(
                 f"""
-                SELECT e.id, e.title, e.start_utc, e.end_utc, e.channel_name,
+                SELECT e.id, e.title, {"e.normalized_name," if has_normalized_name else ""}
+                       e.start_utc, e.end_utc, e.channel_name,
+                       e.classification_json, e.raw_attributes_json,
                        e.last_seen_utc,
-                       (SELECT COUNT(*) FROM playables p WHERE p.event_id = e.id) AS playables_count,
-                       (SELECT GROUP_CONCAT(DISTINCT {svc}) FROM playables p WHERE p.event_id = e.id) AS providers_csv,
+                       (SELECT COUNT(*) FROM playables p WHERE p.event_id = e.id{playable_mode_clause}) AS playables_count,
+                       (SELECT GROUP_CONCAT(DISTINCT {svc}) FROM playables p WHERE p.event_id = e.id{playable_mode_clause}) AS providers_csv,
                        CASE WHEN datetime(e.start_utc) <= datetime('now')
                                  AND datetime(e.end_utc) > datetime('now') THEN 1 ELSE 0 END AS is_live_now
                 FROM events e
@@ -91,6 +104,7 @@ def api_events():
             items = []
             for row in cur.fetchall():
                 d = row_to_dict(row)
+                d["programming_name"] = programming_name(d)
                 csv_ = d.pop("providers_csv", "") or ""
                 d["providers"] = [p for p in csv_.split(",") if p]
                 items.append(d)
@@ -114,7 +128,10 @@ def api_events_stats():
             conn.row_factory = sqlite3.Row
             has_logical = db_has_column(conn, "playables", "logical_service")
             svc = "COALESCE(p.logical_service, p.provider)" if has_logical else "p.provider"
+            playable_mode_clause = " AND LOWER(COALESCE(p.provider, '')) = 'xtream'" if _is_xtream_only(conn) else ""
             ww = "WHERE datetime(e.end_utc) >= datetime('now', ?) AND datetime(e.start_utc) <= datetime('now', ?)"
+            if _is_xtream_only(conn):
+                ww += " AND EXISTS (SELECT 1 FROM playables xp WHERE xp.event_id = e.id AND LOWER(COALESCE(xp.provider, '')) = 'xtream')"
             wp = [f"-{days_back} days", f"+{days_forward} days"]
 
             cur = conn.cursor()
@@ -125,14 +142,14 @@ def api_events_stats():
                 f"""SELECT COUNT(*) FROM events e {ww}
                 AND datetime(e.start_utc) <= datetime('now')
                 AND datetime(e.end_utc) > datetime('now')
-                AND (SELECT COUNT(*) FROM playables p WHERE p.event_id = e.id) > 0""",
+                AND (SELECT COUNT(*) FROM playables p WHERE p.event_id = e.id{playable_mode_clause}) > 0""",
                 wp,
             )
             live_now = int(cur.fetchone()[0] or 0)
 
             cur.execute(
                 f"""SELECT COUNT(*) FROM events e {ww}
-                AND (SELECT COUNT(DISTINCT {svc}) FROM playables p WHERE p.event_id = e.id) >= 2""",
+                AND (SELECT COUNT(DISTINCT {svc}) FROM playables p WHERE p.event_id = e.id{playable_mode_clause}) >= 2""",
                 wp,
             )
             multi_service = int(cur.fetchone()[0] or 0)
@@ -141,7 +158,7 @@ def api_events_stats():
             if db_has_column(conn, "playables", "http_deeplink_url"):
                 cur.execute(
                     f"""SELECT COUNT(*) FROM events e {ww}
-                    AND EXISTS (SELECT 1 FROM playables p WHERE p.event_id = e.id
+                    AND EXISTS (SELECT 1 FROM playables p WHERE p.event_id = e.id{playable_mode_clause}
                                AND (p.http_deeplink_url IS NULL OR p.http_deeplink_url = '')
                                AND (p.deeplink_play IS NOT NULL OR p.deeplink_open IS NOT NULL))""",
                     wp,
@@ -160,7 +177,7 @@ def api_events_stats():
     })
 
 
-@bp.route("/api/events/<path:event_id>")
+@bp.route("/api/events/<path:event_id>", methods=["GET", "PATCH"])
 def api_event_detail(event_id):
     if not db_exists():
         return jsonify({"ok": False, "error": "Database not found"}), 404
@@ -170,11 +187,38 @@ def api_event_detail(event_id):
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
 
+            if request.method == "PATCH":
+                existing = cur.execute("SELECT 1 FROM events WHERE id = ?", (event_id,)).fetchone()
+                if not existing:
+                    return jsonify({"ok": False, "error": "Event not found"}), 404
+                payload = request.get_json(silent=True) or {}
+                if "normalized_name" not in payload:
+                    return jsonify({"ok": False, "error": "normalized_name is required"}), 400
+                value = payload.get("normalized_name")
+                if value is not None and not isinstance(value, str):
+                    return jsonify({"ok": False, "error": "normalized_name must be a string or null"}), 400
+                value = (value or "").strip()
+                if len(value) > 256:
+                    return jsonify({"ok": False, "error": "normalized_name must be 256 characters or fewer"}), 400
+                ensure_normalized_name_column(conn)
+                cur.execute("UPDATE events SET normalized_name = ? WHERE id = ?", (value or None, event_id))
+                conn.commit()
+
             cur.execute("SELECT * FROM events WHERE id = ?", (event_id,))
             event_row = cur.fetchone()
             if not event_row:
                 return jsonify({"ok": False, "error": "Event not found"}), 404
             event = row_to_dict(event_row)
+            event["programming_name"] = programming_name(event)
+            xtream_only = _is_xtream_only(conn)
+            if xtream_only:
+                eligible = cur.execute(
+                    "SELECT 1 FROM playables WHERE event_id = ?"
+                    " AND LOWER(COALESCE(provider, '')) = 'xtream' LIMIT 1",
+                    (event_id,),
+                ).fetchone()
+                if not eligible:
+                    return jsonify({"ok": False, "error": "Event not found"}), 404
 
             # Playables ordered by priority
             cur.execute("PRAGMA table_info(playables)")
@@ -187,8 +231,9 @@ def api_event_detail(event_id):
             if not order_bits:
                 order_bits.append("rowid DESC")
 
+            playable_mode_clause = " AND LOWER(COALESCE(provider, '')) = 'xtream'" if xtream_only else ""
             cur.execute(
-                f"SELECT * FROM playables WHERE event_id = ? ORDER BY {', '.join(order_bits)}",
+                f"SELECT * FROM playables WHERE event_id = ?{playable_mode_clause} ORDER BY {', '.join(order_bits)}",
                 (event_id,),
             )
             playables = [row_to_dict(r) for r in cur.fetchall()]
@@ -257,28 +302,38 @@ def _build_where(q, provider, svc, days_back, days_forward,
     where.append("datetime(e.start_utc) <= datetime('now', ?)")
     params.append(f"+{days_forward} days")
 
+    if _is_xtream_only(conn):
+        where.append(
+            "EXISTS (SELECT 1 FROM playables xp WHERE xp.event_id = e.id "
+            "AND LOWER(COALESCE(xp.provider, '')) = 'xtream')"
+        )
+
     if q:
         like = f"%{q}%"
-        where.append("(" + " OR ".join(
-            ["e.title LIKE ?", "e.id LIKE ?", "e.pvid LIKE ?",
-             "e.slug LIKE ?", "e.synopsis LIKE ?", "e.synopsis_brief LIKE ?"]
-        ) + ")")
-        params.extend([like] * 6)
+        search_columns = [
+            "e.title", "e.id", "e.pvid", "e.slug", "e.synopsis", "e.synopsis_brief"
+        ]
+        if db_has_column(conn, "events", "normalized_name"):
+            search_columns.append("e.normalized_name")
+        where.append("(" + " OR ".join(f"{column} LIKE ?" for column in search_columns) + ")")
+        params.extend([like] * len(search_columns))
+
+    playable_mode_clause = " AND LOWER(COALESCE(p.provider, '')) = 'xtream'" if _is_xtream_only(conn) else ""
 
     if provider:
-        where.append(f"EXISTS (SELECT 1 FROM playables p WHERE p.event_id = e.id AND {svc} = ?)")
+        where.append(f"EXISTS (SELECT 1 FROM playables p WHERE p.event_id = e.id{playable_mode_clause} AND {svc} = ?)")
         params.append(provider)
 
     if has_playables:
-        where.append("(SELECT COUNT(*) FROM playables p WHERE p.event_id = e.id) > 0")
+        where.append(f"(SELECT COUNT(*) FROM playables p WHERE p.event_id = e.id{playable_mode_clause}) > 0")
 
     if multi:
-        where.append(f"(SELECT COUNT(DISTINCT {svc}) FROM playables p WHERE p.event_id = e.id) >= 2")
+        where.append(f"(SELECT COUNT(DISTINCT {svc}) FROM playables p WHERE p.event_id = e.id{playable_mode_clause}) >= 2")
 
     if missing_http:
         if db_has_column(conn, "playables", "http_deeplink_url"):
             where.append(
-                "EXISTS (SELECT 1 FROM playables p WHERE p.event_id = e.id "
+                f"EXISTS (SELECT 1 FROM playables p WHERE p.event_id = e.id{playable_mode_clause} "
                 "AND (p.http_deeplink_url IS NULL OR p.http_deeplink_url = '') "
                 "AND (p.deeplink_play IS NOT NULL OR p.deeplink_open IS NOT NULL))"
             )
@@ -289,6 +344,14 @@ def _build_where(q, provider, svc, days_back, days_forward,
         where.append("datetime(e.start_utc) <= datetime('now') AND datetime(e.end_utc) > datetime('now')")
 
     return where, params
+
+
+def _is_xtream_only(conn) -> bool:
+    try:
+        from xtream_mode import is_xtream_only
+        return is_xtream_only(conn)
+    except Exception:
+        return False
 
 
 def _build_order(sort: str) -> str:

@@ -261,8 +261,34 @@ class XtreamClient:
             return None
         return rows
 
+    @staticmethod
+    def _usable_epg_payload(payload: Any) -> Optional[list[dict]]:
+        """Accept the common Xtream EPG envelope shapes.
+
+        Unlike category/stream snapshots, an empty EPG list is a valid answer:
+        it means the provider has no programme data for that stream.
+        """
+        if isinstance(payload, list):
+            rows = payload
+        elif isinstance(payload, dict):
+            rows = None
+            for key in ("epg_listings", "epg_list", "epg", "listings"):
+                candidate = payload.get(key)
+                if isinstance(candidate, list):
+                    rows = candidate
+                    break
+            if rows is None:
+                return None
+        else:
+            return None
+        usable = [item for item in rows if isinstance(item, dict)]
+        if rows and not usable:
+            return None
+        return usable
+
     def _get_with_requests(self, action: str,
-                           category_id: Optional[str]) -> Optional[list[dict]]:
+                           category_id: Optional[str] = None,
+                           stream_id: Optional[str] = None) -> Optional[list[dict]]:
         params = {
             "username": self.config.username,
             "password": self.config.password,
@@ -270,6 +296,8 @@ class XtreamClient:
         }
         if category_id is not None:
             params["category_id"] = str(category_id)
+        if stream_id is not None:
+            params["stream_id"] = str(stream_id)
         try:
             response = self.session.get(
                 f"{self.config.server_url}/player_api.php",
@@ -277,6 +305,10 @@ class XtreamClient:
                 timeout=self.timeout,
             )
             response.raise_for_status()
+            if action == "get_short_epg":
+                # Empty EPG is authoritative and should not trigger a second
+                # request through curl for every stream in the category.
+                return self._usable_epg_payload(response.json())
             required_key = "category_id" if action == "get_live_categories" else "stream_id"
             rows = self._usable_payload(response.json(), required_key)
             # Some incompatible providers return a misleading empty list to
@@ -289,7 +321,8 @@ class XtreamClient:
             return None
 
     def _get_with_curl(self, action: str,
-                       category_id: Optional[str]) -> list[dict]:
+                       category_id: Optional[str] = None,
+                       stream_id: Optional[str] = None) -> list[dict]:
         command = [
             self.curl_binary,
             "-4",
@@ -308,6 +341,8 @@ class XtreamClient:
         ]
         if category_id is not None:
             command.extend(("--data-urlencode", f"category_id={category_id}"))
+        if stream_id is not None:
+            command.extend(("--data-urlencode", f"stream_id={stream_id}"))
         try:
             completed = self.subprocess_runner(
                 command,
@@ -335,19 +370,23 @@ class XtreamClient:
             raise XtreamError(
                 f"Xtream curl transport returned invalid JSON for action {action}"
             ) from None
-        required_key = "category_id" if action == "get_live_categories" else "stream_id"
-        rows = self._usable_payload(payload, required_key)
+        if action == "get_short_epg":
+            rows = self._usable_epg_payload(payload)
+        else:
+            required_key = "category_id" if action == "get_live_categories" else "stream_id"
+            rows = self._usable_payload(payload, required_key)
         if rows is None:
             raise XtreamError(
                 f"Xtream curl transport returned an unusable response for action {action}"
             )
         return rows
 
-    def _get(self, action: str, category_id: Optional[str] = None) -> list[dict]:
-        rows = self._get_with_requests(action, category_id)
+    def _get(self, action: str, category_id: Optional[str] = None,
+             stream_id: Optional[str] = None) -> list[dict]:
+        rows = self._get_with_requests(action, category_id, stream_id)
         if rows is not None:
             return rows
-        return self._get_with_curl(action, category_id)
+        return self._get_with_curl(action, category_id, stream_id)
 
     def get_live_categories(self) -> list[dict]:
         return self._get("get_live_categories")
@@ -355,10 +394,16 @@ class XtreamClient:
     def get_live_streams(self, category_id: str) -> list[dict]:
         return self._get("get_live_streams", category_id=category_id)
 
-
+    def get_short_epg(self, stream_id: str) -> list[dict]:
+        return self._get("get_short_epg", stream_id=stream_id)
 
     def get_account_max_connections(self) -> Optional[int]:
-        """Read an optional provider limit without retaining authenticated data."""
+        """Read an optional provider limit without retaining authenticated data.
+
+        Xtream's unactioned player API response commonly contains
+        ``user_info.max_connections``.  It is advisory: transport and schema
+        differences simply return ``None`` and never make streams unavailable.
+        """
         try:
             response = self.session.get(
                 f"{self.config.server_url}/player_api.php",
@@ -372,8 +417,11 @@ class XtreamClient:
             return maximum if maximum > 0 else None
         except Exception:
             # Never surface exception text: an HTTP client can include the
-            # authenticated request URL. Unknown capacity is unconstrained.
+            # authenticated request URL.  Unknown capacity is deliberately
+            # unconstrained rather than a guessed global limit.
             return None
+
+
 def stable_event_id(category_id: Any, stream_id: Any) -> str:
     identity = f"{PROVIDER}\0{category_id}\0{stream_id}".encode("utf-8")
     return f"xtream:{hashlib.sha256(identity).hexdigest()[:24]}"
@@ -697,13 +745,20 @@ def normalize_stream(stream: Mapping[str, Any], category_id: str,
                      now: Optional[datetime] = None) -> Optional[dict[str, Any]]:
     stream_id = stream.get("stream_id")
     original_name = str(stream.get("name") or "").strip()
-    if stream_id is None or not original_name:
+    epg = stream.get("xtream_epg") or {}
+    epg_title = _epg_text(epg, _EPG_TITLE_KEYS) if isinstance(epg, Mapping) else ""
+    source_name = epg_title or original_name
+    if stream_id is None or not source_name:
         return None
-    if is_placeholder_stream_name(original_name):
+    if is_placeholder_stream_name(original_name) and not epg_title:
         return None
+    timing_stream = dict(stream)
+    if isinstance(epg, Mapping):
+        timing_stream.setdefault("epg_start", _epg_text(epg, _EPG_START_KEYS))
+        timing_stream.setdefault("epg_end", _epg_text(epg, _EPG_END_KEYS))
 
     motorsport = parse_motorsport_stream(
-        original_name,
+        original_name or source_name,
         category_name,
         config.timezone_name,
         now=now,
@@ -711,8 +766,8 @@ def normalize_stream(stream: Mapping[str, Any], category_id: str,
     )
 
     start = _first_timestamp(
-        stream,
-        ("start_timestamp", "start_utc", "start_time", "event_start", "epg_start"),
+        timing_stream,
+        ("epg_start", "start_timestamp", "start_utc", "start_time", "event_start"),
         config.timezone_name,
     ) or (motorsport or {}).get("start") or parse_start_from_name(
         original_name,
@@ -724,8 +779,8 @@ def normalize_stream(stream: Mapping[str, Any], category_id: str,
         return None
 
     end = _first_timestamp(
-        stream,
-        ("end_timestamp", "end_utc", "end_time", "event_end", "epg_end"),
+        timing_stream,
+        ("epg_end", "end_timestamp", "end_utc", "end_time", "event_end"),
         config.timezone_name,
     ) or parse_stop_from_name(original_name, config.timezone_name)
     duration_inferred = end is None or end <= start
@@ -743,12 +798,23 @@ def normalize_stream(stream: Mapping[str, Any], category_id: str,
         extension = "ts"
     icon = stream.get("stream_icon") or None
     epg_channel_id = stream.get("epg_channel_id") or stream.get("epg_id") or None
+    broadcast_name = (
+        _epg_text(epg, _BROADCAST_KEYS) if isinstance(epg, Mapping) else ""
+    ) or _epg_text(stream, _BROADCAST_KEYS) or category_name
     metadata = {
         "provider": PROVIDER,
         "stream_id": str(stream_id),
         "category_id": str(category_id),
         "category_name": category_name,
         "original_stream_name": original_name,
+        "broadcast_name": broadcast_name or None,
+        "epg_title": epg_title or None,
+        "epg_description": (
+            _epg_text(epg, _EPG_DESCRIPTION_KEYS) if isinstance(epg, Mapping) else None
+        ),
+        "epg_start": timing_stream.get("epg_start"),
+        "epg_end": timing_stream.get("epg_end"),
+        "epg_id": stream.get("epg_id"),
         "stream_icon": icon,
         "epg_channel_id": epg_channel_id,
         "container_extension": extension,
@@ -769,7 +835,8 @@ def normalize_stream(stream: Mapping[str, Any], category_id: str,
             "timezone_abbreviation": motorsport["timezone_abbreviation"],
             "timezone_source": motorsport["timezone_source"],
         })
-    display_title = motorsport["display_title"] if motorsport else original_name
+    display_title = motorsport["display_title"] if motorsport else source_name
+    epg_description = metadata.get("epg_description")
     classifications = [
         {"type": "provider_category", "value": category_name or str(category_id)}
     ]
@@ -795,7 +862,7 @@ def normalize_stream(stream: Mapping[str, Any], category_id: str,
             "title_brief": display_title,
             "synopsis": (
                 f"{motorsport['series']} {motorsport['location']} {motorsport['session_type']}."
-                if motorsport else f"Xtream live event from {category_name or 'configured category'}."
+                if motorsport else epg_description or f"Xtream live event from {category_name or 'configured category'}."
             ),
             "synopsis_brief": display_title,
             "channel_name": category_name or "Xtream",
@@ -847,7 +914,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         airing_type TEXT, classification_json TEXT, genres_json TEXT, content_segments_json TEXT,
         is_free INTEGER, is_premium INTEGER, runtime_secs INTEGER, start_ms INTEGER, end_ms INTEGER,
         start_utc TEXT, end_utc TEXT, created_ms INTEGER, created_utc TEXT,
-        hero_image_url TEXT, last_seen_utc TEXT, raw_attributes_json TEXT)""")
+        hero_image_url TEXT, normalized_name TEXT, last_seen_utc TEXT, raw_attributes_json TEXT)""")
     cur.execute("""CREATE TABLE IF NOT EXISTS playables (
         event_id TEXT NOT NULL, playable_id TEXT NOT NULL, provider TEXT,
         service_name TEXT, logical_service TEXT, deeplink_play TEXT, deeplink_open TEXT,
@@ -859,6 +926,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         event_id TEXT, img_type TEXT, url TEXT,
         PRIMARY KEY (event_id, img_type, url))""")
 
+    event_existing = {row[1] for row in cur.execute("PRAGMA table_info(events)")}
+    if "normalized_name" not in event_existing:
+        cur.execute("ALTER TABLE events ADD COLUMN normalized_name TEXT")
     existing = {row[1] for row in cur.execute("PRAGMA table_info(playables)")}
     additions = {
         "service_name": "TEXT", "logical_service": "TEXT",
@@ -878,7 +948,7 @@ _EVENT_COLUMNS = (
     "channel_name", "channel_provider_id", "airing_type", "classification_json",
     "genres_json", "content_segments_json", "is_free", "is_premium", "runtime_secs",
     "start_ms", "end_ms", "start_utc", "end_utc", "created_ms", "created_utc",
-    "hero_image_url", "last_seen_utc", "raw_attributes_json",
+    "hero_image_url", "normalized_name", "last_seen_utc", "raw_attributes_json",
 )
 _PLAYABLE_COLUMNS = (
     "event_id", "playable_id", "provider", "service_name", "logical_service",
@@ -891,7 +961,17 @@ _PLAYABLE_COLUMNS = (
 def _upsert(conn: sqlite3.Connection, table: str, columns: tuple[str, ...],
             values: Mapping[str, Any], conflict: str) -> None:
     placeholders = ",".join("?" for _ in columns)
-    updates = ",".join(f"{column}=excluded.{column}" for column in columns if column not in conflict.split(","))
+    update_parts = []
+    for column in columns:
+        if column in conflict.split(","):
+            continue
+        # normalized_name is an operator-owned override. Provider refreshes do
+        # not send it, so a NULL incoming value must never erase it.
+        if table == "events" and column == "normalized_name":
+            update_parts.append(f"{column}=COALESCE(excluded.{column},{table}.{column})")
+        else:
+            update_parts.append(f"{column}=excluded.{column}")
+    updates = ",".join(update_parts)
     conn.execute(
         f"INSERT INTO {table} ({','.join(columns)}) VALUES ({placeholders}) "
         f"ON CONFLICT({conflict}) DO UPDATE SET {updates}",
@@ -982,6 +1062,95 @@ def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
     return result
 
 
+_EPG_TITLE_KEYS = ("title", "name", "program_name", "event_title")
+_EPG_DESCRIPTION_KEYS = ("description", "desc", "plot", "synopsis")
+_EPG_START_KEYS = ("start_timestamp", "start", "start_time", "begin")
+_EPG_END_KEYS = ("stop_timestamp", "end_timestamp", "stop", "end", "end_time")
+_BROADCAST_KEYS = (
+    "broadcast_name", "broadcaster", "network_name", "network",
+    "broadcast", "channel_name", "channel", "service_name",
+)
+
+
+def _epg_text(listing: Mapping[str, Any], keys: Iterable[str]) -> str:
+    for key in keys:
+        value = listing.get(key)
+        if isinstance(value, Mapping):
+            for nested_key in ("name", "display_name", "displayName", "title", "label"):
+                nested = value.get(nested_key)
+                if nested is not None and str(nested).strip():
+                    return str(nested).strip()
+        elif value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _epg_has_matchup(title: str) -> bool:
+    return bool(re.search(r"(?:@|\b(?:at|vs?\.?|versus)\b)", title, re.IGNORECASE))
+
+
+def _select_epg_listing(stream: Mapping[str, Any], listings: Iterable[Mapping[str, Any]]) -> Optional[dict[str, Any]]:
+    """Choose the most match-like row from a short EPG response."""
+    stream_tokens = set(re.findall(r"[a-z0-9]+", str(stream.get("name") or "").lower()))
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+    for index, listing in enumerate(listings):
+        if not isinstance(listing, Mapping):
+            continue
+        title = _epg_text(listing, _EPG_TITLE_KEYS)
+        if not title or is_placeholder_stream_name(title):
+            continue
+        title_tokens = set(re.findall(r"[a-z0-9]+", title.lower()))
+        overlap = len(stream_tokens & title_tokens)
+        score = (100 if _epg_has_matchup(title) else 0) + min(overlap, 20)
+        # Xtream normally returns the current programme first. Index is only a
+        # tie-breaker after matchup/stream-name evidence.
+        candidates.append((score, -index, dict(listing)))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: (item[0], item[1]))[2]
+
+
+def _enrich_streams_with_epg(client: XtreamClient,
+                             streams_by_category: dict[str, list[dict]]) -> None:
+    get_short_epg = getattr(client, "get_short_epg", None)
+    if not callable(get_short_epg):
+        return
+
+    epg_cache: dict[str, list[dict]] = {}
+    provider_failed = False
+    for category_id, streams in streams_by_category.items():
+        for index, stream in enumerate(streams):
+            stream_id = stream.get("stream_id")
+            if stream_id is None:
+                continue
+            cache_key = str(stream_id)
+            if cache_key not in epg_cache:
+                try:
+                    epg_cache[cache_key] = list(get_short_epg(cache_key) or [])
+                except XtreamError:
+                    # A provider that does not expose get_short_epg should not
+                    # make the rest of the live snapshot disappear. Stop
+                    # retrying the same unsupported endpoint for every stream.
+                    provider_failed = True
+                    break
+            selected = _select_epg_listing(stream, epg_cache[cache_key])
+            if not selected:
+                continue
+            enriched = dict(stream)
+            enriched["xtream_epg"] = selected
+            enriched["epg_title"] = _epg_text(selected, _EPG_TITLE_KEYS)
+            enriched["epg_description"] = _epg_text(selected, _EPG_DESCRIPTION_KEYS)
+            enriched["epg_start"] = _epg_text(selected, _EPG_START_KEYS)
+            enriched["epg_end"] = _epg_text(selected, _EPG_END_KEYS)
+            enriched["epg_id"] = (
+                selected.get("epg_id") or selected.get("id")
+                or enriched.get("epg_id")
+            )
+            streams[index] = enriched
+        if provider_failed:
+            break
+
+
 def fetch_snapshot(client: XtreamClient, config: XtreamConfig) -> tuple[list[dict], dict[str, list[dict]]]:
     categories = client.get_live_categories()
     available = {str(item.get("category_id")) for item in categories}
@@ -990,6 +1159,7 @@ def fetch_snapshot(client: XtreamClient, config: XtreamConfig) -> tuple[list[dic
         raise XtreamError(f"Configured Xtream category IDs were not returned by the provider: {', '.join(unknown)}")
     streams = {category_id: client.get_live_streams(category_id)
                for category_id in config.category_ids}
+    _enrich_streams_with_epg(client, streams)
     return categories, streams
 
 
@@ -1005,6 +1175,8 @@ def run(db_path: Path, environ: Optional[Mapping[str, str]] = None,
         result = ingest_payload(conn, categories, streams, config)
         maximum = client.get_account_max_connections()
         if maximum:
+            # Do not overwrite an operator-managed capacity.  Only the numeric
+            # limit is stored; credentials remain solely in runtime config.
             from sports_metadata import ensure_schema
             ensure_schema(conn)
             conn.execute("INSERT OR IGNORE INTO provider_capacities(provider,max_concurrent,updated_utc) VALUES('xtream',?,?)",

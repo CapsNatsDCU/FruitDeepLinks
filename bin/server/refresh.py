@@ -142,6 +142,9 @@ def run_refresh(skip_scrape: bool = False, source: str = "manual") -> None:
     outcome = "error"
     try:
         cmd = ["python3", "-u", str(cfg.BIN_DIR / "daily_refresh.py")]
+        # Scheduled work can clear the entire eligible cache-miss backlog;
+        # interactive refreshes retain the configured bounded budget.
+        cmd.extend(["--canonical-ai-mode", "unlimited" if source == "auto" else "bounded"])
         if skip_scrape:
             cmd.append("--skip-scrape")
 
@@ -216,7 +219,7 @@ def run_apply_filters() -> None:
             "fruit_build_lanes.py",
             ["python3", "-u", str(cfg.BIN_DIR / "fruit_build_lanes.py"),
              "--db", str(cfg.DB_PATH),
-             "--lanes", str(num_lanes)],
+             "--lanes", str(num_lanes), "--canonical-ai-mode", "disabled"],
         ),
         (
             "fruit_export_hybrid.py",
