@@ -82,10 +82,13 @@ def upcoming_coverage():
     if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
     days = min(max(request.args.get("days", 14, type=int), 1), 90)
     with get_conn() as conn:
-        conn.row_factory = sqlite3.Row; items = coverage(conn, days=days)
+        conn.row_factory = sqlite3.Row
+        items = coverage(conn, days=days)
+        display_timezone = get_setting(conn, "timezone") or os.getenv("FRUIT_TIMEZONE") or os.getenv("TZ") or "UTC"
     summary = {"wanted": len(items), "ready": sum(x["coverage_state"] == "scheduled" for x in items),
                "awaiting_source": sum(x["coverage_state"] == "awaiting_source" for x in items)}
-    return jsonify({"ok": True, "days": days, "items": items, "summary": summary})
+    return jsonify({"ok": True, "days": days, "items": items, "summary": summary,
+                    "display_timezone": display_timezone, "timestamp_contract": "absolute_utc"})
 
 
 @bp.route("/api/sports/events/<canonical_event_id>")

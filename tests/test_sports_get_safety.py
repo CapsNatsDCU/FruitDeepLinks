@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import sys
 import unittest
@@ -97,6 +98,17 @@ class SportsGetSafetyTests(unittest.TestCase):
         page = self.client.get("/sports-catalog")
         self.assertEqual(200, page.status_code)
         self.assertIn(b"Search sports, leagues, teams", page.data)
+
+    def test_coverage_exposes_the_configured_display_timezone(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS user_preferences (key TEXT PRIMARY KEY, value TEXT, updated_utc TEXT)")
+            conn.execute("INSERT OR REPLACE INTO user_preferences(key,value) VALUES(?,?)",
+                         ("setting:timezone", json.dumps("America/Chicago")))
+        coverage = self.client.get("/api/sports/coverage").get_json()
+        self.assertEqual("America/Chicago", coverage["display_timezone"])
+        self.assertEqual("absolute_utc", coverage["timestamp_contract"])
+        page = self.client.get("/my-sports")
+        self.assertIn(b"formatUtc", page.data)
 
 
 if __name__ == "__main__":
