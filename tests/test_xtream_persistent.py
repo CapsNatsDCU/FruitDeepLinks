@@ -364,6 +364,12 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
         logs = "\n".join(line for _, line in get_recent_logs(count=50))
         self.assertNotIn("secret/pass", logs)
 
+    def test_tune_get_never_creates_an_empty_database(self):
+        self.db_path.unlink()
+        response = self.client.get("/xtream/channel/1/stream")
+        self.assertEqual(404, response.status_code)
+        self.assertFalse(self.db_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

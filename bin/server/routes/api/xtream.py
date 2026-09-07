@@ -369,7 +369,10 @@ def api_xtream_persistent_channel(persistent_id):
 
 @bp.route("/xtream/channel/<int:persistent_id>/stream", methods=["GET", "HEAD"])
 def xtream_persistent_stream(persistent_id):
-    _ensure_database()
+    # Tuning needs a read from the persistent channel catalog, but a missing
+    # catalog is not a reason for a GET to create an empty SQLite database.
+    if not db_exists():
+        return Response("", status=404)
     try:
         with get_conn() as conn:
             channel = get_channel(conn, persistent_id)
