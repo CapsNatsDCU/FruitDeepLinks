@@ -250,7 +250,10 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
 
         categories = self.client.get("/api/xtream/categories")
         self.assertEqual(200, categories.status_code)
-        self.assertEqual(["410", "999"], [row["category_id"] for row in categories.get_json()["categories"]])
+        # Reads use the persisted selection/catalog cache and never browse the
+        # provider.  A selected category that has not been explicitly scanned
+        # remains visible rather than silently disappearing.
+        self.assertEqual(["410"], [row["category_id"] for row in categories.get_json()["categories"]])
         self.assertTrue(next(row for row in categories.get_json()["categories"] if row["category_id"] == "410")["selected"])
         self.assertNotIn("demo user", categories.get_data(as_text=True))
         self.assertNotIn("secret/pass", categories.get_data(as_text=True))
@@ -268,7 +271,7 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
         restored = self.client.post("/api/xtream/categories", json={"category_ids": ["410"]})
         self.assertEqual(200, restored.status_code)
 
-        browse = self.client.get(
+        browse = self.client.post(
             "/api/xtream/categories/410/streams",
             query_string={"q": "Washington", "page_size": 25},
         )
@@ -343,11 +346,11 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
         self.assertEqual([], self.client.get("/api/xtream/persistent-channels").get_json()["channels"])
 
     def test_unconfigured_category_is_not_browsed(self):
-        response = self.client.get("/api/xtream/categories/999/streams")
+        response = self.client.post("/api/xtream/categories/999/streams")
         self.assertEqual(400, response.status_code)
         self.assertIn("configured", response.get_json()["message"])
 
-    def test_arbitrary_provider_error_does_not_expose_credentials(self):
+    def test_cached_category_get_does_not_contact_or_expose_provider(self):
         class UnsafeClient(FakeXtreamClient):
             def get_live_categories(self):
                 raise RuntimeError("http://provider/player_api.php?username=demo user&password=secret/pass")
@@ -355,7 +358,7 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
         with patch("server.routes.api.xtream.XtreamClient", UnsafeClient):
             response = self.client.get("/api/xtream/categories")
         body = response.get_data(as_text=True)
-        self.assertEqual(500, response.status_code)
+        self.assertEqual(200, response.status_code)
         self.assertNotIn("demo user", body)
         self.assertNotIn("secret", body)
         logs = "\n".join(line for _, line in get_recent_logs(count=50))

@@ -99,7 +99,7 @@ curl -o aiv_apple.m3u "$BASE/out/adb_lanes_aiv_apple.m3u"</pre>
 <div class="card" style="margin-bottom:14px">
   <h2>Persistent Xtream Channels</h2>
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/api/xtream/categories</code> Configured browseable categories</div>
-  <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/api/xtream/categories/&lt;category_id&gt;/streams?q=&amp;page=</code> Search one configured category</div>
+  <div class="endpoint-line"><span class="tag tag-post">POST</span><code>/api/xtream/categories/&lt;category_id&gt;/streams?q=&amp;page=</code> Browse one configured category</div>
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/api/xtream/persistent-channels</code> List saved channels</div>
   <div class="endpoint-line"><span class="tag tag-post">POST</span><code>/api/xtream/persistent-channels</code> Add a provider-verified stream</div>
   <div class="endpoint-line"><span class="tag tag-post">PATCH</span><code>/api/xtream/persistent-channels/&lt;id&gt;</code> Edit or enable/disable a channel</div>

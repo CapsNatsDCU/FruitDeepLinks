@@ -179,6 +179,9 @@ class XtreamOnlyRefreshTest(unittest.TestCase):
         self.assertIn("xtream_ingest.py", invoked)
         self.assertIn("fruit_build_lanes.py", invoked)
         self.assertIn("fruit_export_lanes.py", invoked)
+        lane_command = next(command for command in self.commands
+                            if "fruit_build_lanes.py" in {Path(part).name for part in command})
+        self.assertEqual("unlimited", lane_command[lane_command.index("--canonical-ai-mode") + 1])
         for disabled_script in (
             "multi_scraper.py",
             "apple_scraper_db.py",

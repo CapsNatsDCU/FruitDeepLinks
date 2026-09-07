@@ -493,8 +493,11 @@ def main(argv=None):
         action="store_true",
         help="Force Apple TV import even if database hasn't changed (used with --skip-scrape).",
     )
-    parser.add_argument("--canonical-ai-mode", choices=("disabled", "bounded", "unlimited"), default="bounded",
-                        help="Local-AI budget for refresh-time canonical synchronization.")
+    # This script is the cron/overnight entrypoint.  The interactive server
+    # explicitly supplies ``bounded`` for manual refreshes, while a direct
+    # scheduled invocation must drain eligible cache misses over time.
+    parser.add_argument("--canonical-ai-mode", choices=("disabled", "bounded", "unlimited"), default="unlimited",
+                        help="Local-AI budget for refresh-time canonical synchronization (overnight default: unlimited).")
     args = parser.parse_args(argv)
 
     print(f"FruitDeepLinks version: {get_version()}")

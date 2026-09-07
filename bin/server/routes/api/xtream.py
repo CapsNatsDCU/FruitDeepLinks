@@ -9,7 +9,7 @@ import sqlite3
 
 from flask import Blueprint, Response, jsonify, redirect, request
 
-from db.connection import get_conn, resolve_db_path
+from db.connection import db_exists, get_conn, resolve_db_path
 from db.preferences import get_setting, save_settings
 from server.logging_setup import log
 from server.services.xtream_persistent import (
@@ -39,6 +39,11 @@ def _ensure_database() -> None:
         sqlite3.connect(str(path)).close()
 
 
+def _read_database_error():
+    """GET handlers must never create a database as a side effect."""
+    return jsonify({"status": "error", "message": "Database not found; run a refresh first"}), 404
+
+
 def _safe_error(exc: Exception, status: int = 400):
     if isinstance(exc, ChannelNumberConflict):
         return jsonify({"status": "error", "message": str(exc), "code": "channel_number_conflict"}), 409
@@ -64,10 +69,15 @@ def _configured_client(conn):
 
 def _catalog_rows(conn, query=""):
     q = f"%{query.casefold()}%"
-    return [dict(row) for row in conn.execute(
-        "SELECT * FROM xtream_catalog_categories WHERE lower(name) LIKE ? OR category_id LIKE ? ORDER BY ignored,name,category_id",
-        (q, q),
-    )]
+    try:
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM xtream_catalog_categories WHERE lower(name) LIKE ? OR category_id LIKE ? ORDER BY ignored,name,category_id",
+            (q, q),
+        )]
+    except sqlite3.OperationalError:
+        # Older databases are read safely as an empty discovery cache.  The
+        # next explicit refresh/scan installs and fills this table.
+        return []
 
 
 def _recommendation_score(row, tokens):
@@ -121,16 +131,15 @@ def api_xtream_discovery_scan():
 
 @bp.route("/api/xtream/discovery/categories")
 def api_xtream_discovery_categories():
-    _ensure_database()
+    if not db_exists(): return _read_database_error()
     try:
         with get_conn() as conn:
-            ensure_sports_schema(conn)
             return jsonify({"status": "success", "categories": _catalog_rows(conn, request.args.get("q", ""))})
     except Exception as exc:
         return _safe_error(exc)
 
 
-@bp.route("/api/xtream/discovery/categories/<category_id>/preview")
+@bp.route("/api/xtream/discovery/categories/<category_id>/preview", methods=["POST"])
 def api_xtream_discovery_preview(category_id):
     """Retrieve a bounded, credential-safe sample without enabling ingestion."""
     _ensure_database()
@@ -174,13 +183,12 @@ def api_xtream_discovery_ignore(category_id):
 def api_xtream_discovery_recommendations():
     """Rank disabled categories from wanted identities and bounded samples.
 
-    ``preview=1`` may refresh at most five likely categories and samples only
-    the first 25 names.  It never changes category selection.
+    This is a cached/materialized read.  Category scan and individual preview
+    are explicit POST operations, so viewing My Sports cannot contact Xtream.
     """
-    _ensure_database()
+    if not db_exists(): return _read_database_error()
     try:
         with get_conn() as conn:
-            ensure_sports_schema(conn)
             wanted = coverage(conn, days=90)
             event_ids = [item["canonical_event_id"] for item in wanted]
             tokens = {str(value).casefold() for item in wanted for value in (item.get("title"), *(p.get("display_name") for p in item.get("participants", []))) if value}
@@ -190,23 +198,6 @@ def api_xtream_discovery_recommendations():
                     tokens.update(str(value).casefold() for value in row if value)
             catalog = [row for row in _catalog_rows(conn)
                        if not row["enabled"] and not row["ignored"] and not row.get("disappeared_utc")]
-            previewed = []
-            if request.args.get("preview") in {"1", "true"}:
-                # Avoid broad provider walks: only a handful of categories
-                # whose metadata has at least a sport/league hint are sampled.
-                likely = [row for row in catalog if any(token in row["name"].casefold() for token in tokens if len(token) > 2)]
-                if likely:
-                    config, client = _configured_client(conn)
-                    now = utc_now()
-                    for row in likely[:5]:
-                        streams = client.get_live_streams(str(row["category_id"]))
-                        samples = [{"stream_id": str(item.get("stream_id") or ""), "name": str(item.get("name") or "")}
-                                   for item in streams[:25]]
-                        conn.execute("UPDATE xtream_catalog_categories SET stream_count=?,samples_json=?,last_seen_utc=? WHERE category_id=?",
-                                     (len(streams), json.dumps(samples), now, row["category_id"]))
-                        row["stream_count"], row["samples_json"] = len(streams), json.dumps(samples)
-                        previewed.append(row["category_id"])
-                    conn.commit()
             recommendations = []
             for row in catalog:
                 score, reasons = _recommendation_score(row, tokens)
@@ -214,7 +205,7 @@ def api_xtream_discovery_recommendations():
                     recommendations.append({"category_id": row["category_id"], "category_name": row["name"], "score": score,
                                             "reasons": reasons, "sampled": bool(row.get("samples_json") and row.get("samples_json") != "[]")})
         recommendations.sort(key=lambda x: (-x["score"], x["category_name"].casefold(), x["category_id"]))
-        return jsonify({"status": "success", "recommendations": recommendations, "previewed_category_ids": previewed,
+        return jsonify({"status": "success", "recommendations": recommendations, "previewed_category_ids": [],
                         "selection_changed": False})
     except Exception as exc:
         return _safe_error(exc)
@@ -222,22 +213,23 @@ def api_xtream_discovery_recommendations():
 
 @bp.route("/api/xtream/categories")
 def api_xtream_categories():
-    _ensure_database()
+    if not db_exists(): return _read_database_error()
     try:
         with get_conn() as conn:
-            config, client = _configured_client(conn)
-            upstream = client.get_live_categories()
-        selected = set(config.category_ids)
-        categories = sorted(({
-            "category_id": str(row["category_id"]),
-            "category_name": str(row.get("category_name") or f"Category {row['category_id']}"),
-            "selected": str(row["category_id"]) in selected,
-        } for row in upstream if row.get("category_id") is not None),
-            key=lambda row: (row["category_name"].casefold(), row["category_id"]))
+            selected_text = str(get_setting(conn, "xtream_category_ids", "") or "")
+            selected = {item.strip() for item in selected_text.split(",") if item.strip()}
+            cached = _catalog_rows(conn)
+        categories = [{"category_id": str(row["category_id"]), "category_name": str(row.get("name") or f"Category {row['category_id']}"),
+                       "selected": str(row["category_id"]) in selected}
+                      for row in cached]
+        known = {row["category_id"] for row in categories}
+        categories.extend({"category_id": category_id, "category_name": f"Category {category_id} (not scanned)", "selected": True}
+                          for category_id in sorted(selected - known))
+        categories.sort(key=lambda row: (row["category_name"].casefold(), row["category_id"]))
         return jsonify({
             "status": "success",
             "categories": categories,
-            "selected_category_ids": list(config.category_ids),
+            "selected_category_ids": sorted(selected),
         })
     except Exception as exc:
         return _safe_error(exc, 502)
@@ -266,8 +258,9 @@ def api_save_xtream_categories():
         return _safe_error(exc, 502)
 
 
-@bp.route("/api/xtream/categories/<category_id>/streams")
+@bp.route("/api/xtream/categories/<category_id>/streams", methods=["POST"])
 def api_xtream_category_streams(category_id):
+    """Explicitly browse an upstream category; never perform this on GET."""
     _ensure_database()
     try:
         with get_conn() as conn:
@@ -290,8 +283,8 @@ def api_xtream_category_streams(category_id):
 
 @bp.route("/api/xtream/persistent-channels", methods=["GET", "POST"])
 def api_xtream_persistent_channels():
-    _ensure_database()
     if request.method == "GET":
+        if not db_exists(): return _read_database_error()
         try:
             with get_conn() as conn:
                 channels = list_channels(conn)
@@ -299,6 +292,7 @@ def api_xtream_persistent_channels():
         except Exception as exc:
             return _safe_error(exc)
 
+    _ensure_database()
     payload = request.get_json(silent=True) or {}
     if not isinstance(payload, dict):
         return jsonify({"status": "error", "message": "Expected a JSON object"}), 400
@@ -349,7 +343,8 @@ def api_xtream_persistent_channels():
 @bp.route("/api/xtream/persistent-channels/<int:persistent_id>",
           methods=["GET", "PUT", "PATCH", "DELETE"])
 def api_xtream_persistent_channel(persistent_id):
-    _ensure_database()
+    if request.method != "GET": _ensure_database()
+    elif not db_exists(): return _read_database_error()
     try:
         with get_conn() as conn:
             if request.method == "GET":
@@ -405,7 +400,7 @@ def xtream_persistent_stream(persistent_id):
 
 @bp.route("/m3u/persistent")
 def m3u_xtream_persistent():
-    _ensure_database()
+    if not db_exists(): return _read_database_error()
     try:
         with get_conn() as conn:
             server_url = str(get_setting(conn, "server_url", request.url_root.rstrip("/")))
@@ -421,7 +416,7 @@ def m3u_xtream_persistent():
 
 @bp.route("/xmltv/persistent")
 def xmltv_xtream_persistent():
-    _ensure_database()
+    if not db_exists(): return _read_database_error()
     try:
         with get_conn() as conn:
             body = render_xmltv(conn)

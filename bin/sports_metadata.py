@@ -700,23 +700,107 @@ def coverage(conn: sqlite3.Connection, *, days: int = 14) -> list[dict[str, Any]
     # refresh/migration path, so this function must remain strictly read-only.
     rows = conn.execute("SELECT ce.* FROM canonical_events ce WHERE datetime(ce.start_utc) BETWEEN datetime('now','-1 day') AND datetime('now', ?)", (f"+{max(1, min(days, 90))} days",)).fetchall()
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not rows:
+        return []
+
+    # This endpoint backs both the dashboard and discovery recommendations.
+    # Fetch all dependent state in bounded batches instead of issuing several
+    # queries per canonical event; refreshes with hundreds of events should
+    # still leave an inexpensive, snapshot-only UI read.
+    events = [dict(row) for row in rows]
+    event_ids = [event["id"] for event in events]
+    marks = ",".join("?" for _ in event_ids)
+    participants_by_event: dict[str, list[dict[str, Any]]] = {event_id: [] for event_id in event_ids}
+    for row in conn.execute(
+        f"SELECT event_id,team_id,display_name,role FROM canonical_event_participants WHERE event_id IN ({marks})",
+        event_ids,
+    ):
+        item = dict(row)
+        participants_by_event[item["event_id"]].append(item)
+
+    # Rules are normally a tiny materialized set.  Fetching active rules once
+    # also preserves the existing precedence: event, team, league,
+    # competition, sport; event-type-specific rules beat generic ones.
+    rules_by_target: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in conn.execute("SELECT * FROM sports_rules WHERE enabled=1"):
+        item = dict(row)
+        rules_by_target.setdefault((item["target_type"], str(item["target_id"])), []).append(item)
+
+    def batched_rule(event: dict[str, Any]) -> dict[str, Any]:
+        candidates = [("event", event["id"], 5)]
+        candidates.extend(("team", str(participant["team_id"]), 4)
+                          for participant in participants_by_event[event["id"]]
+                          if participant.get("team_id"))
+        candidates.extend((("league", str(event.get("league_id") or ""), 3),
+                           ("competition", str(event.get("recurring_event_id") or ""), 2),
+                           ("sport", str(event.get("sport_id") or ""), 1)))
+        for target_type, target_id, specificity in candidates:
+            if not target_id:
+                continue
+            matching = [rule for rule in rules_by_target.get((target_type, target_id), [])
+                        if (rule.get("event_type") or "") in {"", event.get("event_type") or ""}]
+            if matching:
+                selected = max(matching, key=lambda rule: ((rule.get("event_type") or "") == (event.get("event_type") or ""), rule["id"]))
+                selected = dict(selected)
+                selected.update({"priority": {"IGNORE": -10000, "NORMAL": 0, "PRIORITIZE": 1000, "ALWAYS_SCHEDULE": 10000}[selected["policy"]],
+                                 "specificity": specificity})
+                return selected
+        return {"policy": "NORMAL", "priority": 0, "reason": "default"}
+
+    source_by_event: dict[str, list[dict[str, Any]]] = {event_id: [] for event_id in event_ids}
+    for row in conn.execute(
+        f"SELECT source,source_event_id,confidence,canonical_event_id FROM source_event_records WHERE canonical_event_id IN ({marks})",
+        event_ids,
+    ):
+        item = dict(row)
+        source_by_event[item["canonical_event_id"]].append(item)
+
+    source_ids = sorted({str(source["source_event_id"])
+                         for sources in source_by_event.values() for source in sources})
+    events_by_source_id: dict[str, set[str]] = {}
+    for event_id, sources in source_by_event.items():
+        for source in sources:
+            events_by_source_id.setdefault(str(source["source_event_id"]), set()).add(event_id)
+
+    playable_counts = {event_id: 0 for event_id in event_ids}
+    lane_by_event: dict[str, Any] = {}
+    if source_ids and "playables" in tables:
+        source_marks = ",".join("?" for _ in source_ids)
+        for row in conn.execute(f"SELECT event_id FROM playables WHERE event_id IN ({source_marks})", source_ids):
+            for event_id in events_by_source_id.get(str(row[0]), set()):
+                playable_counts[event_id] += 1
+    if source_ids and "lane_events" in tables:
+        source_marks = ",".join("?" for _ in source_ids)
+        for row in conn.execute(
+            f"SELECT lane_id,event_id,start_utc FROM lane_events WHERE event_id IN ({source_marks}) "
+            "AND COALESCE(is_placeholder,0)=0 ORDER BY start_utc,lane_id",
+            source_ids,
+        ):
+            for event_id in events_by_source_id.get(str(row[1]), set()):
+                lane_by_event.setdefault(event_id, row[0])
+
+    decisions_by_event: dict[str, dict[str, Any]] = {}
+    for row in conn.execute(
+        f"SELECT canonical_event_id,decision,reason_json,generation_utc FROM scheduling_decisions "
+        f"WHERE canonical_event_id IN ({marks}) ORDER BY generation_utc DESC",
+        event_ids,
+    ):
+        item = dict(row)
+        decisions_by_event.setdefault(item["canonical_event_id"], item)
+
     result = []
-    for row in rows:
-        event = dict(row); rule = applicable_rule(conn, event["id"])
+    for event in events:
+        rule = batched_rule(event)
         if rule["policy"] not in {"ALWAYS_SCHEDULE", "PRIORITIZE"}: continue
-        source_rows = conn.execute("SELECT source,source_event_id,confidence FROM source_event_records WHERE canonical_event_id=?", (event["id"],)).fetchall()
-        legacy_ids = [r[1] for r in source_rows]
-        playable_count = 0; lane = None
-        if legacy_ids and {"playables", "lane_events"}.issubset(tables):
-            marks = ",".join("?" for _ in legacy_ids)
-            playable_count = conn.execute(f"SELECT COUNT(*) FROM playables WHERE event_id IN ({marks})", legacy_ids).fetchone()[0]
-            lane = conn.execute(f"SELECT lane_id FROM lane_events WHERE event_id IN ({marks}) AND COALESCE(is_placeholder,0)=0 ORDER BY start_utc LIMIT 1", legacy_ids).fetchone()
-        decision = conn.execute("SELECT decision,reason_json FROM scheduling_decisions WHERE canonical_event_id=? ORDER BY generation_utc DESC LIMIT 1", (event["id"],)).fetchone()
-        status = "scheduled" if lane else ("playable_found" if playable_count else "awaiting_source")
-        if decision and decision[0] == "provider_capacity_conflict":
+        playable_count = playable_counts[event["id"]]
+        lane_id = lane_by_event.get(event["id"])
+        decision = decisions_by_event.get(event["id"])
+        status = "scheduled" if lane_id is not None else ("playable_found" if playable_count else "awaiting_source")
+        if decision and decision["decision"] == "provider_capacity_conflict":
             status = "provider_capacity_conflict"
-        elif decision and decision[0] == "lane_capacity_conflict":
+        elif decision and decision["decision"] == "lane_capacity_conflict":
             status = "lane_capacity_conflict"
-        participants = [dict(r) for r in conn.execute("SELECT display_name,role FROM canonical_event_participants WHERE event_id=?", (event["id"],))]
-        result.append({"canonical_event_id": event["id"], "title": event.get("title"), "start_utc": event["start_utc"], "participants": participants, "rule": rule["policy"], "coverage_state": status, "playable_count": playable_count, "lane_id": lane[0] if lane else None, "decision": decision[0] if decision else None})
+        participants = [{"display_name": item["display_name"], "role": item["role"]}
+                        for item in participants_by_event[event["id"]]]
+        result.append({"canonical_event_id": event["id"], "title": event.get("title"), "start_utc": event["start_utc"], "participants": participants, "rule": rule["policy"], "coverage_state": status, "playable_count": playable_count, "lane_id": lane_id, "decision": decision["decision"] if decision else None})
     return result

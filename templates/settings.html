@@ -346,7 +346,7 @@ async function searchPersistentStreams(page = 1) {
   results.innerHTML = '<span class="status-muted">Loading channels from this category…</span>';
   try {
     const params = new URLSearchParams({q:query, page:String(page), page_size:'25'});
-    const data = await persistentRequest(`/api/xtream/categories/${encodeURIComponent(categoryId)}/streams?${params}`);
+    const data = await persistentRequest(`/api/xtream/categories/${encodeURIComponent(categoryId)}/streams?${params}`, {method:'POST'});
     _persistentResults = Array.isArray(data.items) ? data.items : [];
     _persistentPage = data.page || 1;
     results.innerHTML = _persistentResults.length ? _persistentResults.map((stream, index) => `<div class="persistent-row">

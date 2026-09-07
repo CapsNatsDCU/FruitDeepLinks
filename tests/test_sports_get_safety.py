@@ -47,6 +47,25 @@ class SportsGetSafetyTests(unittest.TestCase):
                 response = self.client.get(url)
                 self.assertEqual(200, response.status_code, url)
 
+    def test_repeated_my_sports_gets_preserve_materialized_rows(self):
+        urls = ["/api/sports/catalog", "/api/sports/rules", "/api/sports/coverage",
+                f"/api/sports/events/{self.event['canonical_event_id']}",
+                "/api/sports/provider-capacities", "/api/sports/health"]
+
+        def snapshot():
+            with sqlite3.connect(self.db_path) as conn:
+                tables = [row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                )]
+                return {name: conn.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
+                        for name in tables}
+
+        before = snapshot()
+        for _ in range(2):
+            for url in urls:
+                self.assertEqual(200, self.client.get(url).status_code, url)
+        self.assertEqual(before, snapshot())
+
     def test_catalog_read_succeeds_while_a_refresh_writer_has_lock(self):
         # WAL plus a separate read connection gives the UI a prior committed
         # snapshot rather than competing for refresh write ownership.
@@ -59,6 +78,25 @@ class SportsGetSafetyTests(unittest.TestCase):
         finally:
             writer.rollback()
             writer.close()
+
+    def test_my_sports_xtream_recommendations_are_cached_read_only(self):
+        with patch("server.routes.api.xtream.ensure_sports_schema", side_effect=AssertionError("GET wrote schema")), \
+             patch("server.routes.api.xtream.XtreamClient", side_effect=AssertionError("GET contacted provider")):
+            response = self.client.get("/api/xtream/discovery/recommendations")
+        self.assertEqual(200, response.status_code)
+
+    def test_catalog_browser_and_rule_labels_use_materialized_ids(self):
+        teams = self.client.get("/api/sports/catalog").get_json()["teams"]
+        team_id = next(team["id"] for team in teams if team["name"] == "Washington Capitals")
+        created = self.client.post("/api/sports/rules", json={
+            "target_type": "team", "target_id": team_id, "policy": "PRIORITIZE",
+        })
+        self.assertEqual(201, created.status_code)
+        rules = self.client.get("/api/sports/rules").get_json()["rules"]
+        self.assertEqual("Washington Capitals", rules[0]["target_name"])
+        page = self.client.get("/sports-catalog")
+        self.assertEqual(200, page.status_code)
+        self.assertIn(b"Search sports, leagues, teams", page.data)
 
 
 if __name__ == "__main__":

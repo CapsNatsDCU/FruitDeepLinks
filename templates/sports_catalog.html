@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Sports Catalog · FruitDeepLinks{% endblock %}
+{% block page_title %}Sports Catalog{% endblock %}
+{% block page_subtitle %}<p class="subtitle">Read-only, refresh-materialized Fruit identities. Imported provenance and manual confirmation stay visible.</p>{% endblock %}
+{% block content %}
+<section class="card" style="margin-bottom:16px">
+  <label for="catalog-search">Search sports, leagues, teams, racing events, aliases, or external IDs</label>
+  <input id="catalog-search" type="text" autocomplete="off" placeholder="Washington Capitals, WSH, D.C. United, Italian Grand Prix…" style="margin-top:8px">
+  <p id="catalog-summary" class="form-hint" style="margin-top:8px">Loading materialized catalog…</p>
+</section>
+<section class="card"><div style="overflow:auto"><table>
+  <thead><tr><th>Type</th><th>Canonical identity</th><th>Scope</th><th>Aliases</th><th>Mappings / provenance</th></tr></thead>
+  <tbody id="catalog-rows"></tbody>
+</table></div></section>
+<script>
+let catalog={sports:[],leagues:[],teams:[],racing_events:[],aliases:[],provenance:[]};
+const esc=value=>{const node=document.createElement('div');node.textContent=value??'';return node.innerHTML};
+function indexBy(items,key){const map=new Map();for(const item of items||[]){const value=item[key];if(!map.has(value))map.set(value,[]);map.get(value).push(item)}return map}
+function render(){const search=(document.querySelector('#catalog-search').value||'').trim().toLowerCase();const aliases=indexBy(catalog.aliases,'fruit_id'), provenance=indexBy(catalog.provenance,'fruit_id');const sports=new Map(catalog.sports.map(x=>[x.id,x.name]));const leagues=new Map(catalog.leagues.map(x=>[x.id,x.name]));const entities=[...catalog.sports.map(x=>({...x,type:'Sport'})),...catalog.leagues.map(x=>({...x,type:'League'})),...catalog.teams.map(x=>({...x,type:'Team'})),...catalog.racing_events.map(x=>({...x,type:'Racing event'}))];const rows=entities.filter(entity=>{const terms=[entity.name,entity.type,...(aliases.get(entity.id)||[]).map(x=>x.alias),...(provenance.get(entity.id)||[]).flatMap(x=>[x.source,x.external_id])].join(' ').toLowerCase();return !search||terms.includes(search)});document.querySelector('#catalog-summary').textContent=`${rows.length} matching identities from refresh-materialized local catalog; no provider or AI work was started.`;document.querySelector('#catalog-rows').innerHTML=rows.map(entity=>{const scope=entity.type==='Sport'?'—':entity.type==='League'?(sports.get(entity.sport_id)||'—'):(leagues.get(entity.league_id)||sports.get(entity.sport_id)||'—');const aliasText=(aliases.get(entity.id)||[]).map(a=>`${esc(a.alias)}${a.operator_confirmed?' · manual':''}`).join('<br>')||'—';const maps=(provenance.get(entity.id)||[]).map(p=>`${esc(p.source)}: <span class="mono">${esc(p.external_id)}</span>${p.operator_confirmed?' · manual':''}`).join('<br>')||'—';return `<tr><td>${esc(entity.type)}</td><td><strong>${esc(entity.name)}</strong><br><span class="mono small">${esc(entity.id)}</span></td><td>${esc(scope)}</td><td>${aliasText}</td><td>${maps}</td></tr>`}).join('')||'<tr><td colspan="5" class="status-muted">No matching canonical identities.</td></tr>'}
+async function load(){const response=await fetch('/api/sports/catalog');catalog=await response.json();if(!catalog.ok){document.querySelector('#catalog-summary').textContent=catalog.error||'Catalog unavailable';return}render()};document.querySelector('#catalog-search').addEventListener('input',render);load();
+</script>
+{% endblock %}

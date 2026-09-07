@@ -65,6 +65,15 @@ def rules():
             conn.execute("UPDATE sports_rules SET enabled=0,updated_utc=datetime('now') WHERE id=?", (rule_id,)); conn.commit()
             return jsonify({"ok": True})
         rows = [dict(r) for r in conn.execute("SELECT * FROM sports_rules WHERE enabled=1 ORDER BY target_type,target_id,id")]
+        # Rules store canonical IDs; supply their friendly materialized labels
+        # without turning the browser into a write/synchronization boundary.
+        labels = {}
+        for target_type, table in (("sport", "sports"), ("league", "leagues"),
+                                   ("team", "teams"), ("competition", "catalog_recurring_events")):
+            labels[target_type] = {str(row[0]): str(row[1]) for row in conn.execute(f"SELECT id,name FROM {table}")}
+        labels["event"] = {str(row[0]): str(row[1] or row[0]) for row in conn.execute("SELECT id,title FROM canonical_events")}
+        for row in rows:
+            row["target_name"] = labels.get(row["target_type"], {}).get(str(row["target_id"]), row["target_id"])
     return jsonify({"ok": True, "rules": rows})
 
 
@@ -87,24 +96,34 @@ def inspect_event(canonical_event_id):
         event = conn.execute("SELECT ce.*,s.name AS sport,l.name AS league FROM canonical_events ce LEFT JOIN sports s ON s.id=ce.sport_id LEFT JOIN leagues l ON l.id=ce.league_id WHERE ce.id=?", (canonical_event_id,)).fetchone()
         if not event: return jsonify({"ok": False, "error": "Not found"}), 404
         sources = [dict(r) for r in conn.execute("SELECT source,source_event_id,confidence,resolution_kind,evidence_json,last_seen_utc FROM source_event_records WHERE canonical_event_id=?", (canonical_event_id,))]
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         # Keep the untrusted AI interpretation visibly separate from Fruit's
         # canonical resolution fields.  Cache rows intentionally contain no
-        # provider credentials or transport URLs.
+        # provider credentials or transport URLs.  Fetch this event's cache
+        # rows in one query: a merged event commonly has several providers.
+        ai_by_source = {}
+        if sources and "local_ai_event_cache" in tables:
+            conditions = " OR ".join("(provider=? AND source_event_id=?)" for _ in sources)
+            values = [value for source_row in sources
+                      for value in (source_row["source"], source_row["source_event_id"])]
+            for ai_row in conn.execute(
+                "SELECT model,result_json,confidence,validation_status,failure_kind,parsed_utc,provider,source_event_id "
+                f"FROM local_ai_event_cache WHERE {conditions} ORDER BY updated_utc DESC",
+                values,
+            ):
+                item = dict(ai_row)
+                ai_by_source.setdefault((item.pop("provider"), item.pop("source_event_id")), item)
         for source_row in sources:
-            ai_row = conn.execute(
-                "SELECT model,result_json,confidence,validation_status,failure_kind,parsed_utc FROM local_ai_event_cache "
-                "WHERE provider=? AND source_event_id=? ORDER BY updated_utc DESC LIMIT 1",
-                (source_row["source"], source_row["source_event_id"]),
-            ).fetchone()
+            ai_row = ai_by_source.get((source_row["source"], source_row["source_event_id"]))
             if ai_row:
                 item = dict(ai_row)
                 item["interpretation"] = _safe_metadata(item.pop("result_json"))
                 source_row["local_ai_interpretation"] = item
+            source_row["resolver_evidence"] = _safe_metadata(source_row.pop("evidence_json", "{}"))
         participants = [dict(r) for r in conn.execute("SELECT p.*,t.name AS canonical_team FROM canonical_event_participants p LEFT JOIN teams t ON t.id=p.team_id WHERE p.event_id=?", (canonical_event_id,))]
         rule = applicable_rule(conn, canonical_event_id)
         source_ids = [row["source_event_id"] for row in sources]
         playables = []; lanes = []
-        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if source_ids:
             marks = ",".join("?" for _ in source_ids)
             if "playables" in tables: playables = [dict(r) for r in conn.execute(f"SELECT event_id,playable_id,provider,logical_service,service_name,priority FROM playables WHERE event_id IN ({marks})", source_ids)]
@@ -112,7 +131,9 @@ def inspect_event(canonical_event_id):
         decisions = [dict(r) for r in conn.execute("SELECT * FROM scheduling_decisions WHERE canonical_event_id=? ORDER BY generation_utc DESC LIMIT 20", (canonical_event_id,))]
         capacities = [dict(r) for r in conn.execute("SELECT provider,max_concurrent,updated_utc FROM provider_capacities ORDER BY provider")] if "provider_capacities" in tables else []
         display_timezone = get_setting(conn, "timezone") or os.getenv("FRUIT_TIMEZONE") or os.getenv("TZ") or "UTC"
-    return jsonify({"ok": True, "event": dict(event), "participants": participants, "source_records": sources, "applicable_rule": rule, "lanes": lanes, "playables": playables, "scheduling_decisions": decisions, "provider_capacities": capacities, "time_resolution": {"raw": _safe_metadata(event["metadata_json"]).get("raw_start"), "canonical_utc": event["start_utc"], "display_timezone": display_timezone, "contract": "absolute_utc"}})
+    event_data = dict(event)
+    event_data["metadata"] = _safe_metadata(event_data.pop("metadata_json", "{}"))
+    return jsonify({"ok": True, "event": event_data, "participants": participants, "source_records": sources, "applicable_rule": rule, "lanes": lanes, "playables": playables, "scheduling_decisions": decisions, "provider_capacities": capacities, "diagnostics": {"pipeline": ["provider observation", "deterministic/catalog resolution", "canonical event", "attached playables", "sports rule", "scheduler decision"], "source_resolution_count": len(sources), "selected_playable_count": len(playables)}, "time_resolution": {"raw": event_data["metadata"].get("raw_start"), "canonical_utc": event_data["start_utc"], "display_timezone": display_timezone, "contract": "absolute_utc"}})
 
 
 @bp.route("/api/sports/resolver", methods=["POST"])
