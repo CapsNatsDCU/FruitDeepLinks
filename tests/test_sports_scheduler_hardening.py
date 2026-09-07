@@ -257,6 +257,32 @@ class SportsSchedulerHardeningTests(unittest.TestCase):
                              if item.attrib["start"] == "20261101053000 +0000")
         self.assertEqual("20261101053000 +0000", programme.attrib["start"])
 
+    def test_three_hundred_lanes_generate_large_placeholder_xmltv(self):
+        """Exercise the real final lane/XMLTV path at the requested lane scale.
+
+        One live event is enough to make every other lane placeholder-only,
+        which catches accidental per-lane schema/scheduler work without
+        fabricating provider records or requiring a network connection.
+        """
+        start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+        event = self._event("scale-event", start, start + timedelta(hours=2), canonical="ce-scale")
+        ensure_events_schema(self.conn)
+        self.conn.execute(
+            "INSERT INTO events(id,title,start_utc,end_utc,genres_json,classification_json,raw_attributes_json) VALUES(?,?,?,?,?,?,?)",
+            (event.event_id, event.title, event.start.isoformat(), event.end_padded.isoformat(), "[]", "[]", "{}"),
+        )
+        self._reset_lanes(300)
+        with patch("fruit_build_lanes.get_filtered_playables", return_value=[]):
+            build_lanes_with_placeholders(self.conn, [event], 300)
+        self.assertEqual(1, len(self._scheduled_ids()))
+        self.assertGreater(self.conn.execute("SELECT COUNT(*) FROM lane_events WHERE is_placeholder=1").fetchone()[0], 30000)
+        with TemporaryDirectory() as temp:
+            xml_path = Path(temp) / "lanes-300.xml"
+            build_lanes_xmltv(self.conn, str(xml_path))
+            xml = xml_path.read_text(encoding="utf-8")
+        self.assertEqual(300, xml.count("<channel "))
+        self.assertGreater(xml.count("<programme "), 30000)
+
     def test_playable_ranking_supports_pre_espn_enrichment_schema(self):
         ensure_events_schema(self.conn)
         self.conn.execute(
