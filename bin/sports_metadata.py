@@ -27,6 +27,39 @@ POLICIES = frozenset({"IGNORE", "NORMAL", "PRIORITIZE", "ALWAYS_SCHEDULE"})
 _WORDS = re.compile(r"[^a-z0-9]+")
 
 
+def row_to_dict(cursor: sqlite3.Cursor, row: Any) -> dict[str, Any] | None:
+    """Normalize one SQLite result row into the canonical metadata row shape.
+
+    The canonical resolver/rules API may be reached from the HTTP app (whose
+    connection uses ``sqlite3.Row``) or from the lane-builder command (whose
+    established connection returns ordinary tuples).  Public metadata helpers
+    must therefore never infer a mapping from a tuple: ``dict(tuple)`` treats
+    string values as key/value pairs and raises a misleading ``ValueError``.
+
+    Query cursors are the source of truth for tuple column names.  Call this
+    immediately after fetching from that cursor, before mapping-style access.
+    """
+    if row is None:
+        return None
+    if isinstance(row, Mapping):
+        return dict(row)
+    columns = [column[0] for column in (cursor.description or ())]
+    if not columns:
+        raise ValueError("SQLite cursor has no column description for row normalization")
+    return dict(zip(columns, row))
+
+
+def query_dicts(conn: sqlite3.Connection, sql: str, parameters: Iterable[Any] = ()) -> list[dict[str, Any]]:
+    """Execute a canonical read and return normalized mapping rows.
+
+    This is the single row contract for canonical sports queries.  It keeps
+    callers independent of whether their connection selected sqlite3.Row or
+    SQLite's default tuple row factory.
+    """
+    cursor = conn.execute(sql, tuple(parameters))
+    return [row_to_dict(cursor, row) for row in cursor.fetchall()]
+
+
 def normalize_provider(value: Any) -> str:
     """Return the stable provider identity used by capacities and diagnostics.
 
@@ -601,7 +634,6 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded") ->
     if state and state[0] == fingerprint:
         return {"resolved": 0, "skipped": 0, "unchanged": 1}
     cursor = conn.execute("SELECT * FROM events WHERE start_utc IS NOT NULL")
-    columns = [column[0] for column in (cursor.description or ())]
     rows = cursor.fetchall()
     # One bounded budget covers this incremental sync.  Cache hits are free,
     # while a large provider catalog cannot cause an unbounded model walk.
@@ -614,10 +646,10 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded") ->
                "budget_exhausted": 0}
     started = time.monotonic()
     for row in rows:
-        # sqlite3.Row supports dict(row); the production lane builder uses the
-        # default tuple row factory.  Zip cursor metadata in that case so a
-        # normal event-id string can never be interpreted as a dict sequence.
-        data = dict(row) if isinstance(row, sqlite3.Row) else dict(zip(columns, row))
+        # The production lane builder uses the default tuple row factory.
+        # Normalize through the SELECT cursor rather than ever calling
+        # dict(tuple), which would interpret event-id text as mapping pairs.
+        data = row_to_dict(cursor, row)
         raw = _json(data.get("raw_attributes_json"))
         if not isinstance(raw, Mapping):
             raw = {}
@@ -678,19 +710,20 @@ def save_rule(conn: sqlite3.Connection, *, target_type: str, target_id: str, pol
 
 def applicable_rule(conn: sqlite3.Connection, canonical_event_id: str) -> dict[str, Any]:
     """Return the most-specific rule; event-type-specific beats generic."""
-    event = conn.execute("SELECT * FROM canonical_events WHERE id=?", (canonical_event_id,)).fetchone()
+    event_cursor = conn.execute("SELECT * FROM canonical_events WHERE id=?", (canonical_event_id,))
+    event = row_to_dict(event_cursor, event_cursor.fetchone())
     if not event: return {"policy": "NORMAL", "priority": 0, "reason": "no_canonical_event"}
-    event = dict(event)
     team_ids = [r[0] for r in conn.execute("SELECT team_id FROM canonical_event_participants WHERE event_id=? AND team_id IS NOT NULL", (canonical_event_id,))]
     candidates = [("event", canonical_event_id, 5), *[("team", t, 4) for t in team_ids],
                   ("league", event.get("league_id") or "", 3), ("competition", event.get("recurring_event_id") or "", 2),
                   ("sport", event.get("sport_id") or "", 1)]
     for target_type, target_id, specificity in candidates:
         if not target_id: continue
-        row = conn.execute("SELECT * FROM sports_rules WHERE enabled=1 AND target_type=? AND target_id=? AND (event_type='' OR event_type=?) ORDER BY CASE WHEN event_type='' THEN 0 ELSE 1 END DESC, id DESC LIMIT 1", (target_type, target_id, event.get("event_type") or "")).fetchone()
+        rule_cursor = conn.execute("SELECT * FROM sports_rules WHERE enabled=1 AND target_type=? AND target_id=? AND (event_type='' OR event_type=?) ORDER BY CASE WHEN event_type='' THEN 0 ELSE 1 END DESC, id DESC LIMIT 1", (target_type, target_id, event.get("event_type") or ""))
+        row = row_to_dict(rule_cursor, rule_cursor.fetchone())
         if row:
-            item = dict(row); item.update({"priority": {"IGNORE": -10000, "NORMAL": 0, "PRIORITIZE": 1000, "ALWAYS_SCHEDULE": 10000}[item["policy"]], "specificity": specificity})
-            return item
+            row.update({"priority": {"IGNORE": -10000, "NORMAL": 0, "PRIORITIZE": 1000, "ALWAYS_SCHEDULE": 10000}[row["policy"]], "specificity": specificity})
+            return row
     return {"policy": "NORMAL", "priority": 0, "reason": "default"}
 
 
@@ -698,32 +731,29 @@ def coverage(conn: sqlite3.Connection, *, days: int = 14) -> list[dict[str, Any]
     """Starts with wanted canonical events, then reports source/lane coverage."""
     # Coverage is used by GET endpoints.  Its tables are materialized by the
     # refresh/migration path, so this function must remain strictly read-only.
-    rows = conn.execute("SELECT ce.* FROM canonical_events ce WHERE datetime(ce.start_utc) BETWEEN datetime('now','-1 day') AND datetime('now', ?)", (f"+{max(1, min(days, 90))} days",)).fetchall()
+    events = query_dicts(conn, "SELECT ce.* FROM canonical_events ce WHERE datetime(ce.start_utc) BETWEEN datetime('now','-1 day') AND datetime('now', ?)", (f"+{max(1, min(days, 90))} days",))
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    if not rows:
+    if not events:
         return []
 
     # This endpoint backs both the dashboard and discovery recommendations.
     # Fetch all dependent state in bounded batches instead of issuing several
     # queries per canonical event; refreshes with hundreds of events should
     # still leave an inexpensive, snapshot-only UI read.
-    events = [dict(row) for row in rows]
     event_ids = [event["id"] for event in events]
     marks = ",".join("?" for _ in event_ids)
     participants_by_event: dict[str, list[dict[str, Any]]] = {event_id: [] for event_id in event_ids}
-    for row in conn.execute(
+    for item in query_dicts(conn,
         f"SELECT event_id,team_id,display_name,role FROM canonical_event_participants WHERE event_id IN ({marks})",
         event_ids,
     ):
-        item = dict(row)
         participants_by_event[item["event_id"]].append(item)
 
     # Rules are normally a tiny materialized set.  Fetching active rules once
     # also preserves the existing precedence: event, team, league,
     # competition, sport; event-type-specific rules beat generic ones.
     rules_by_target: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for row in conn.execute("SELECT * FROM sports_rules WHERE enabled=1"):
-        item = dict(row)
+    for item in query_dicts(conn, "SELECT * FROM sports_rules WHERE enabled=1"):
         rules_by_target.setdefault((item["target_type"], str(item["target_id"])), []).append(item)
 
     def batched_rule(event: dict[str, Any]) -> dict[str, Any]:
@@ -748,11 +778,10 @@ def coverage(conn: sqlite3.Connection, *, days: int = 14) -> list[dict[str, Any]
         return {"policy": "NORMAL", "priority": 0, "reason": "default"}
 
     source_by_event: dict[str, list[dict[str, Any]]] = {event_id: [] for event_id in event_ids}
-    for row in conn.execute(
+    for item in query_dicts(conn,
         f"SELECT source,source_event_id,confidence,canonical_event_id FROM source_event_records WHERE canonical_event_id IN ({marks})",
         event_ids,
     ):
-        item = dict(row)
         source_by_event[item["canonical_event_id"]].append(item)
 
     source_ids = sorted({str(source["source_event_id"])
@@ -780,12 +809,11 @@ def coverage(conn: sqlite3.Connection, *, days: int = 14) -> list[dict[str, Any]
                 lane_by_event.setdefault(event_id, row[0])
 
     decisions_by_event: dict[str, dict[str, Any]] = {}
-    for row in conn.execute(
+    for item in query_dicts(conn,
         f"SELECT canonical_event_id,decision,reason_json,generation_utc FROM scheduling_decisions "
         f"WHERE canonical_event_id IN ({marks}) ORDER BY generation_utc DESC",
         event_ids,
     ):
-        item = dict(row)
         decisions_by_event.setdefault(item["canonical_event_id"], item)
 
     result = []

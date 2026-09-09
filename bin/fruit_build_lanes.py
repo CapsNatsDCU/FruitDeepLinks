@@ -394,7 +394,7 @@ def build_lanes_with_placeholders(
     playable_cache: Dict[str, List[Dict[str, Any]]] = {}
     if xtream_only:
         for ev in events:
-            row = conn.execute(
+            playable_cursor = conn.execute(
                 """
                 SELECT playable_id, provider, logical_service, deeplink_play,
                        deeplink_open, playable_url
@@ -406,8 +406,17 @@ def build_lanes_with_placeholders(
                 LIMIT 1
                 """,
                 (ev.event_id,),
-            ).fetchone()
-            playable_cache[ev.event_id] = [dict(row)] if row else []
+            )
+            row = playable_cursor.fetchone()
+            # This command deliberately retains SQLite's default tuple rows
+            # for its positional event query above.  Normalize this mapping
+            # consumer from the cursor description so Xtream-only scheduling
+            # has the same row contract as the canonical rules pipeline.
+            if row:
+                from sports_metadata import row_to_dict
+                playable_cache[ev.event_id] = [row_to_dict(playable_cursor, row)]
+            else:
+                playable_cache[ev.event_id] = []
         events = [ev for ev in events if playable_cache.get(ev.event_id)]
     elif FILTERING_AVAILABLE:
         for ev in events:

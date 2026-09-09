@@ -242,8 +242,11 @@ class XtreamParsingTest(unittest.TestCase):
             "epg_channel_id": "nhl.555",
             "container_extension": "m3u8",
         }
-        first = normalize_stream(stream, "10", "NHL PPV", config())
-        second = normalize_stream(stream, "10", "NHL PPV", config())
+        # Keep the fixture inside the parser's live-event window.  This is a
+        # stable normalization test, not a wall-clock acceptance test.
+        now = datetime(2026, 8, 31, 12, tzinfo=timezone.utc)
+        first = normalize_stream(stream, "10", "NHL PPV", config(), now=now)
+        second = normalize_stream(stream, "10", "NHL PPV", config(), now=now)
         self.assertEqual(first["event"]["id"], second["event"]["id"])
         self.assertEqual(first["event"]["id"], stable_event_id("10", 555))
         self.assertEqual(first["playable"]["provider"], "xtream")
