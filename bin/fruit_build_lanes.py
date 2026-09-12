@@ -236,12 +236,37 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int, *, canonical_a
         sports_priority = 0
         sports_rule = "NORMAL"
         if applicable_rule:
-            mapping = conn.execute(
-                "SELECT canonical_event_id FROM source_event_records WHERE source_event_id=? ORDER BY confidence DESC LIMIT 1",
+            mappings = conn.execute(
+                "SELECT ser.canonical_event_id,ce.metadata_json,ce.sport_id,ce.league_id,"
+                "(SELECT COUNT(*) FROM canonical_event_participants cep WHERE cep.event_id=ce.id) AS participant_count FROM source_event_records ser "
+                "JOIN canonical_events ce ON ce.id=ser.canonical_event_id "
+                "WHERE ser.source_event_id=? ORDER BY ser.confidence DESC,ser.last_seen_utc DESC",
                 (event_id,),
-            ).fetchone()
-            if mapping:
+            ).fetchall()
+            if mappings:
+                mapping = None
+                canonical_metadata = {}
+                for candidate in mappings:
+                    try:
+                        candidate_metadata = json.loads(candidate[1] or "{}")
+                    except (TypeError, ValueError):
+                        candidate_metadata = {}
+                    # Compatibility boundary: legacy sources with no detected
+                    # sport, league, or participant identity retain their
+                    # historic lane behavior.  Once metadata identifies a
+                    # sports interpretation, only a validated event passes.
+                    no_interpretation = not candidate[2] and not candidate[3] and not candidate[4]
+                    if candidate_metadata.get("scheduling_eligible", False) or no_interpretation:
+                        mapping, canonical_metadata = candidate, candidate_metadata
+                        break
+                if mapping is None:
+                    filtered_count += 1
+                    continue
                 canonical_event_id = mapping[0]
+                # Raw providers and local AI may associate a sport/team with a
+                # source, but lanes only receive a deterministic accepted
+                # canonical event.  This is intentionally before rules: an
+                # ALWAYS_SCHEDULE rule cannot authorize unsafe interpretation.
                 rule = applicable_rule(conn, canonical_event_id)
                 sports_priority = int(rule.get("priority", 0))
                 sports_rule = rule.get("policy", "NORMAL")

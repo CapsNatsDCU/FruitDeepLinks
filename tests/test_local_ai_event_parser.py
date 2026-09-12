@@ -50,7 +50,7 @@ class LocalAIEventParserTests(unittest.TestCase):
             ],
         ))
         event = self.conn.execute("SELECT s.name sport,l.name league FROM canonical_events ce LEFT JOIN sports s ON s.id=ce.sport_id LEFT JOIN leagues l ON l.id=ce.league_id WHERE ce.id=?", (capitals["canonical_event_id"],)).fetchone()
-        self.assertEqual(("Hockey", "NHL"), (event["sport"], event["league"]))
+        self.assertEqual(("ice_hockey", "NHL"), (event["sport"], event["league"]))
 
         nationals = self.resolve("nats", "MLB: Washington Nationals vs. San Diego Padres", interpretation(
             sport="Baseball", league="MLB", participants=[
@@ -110,7 +110,7 @@ class LocalAIEventParserTests(unittest.TestCase):
         self.assertEqual(ids[0], matched["canonical_event_id"])
 
     def test_failures_are_nonfatal_and_low_confidence_is_rejected(self):
-        malformed = self.resolve("malformed", "Bad title", "not json")
+        malformed = self.resolve("malformed", "Bad Game", "not json")
         self.assertTrue(malformed["resolved"])
         self.assertEqual("invalid_schema", malformed["local_ai"]["status"])
 
@@ -153,7 +153,7 @@ class LocalAIEventParserTests(unittest.TestCase):
         }, ai_config=CONFIG, ai_requester=lambda *_args: calls.append(True) or interpretation(sport="Baseball", league="MLB"))
         event = self.conn.execute("SELECT s.name sport,l.name league FROM canonical_events ce LEFT JOIN sports s ON s.id=ce.sport_id LEFT JOIN leagues l ON l.id=ce.league_id WHERE ce.id=?", (structured["canonical_event_id"],)).fetchone()
         self.assertEqual([], calls)
-        self.assertEqual(("Hockey", "NHL"), (event["sport"], event["league"]))
+        self.assertEqual(("ice_hockey", "NHL"), (event["sport"], event["league"]))
 
         disabled = LocalAIConfig()
         deterministic = resolve_source_event(self.conn, source="xtream", source_event_id="disabled", data={"title": "Washington Capitals at New York Rangers", "start_utc": UTC_START}, ai_config=disabled,

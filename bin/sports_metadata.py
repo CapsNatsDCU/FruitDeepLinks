@@ -140,6 +140,200 @@ def _json(value: Any) -> Any:
     return value or {}
 
 
+# Canonical vocabulary belongs outside the local-AI prompt: providers and
+# models are both inconsistent here, while the scheduler needs stable values.
+_SPORT_ALIASES = {
+    "hockey": "ice_hockey", "ice hockey": "ice_hockey", "ice_hockey": "ice_hockey",
+    "football": "american_football", "american football": "american_football",
+    "baseball": "baseball", "basketball": "basketball", "soccer": "soccer", "tennis": "tennis",
+    "golf": "golf", "motorsport": "motorsport", "motorsports": "motorsport", "racing": "motorsport",
+    "boxing": "boxing", "wrestling": "wrestling", "volleyball": "volleyball", "field hockey": "field_hockey",
+    "lacrosse": "lacrosse", "cricket": "cricket", "rugby": "rugby", "swimming": "swimming",
+    "water polo": "water_polo", "track and field": "track_and_field", "athletics": "track_and_field",
+    "surfing": "surfing",
+}
+_LEAGUE_ALIASES = {
+    "nfl": ("NFL", "american_football"), "nhl": ("NHL", "ice_hockey"),
+    "mlb": ("MLB", "baseball"), "nba": ("NBA", "basketball"), "wnba": ("WNBA", "basketball"),
+    "mls": ("MLS", "soccer"), "formula 1": ("Formula 1", "motorsport"), "f1": ("Formula 1", "motorsport"),
+    "nascar": ("NASCAR", "motorsport"), "indycar": ("IndyCar", "motorsport"), "imsa": ("IMSA", "motorsport"),
+    "ncaa football": ("NCAA Football", "american_football"), "ncaaf": ("NCAA Football", "american_football"),
+    "ncaa men s basketball": ("NCAA Men's Basketball", "basketball"),
+    "ncaa women s basketball": ("NCAA Women's Basketball", "basketball"),
+}
+_PROGRAM_TYPES = frozenset({"live_game", "live_race", "practice", "qualifying", "pregame", "postgame",
+                            "replay", "highlights", "sports_talk", "studio_show", "documentary",
+                            "sports_other", "non_sports", "no_event", "unknown"})
+_NON_EVENT_MARKERS = ("no event", "no events", "form ula", "#####", "separator")
+
+
+def normalize_sport(value: Any, *, league: Any = None) -> str | None:
+    """Return a stable scheduler vocabulary; unknown provider labels remain readable."""
+    raw = _norm(value)
+    league_hint = _LEAGUE_ALIASES.get(_norm(league))
+    if raw == "football" and league_hint and league_hint[1] == "american_football":
+        return "american_football"
+    return _SPORT_ALIASES.get(raw, raw.replace(" ", "_") if raw else (league_hint[1] if league_hint else None))
+
+
+def normalize_league(value: Any, *, sport: Any = None) -> tuple[str | None, str | None]:
+    """Return canonical league and inferred sport without promoting conferences to leagues."""
+    raw = _norm(value)
+    if raw in _LEAGUE_ALIASES:
+        return _LEAGUE_ALIASES[raw]
+    # ACC/SEC/Big Ten are useful context but not a league identity.
+    if raw in {"acc", "sec", "big ten", "big 10", "big twelve", "big 12", "pac 12"}:
+        return ("NCAA Football" if normalize_sport(sport) == "american_football" else None, normalize_sport(sport))
+    return (" ".join(str(value or "").split()) or None, normalize_sport(sport))
+
+
+def _metadata_text(data: Mapping[str, Any], raw: Mapping[str, Any]) -> tuple[str, str, str]:
+    title = str(data.get("title") or raw.get("epg_title") or raw.get("title") or raw.get("original_stream_name") or "")
+    description = str(data.get("description") or raw.get("description") or raw.get("epg_description") or "")
+    category = str(raw.get("category_name") or raw.get("category") or data.get("category") or "")
+    return title, description, category
+
+
+def _context_from_text(text: str) -> tuple[str | None, str | None]:
+    normalized = _norm(text)
+    for alias, (league, sport) in _LEAGUE_ALIASES.items():
+        if re.search(r"(?:^| )" + re.escape(alias) + r"(?: |$)", normalized):
+            return sport, league
+    for alias, sport in _SPORT_ALIASES.items():
+        if alias and re.search(r"(?:^| )" + re.escape(alias) + r"(?: |$)", normalized):
+            return sport, None
+    return None, None
+
+
+def _canonical_builtin_participant(name: Any, *, league: str | None) -> str:
+    """Resolve only conservative, league-scoped aliases shipped with Fruit.
+
+    Short aliases are intentionally not global: WSH means different things in
+    different leagues, and ODU alone supplies no sport identity.
+    """
+    normalized = _norm(name)
+    aliases = {
+        "NHL": {"wsh": "Washington Capitals", "washington capitals": "Washington Capitals", "phi": "Philadelphia Flyers", "philadelphia flyers": "Philadelphia Flyers"},
+        "MLB": {"wsh": "Washington Nationals", "washington nationals": "Washington Nationals", "phi": "Philadelphia Phillies", "philadelphia phillies": "Philadelphia Phillies", "angels": "Los Angeles Angels", "los angeles angels": "Los Angeles Angels"},
+        "NFL": {"commanders": "Washington Commanders", "washington commanders": "Washington Commanders", "eagles": "Philadelphia Eagles", "philadelphia eagles": "Philadelphia Eagles"},
+        "MLS": {"dc": "D.C. United", "d c": "D.C. United", "dc united": "D.C. United", "d c united": "D.C. United", "atlanta": "Atlanta United FC", "atlanta united": "Atlanta United FC", "atlanta united fc": "Atlanta United FC"},
+    }
+    if league in aliases and normalized in aliases[league]:
+        return aliases[league][normalized]
+    # Full Old Dominion wording is safe across its sports; ODU is only safe
+    # once an NCAA/sport context was established by provider metadata.
+    if normalized in {"old dominion", "old dominion monarchs", "monarchs"}:
+        return "Old Dominion Monarchs"
+    if normalized == "odu" and league and league.startswith("NCAA"):
+        return "Old Dominion Monarchs"
+    return " ".join(str(name or "").split())
+
+
+def _associated_provider_team(title: str, *, league: str | None) -> list[dict[str, Any]]:
+    """Keep a known team association on a permanent feed without inventing a game."""
+    text = _norm(title)
+    candidates = {
+        "NHL": ("Washington Capitals", "Philadelphia Flyers"),
+        "MLB": ("Washington Nationals", "Philadelphia Phillies", "Los Angeles Angels"),
+        "NFL": ("Washington Commanders", "Philadelphia Eagles"),
+        "MLS": ("D.C. United", "Atlanta United FC"),
+    }.get(league, ())
+    if league and league.startswith("NCAA") and "old dominion" in text:
+        candidates = ("Old Dominion Monarchs",)
+    found = [name for name in candidates if _norm(name) in text]
+    return [{"name": name, "role": "participant"} for name in found[:1]]
+
+
+def is_sports_discovery_candidate(*, title: str, description: str = "", category: str = "") -> bool:
+    """Cheap global prefilter for optional AI work, independent of category.
+
+    Categories are tiered hints only: provider event pools are useful, but a
+    mislabeled stream can still qualify through its own name.  This function
+    is deliberately local and cheap enough to run before cache/model access.
+    """
+    text = _norm(" ".join((title, description)))
+    category_text = _norm(category)
+    if re.search(r"\b(?:vs|v|at|@|x)\b", text):
+        return True
+    if re.search(r"\b(?:race|qualifying|practice|game|match|grand prix|next|live|sports)\b", text):
+        return True
+    if any(token in text for token in ("nationals", "capitals", "commanders", "eagles", "old dominion", "odu", "formula 1", "indycar")):
+        return True
+    return bool(re.search(r"\b(?:ppv|espn|peacock|flo(?:sports|college|racing)?|b r max|apple tv|ncaaf)\b", category_text))
+
+
+def _infer_program_type(title: str, description: str, claimed: Any, *, sport: str | None) -> tuple[str, str]:
+    text = _norm(" ".join((title, description)))
+    if any(marker in text for marker in _NON_EVENT_MARKERS) or title.count("#") >= 4 or not text:
+        return "no_event", "deterministic_rule"
+    if re.search(r"\b(pre ?game)\b", text): return "pregame", "deterministic_rule"
+    if re.search(r"\b(post ?game|press conference)\b", text): return "postgame", "deterministic_rule"
+    if "qualifying" in text: return "qualifying", "deterministic_rule"
+    if re.search(r"\bpractice\b", text): return "practice", "deterministic_rule"
+    if re.search(r"\b(highlights?|replay)\b", text): return ("highlights" if "highlight" in text else "replay"), "deterministic_rule"
+    if re.search(r"\b(live|studio|network)\b", text) and not re.search(r"\b(at|vs|v|x|@)\b", text):
+        return "sports_talk", "deterministic_rule"
+    claimed = _norm(claimed).replace(" ", "_")
+    if sport == "motorsport" and re.search(r"\b(race|sprint|grand prix|r\d+)\b", text): return "live_race", "deterministic_rule"
+    if claimed in _PROGRAM_TYPES: return claimed, "ai" if claimed else "deterministic_rule"
+    if claimed in {"game", "event", "match"}: return "live_game", "ai"
+    if claimed == "race": return "live_race", "ai"
+    return "unknown", "deterministic_rule"
+
+
+def _team_feed(title: str, category: str, participants: list[dict[str, Any]]) -> bool:
+    if re.search(r"\bteam (?:ppv|feed)\b", _norm(category)):
+        return True
+    # A single named team stream (RAW is just a transport label) is a feed,
+    # never evidence of a fixture.
+    return len(participants) == 1 and not _title_participants(title)
+
+
+def validate_interpretation(*, title: str, description: str, category: str, sport: str | None,
+                            league: str | None, participants: list[dict[str, Any]], claimed_type: Any,
+                            explicit_event: bool = False) -> dict[str, Any]:
+    """Deterministically gate untrusted interpretations before scheduling.
+
+    Associations survive rejection for discovery/favorites, but only accepted
+    live events get ``scheduling_eligible``.  AI confidence is deliberately
+    absent from this decision.
+    """
+    program_type, type_source = _infer_program_type(title, description, claimed_type, sport=sport)
+    if (program_type == "no_event" and _norm(claimed_type) in {"event", "game", "match"}
+            and len({_norm(item.get("name")) for item in participants if _norm(item.get("name"))}) >= 2):
+        # Structured providers can supply competitors before an EPG title.
+        # Those two-sided records are valid evidence, unlike an empty feed.
+        program_type, type_source = "live_game", "deterministic_rule"
+    feed = _team_feed(title, category, participants)
+    if feed:
+        return {"program_type": "no_event", "scheduling_eligible": False, "validation": "downgraded",
+                "validation_reason": "single-team permanent feed", "program_type_source": "validation_override"}
+    if program_type in {"no_event", "unknown", "non_sports", "sports_other", "sports_talk", "studio_show", "pregame", "postgame", "replay", "highlights", "documentary", "practice", "qualifying"}:
+        return {"program_type": program_type, "scheduling_eligible": False, "validation": "rejected",
+                "validation_reason": "non-live program type", "program_type_source": type_source}
+    if program_type == "live_race":
+        accepted = bool(sport == "motorsport" and (league or explicit_event or re.search(r"\b(race|sprint|grand prix|r\d+)\b", _norm(title))))
+        return {"program_type": program_type if accepted else "unknown", "scheduling_eligible": accepted,
+                "validation": "accepted" if accepted else "rejected", "validation_reason": "validated motorsport race" if accepted else "insufficient motorsport evidence",
+                "program_type_source": type_source}
+    names = {_norm(item.get("name")) for item in participants if _norm(item.get("name"))}
+    roles = {str(item.get("role") or "participant") for item in participants}
+    enough_context = bool(league or (sport and explicit_event))
+    accepted = len(names) >= 2 and enough_context and ("away" in roles and "home" in roles or explicit_event)
+    return {"program_type": "live_game" if accepted else "unknown", "scheduling_eligible": accepted,
+            "validation": "accepted" if accepted else "rejected",
+            "validation_reason": "validated two-team %s matchup" % (league or sport) if accepted else "ambiguous participants without league context",
+            "program_type_source": type_source}
+
+
+def canonical_display_name(participants: list[dict[str, Any]], fallback: Any) -> str | None:
+    away = next((p["name"] for p in participants if p.get("role") == "away"), None)
+    home = next((p["name"] for p in participants if p.get("role") == "home"), None)
+    if away and home: return f"{away} at {home}"
+    names = [p["name"] for p in participants if p.get("name")]
+    return " vs ".join(names) if len(names) == 2 else (" ".join(str(fallback or "").split()) or None)
+
+
 def _source_input_fingerprint(data: Mapping[str, Any], raw: Mapping[str, Any]) -> str:
     """Fingerprint resolution-relevant source data to avoid stale mappings.
 
@@ -331,7 +525,7 @@ def _title_participants(title: Any) -> list[dict[str, Any]]:
     # A provider prefix/date may precede the actual fixture; use the final
     # pipe segment to avoid treating a category label as a team.
     text = text.rsplit("|", 1)[-1].strip()
-    match = re.search(r"(?P<away>.+?)\s+(?:at|vs\.?|v\.?|x)\s+(?P<home>.+)$", text, re.IGNORECASE)
+    match = re.search(r"(?P<away>.+?)\s+(?:at|vs\.?|v\.?|x|@)\s+(?P<home>.+)$", text, re.IGNORECASE)
     if not match:
         return []
     away, home = (" ".join(match.group(key).split(" - ")[-1].split()) for key in ("away", "home"))
@@ -449,20 +643,50 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     prior_evidence = _json(prior[2]) if prior else {}
     prior_is_current = bool(prior and (not recheck_inferred_mapping or prior[1] == "manual_override" or not prior_evidence.get("source_input_fingerprint")
                                        or prior_evidence.get("source_input_fingerprint") == source_fingerprint))
-    sport = data.get("sport") or data.get("sport_name") or raw.get("sport_name")
-    league = data.get("league") or data.get("league_name") or raw.get("league_name")
+    title_text, description_text, category_text = _metadata_text(data, raw)
+    # Explicit EPG fields win.  When absent, title/description evidence outranks
+    # a category because real providers miscategorize sports inventory.
+    sport = data.get("sport") or data.get("sport_name") or raw.get("sport_name") or raw.get("sport")
+    league = data.get("league") or data.get("league_name") or raw.get("league_name") or raw.get("league")
+    title_sport, title_league = _context_from_text(f"{title_text} {description_text}")
+    category_sport, category_league = _context_from_text(category_text)
+    sport = sport or title_sport or category_sport
+    league = league or title_league or category_league
+    league, league_sport = normalize_league(league, sport=sport)
+    sport = normalize_sport(sport, league=league) or league_sport
     structured_participants = _participants(data) or _participants(raw)
     # A title match is useful deterministic input, but is not authoritative
     # provider metadata.  A valid local-AI interpretation may clarify a
     # provider-prefixed title before the normal resolver sees it.
-    participants = structured_participants or _title_participants(data.get("title") or raw.get("title") or raw.get("original_stream_name"))
+    participants = structured_participants or _title_participants(title_text)
+    if not participants:
+        participants = _associated_provider_team(title_text, league=league)
+    prior_event_type = None
+    prior_validated_identity = False
+    ai_sport_hint, ai_league_hint = sport, league
+    # A legacy lane row is often deliberately sparse after its richer
+    # provider observation has already materialized a validated event.  Do
+    # not let that lossy mirror erase trusted canonical identity on the next
+    # incremental sync; a changed rich source fingerprint still re-resolves.
+    if prior_is_current and not (sport or league):
+        prior_identity = conn.execute(
+            "SELECT ce.event_type,s.name,l.name FROM canonical_events ce "
+            "LEFT JOIN sports s ON s.id=ce.sport_id LEFT JOIN leagues l ON l.id=ce.league_id WHERE ce.id=?",
+            (prior[0],),
+        ).fetchone()
+        if prior_identity:
+            prior_event_type, sport, league = prior_identity[0], prior_identity[1], prior_identity[2]
+            participants = [{"name": row[0], "role": row[1]} for row in conn.execute(
+                "SELECT display_name,role FROM canonical_event_participants WHERE event_id=?", (prior[0],)
+            ).fetchall()]
+            prior_validated_identity = True
     start_value = data.get("start_utc") or data.get("start_ms") or data.get("start_time") or raw.get("start_utc")
     start = utc_instant(start_value, source_timezone=data.get("source_timezone"))
     if not start:
         return {"resolved": False, "reason": "invalid_or_naive_start_timestamp"}
     start_text = utc_text(start)
     end_text = utc_text(data.get("end_utc") or data.get("end_ms") or data.get("end_time"), source_timezone=data.get("source_timezone"))
-    event_type = data.get("event_type") or raw.get("event_type") or raw.get("eventType") or "event"
+    event_type = data.get("program_type") or data.get("event_type") or raw.get("program_type") or raw.get("event_type") or raw.get("eventType") or prior_event_type or "event"
     competition = data.get("competition") or raw.get("competition")
     ai_result = {"status": "not_needed", "interpretation": None}
     if ai_mode not in {"disabled", "bounded", "unlimited"}:
@@ -482,9 +706,8 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     # Never let an AI reinterpret complete structured metadata or an explicit
     # manual mapping.  It is only an optional parser for incomplete/weak text.
     strong_structured_identity = bool(sport and league and len(structured_participants) >= 2)
-    title_text = data.get("title") or raw.get("title") or raw.get("original_stream_name")
-    sports_words = ("nfl", "nhl", "mlb", "mls", "nba", "ncaa", "football", "hockey", "baseball", "soccer", "basketball", "formula 1", "grand prix")
-    potential_sports_record = source == "xtream" or bool(sport or league or participants) or any(word in _norm(title_text) for word in sports_words)
+    potential_sports_record = bool(sport or league or participants) or is_sports_discovery_candidate(
+        title=title_text, description=description_text, category=category_text)
     # Deterministic First makes its normal catalog match before asking AI.
     # AI First only changes ordering for weak records; source/manual mappings
     # and authoritative provider metadata always retain their precedence.
@@ -504,9 +727,9 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
                 "provider": source,
                 "source_event_id": str(source_event_id),
                 "title": title_text,
-                "category": raw.get("category_name") or raw.get("category"),
-                "sport_hint": sport,
-                "league_hint": league,
+                "category": category_text,
+                "sport_hint": ai_sport_hint,
+                "league_hint": ai_league_hint,
                 "start_time": start_text,
                 "canonical_candidates": _canonical_candidate_hints(conn, start=start),
                 "config": active_ai_config,
@@ -520,9 +743,15 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
                 # Explicit structured fields always win.  Title-derived names
                 # are weak parsing and may be replaced by a validated parser
                 # candidate, which still must pass _event_candidates below.
-                sport = sport or interpretation.get("sport")
-                league = league or interpretation.get("league")
-                event_type = data.get("event_type") or raw.get("event_type") or raw.get("eventType") or interpretation.get("event_type") or event_type
+                ai_sport = interpretation.get("sport")
+                ai_league = interpretation.get("league")
+                # AI may fill gaps, but it never overrides explicit provider
+                # title/description/category context and is normalized below.
+                sport = sport or normalize_sport(ai_sport, league=ai_league)
+                ai_league, ai_league_sport = normalize_league(ai_league, sport=ai_sport)
+                league = league or ai_league
+                sport = sport or ai_league_sport
+                event_type = data.get("program_type") or data.get("event_type") or raw.get("program_type") or raw.get("event_type") or raw.get("eventType") or interpretation.get("program_type") or interpretation.get("event_type") or event_type
                 competition = competition or interpretation.get("competition")
                 if not structured_participants and interpretation.get("participants"):
                     participants = interpretation["participants"]
@@ -531,10 +760,23 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
             # not delay or remove a legacy event.  Do not log raw provider text.
             LOG.warning("Optional local AI event parser failed (%s); using deterministic metadata", type(exc).__name__)
             ai_result = {"status": "parser_error", "interpretation": None, "error": type(exc).__name__}
+    league, league_sport = normalize_league(league, sport=sport)
+    sport = normalize_sport(sport, league=league) or league_sport
     sport_id = _upsert_named(conn, "sports", str(sport)) if sport else None
     league_id = _upsert_named(conn, "leagues", str(league), sport_id=sport_id) if league else None
     from sports_catalog import canonicalize_participants
+    participants = [{**participant, "name": _canonical_builtin_participant(participant.get("name"), league=league)}
+                    for participant in participants if _canonical_builtin_participant(participant.get("name"), league=league)]
     participants = canonicalize_participants(conn, participants, sport_id=sport_id, league_id=league_id)
+    # Structured provider competitors are explicit event evidence.  A title
+    # must still have a two-sided fixture plus league/sport context; a single
+    # associated team is useful catalog data but never schedule authority.
+    validation = validate_interpretation(
+        title=title_text, description=description_text, category=category_text,
+        sport=sport, league=league, participants=participants, claimed_type=event_type,
+        explicit_event=bool(len(structured_participants) >= 2 or prior_validated_identity),
+    )
+    event_type = validation["program_type"]
     # Racing fixtures need not have home/away participants.  A local recurring
     # event match gives their common title/venue forms stable catalog identity
     # without turning the catalog into a date-specific schedule.
@@ -574,7 +816,13 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
             canonical_id = known[0] if known else _key("ce", fingerprint)
             confidence = 1.0 if known else .9
     metadata = {"title": data.get("title"), "source": source, "raw_start": start_value,
-                "canonical_start_utc": start_text, "time_contract": "absolute_utc"}
+                "canonical_start_utc": start_text, "time_contract": "absolute_utc",
+                "provenance": {"sport_source": "provider_metadata" if data.get("sport") or data.get("sport_name") or raw.get("sport_name") else ("epg_title" if title_sport else ("category" if category_sport else "ai")),
+                               "league_source": "provider_metadata" if data.get("league") or data.get("league_name") or raw.get("league_name") else ("epg_title" if title_league else ("category" if category_league else "ai")),
+                               "participant_source": "provider_metadata" if structured_participants else ("stream_name" if _title_participants(title_text) else "ai"),
+                               "program_type_source": validation["program_type_source"]},
+                "validation": validation["validation"], "validation_reason": validation["validation_reason"],
+                "scheduling_eligible": validation["scheduling_eligible"]}
     if recurring_event:
         metadata["recurring_event"] = recurring_event
     if ai_result.get("status") not in {"not_needed", "disabled"}:
@@ -583,18 +831,20 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     fingerprint = event_fingerprint(sport=sport, league=league, participants=participants, event_type=str(event_type), start_utc=start_text)
     conn.execute("INSERT INTO canonical_events(id,fingerprint,sport_id,league_id,season,competition,stage,round,recurring_event_id,event_type,start_utc,end_utc,venue,status,title,metadata_json,created_utc,updated_utc) "
                  "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET end_utc=COALESCE(excluded.end_utc,canonical_events.end_utc), status=excluded.status,title=COALESCE(excluded.title,canonical_events.title),recurring_event_id=COALESCE(excluded.recurring_event_id,canonical_events.recurring_event_id),metadata_json=excluded.metadata_json,updated_utc=excluded.updated_utc",
-                 (canonical_id, fingerprint, sport_id, league_id, data.get("season") or raw.get("season"), competition, data.get("stage") or raw.get("stage"), data.get("round") or raw.get("round"), recurring_event["id"] if recurring_event else None, str(event_type), start_text, end_text, data.get("venue") or raw.get("venue"), data.get("status") or raw.get("status") or "discovered", data.get("title"), json.dumps(metadata), utc_now(), utc_now()))
+                 (canonical_id, fingerprint, sport_id, league_id, data.get("season") or raw.get("season"), competition, data.get("stage") or raw.get("stage"), data.get("round") or raw.get("round"), recurring_event["id"] if recurring_event else None, str(event_type), start_text, end_text, data.get("venue") or raw.get("venue"), data.get("status") or raw.get("status") or "discovered", canonical_display_name(participants, data.get("title")) if validation["scheduling_eligible"] else data.get("title"), json.dumps(metadata), utc_now(), utc_now()))
     conn.execute("DELETE FROM canonical_event_participants WHERE event_id=?", (canonical_id,))
     for participant, team_id in team_rows:
         conn.execute("INSERT INTO canonical_event_participants(event_id,team_id,display_name,role,source_identifier) VALUES(?,?,?,?,?)",
                      (canonical_id, team_id, participant["name"], participant["role"], str(participant.get("source_id") or "") or None))
-    evidence = {**evidence, "source_input_fingerprint": source_fingerprint}
+    evidence = {**evidence, "source_input_fingerprint": source_fingerprint, "validation": validation["validation"],
+                "validation_reason": validation["validation_reason"], "scheduling_eligible": validation["scheduling_eligible"]}
     conn.execute("INSERT INTO source_event_records(source,source_event_id,canonical_event_id,confidence,resolution_kind,evidence_json,raw_json,last_seen_utc) VALUES(?,?,?,?,?,?,?,?) "
                  "ON CONFLICT(source,source_event_id) DO UPDATE SET canonical_event_id=excluded.canonical_event_id,confidence=excluded.confidence,resolution_kind=excluded.resolution_kind,evidence_json=excluded.evidence_json,raw_json=excluded.raw_json,last_seen_utc=excluded.last_seen_utc",
                  (source, str(source_event_id), canonical_id, confidence, kind, json.dumps(evidence), json.dumps(raw), utc_now()))
     if commit:
         conn.commit()
     return {"resolved": True, "canonical_event_id": canonical_id, "confidence": confidence, "resolution_kind": kind, "start_utc": start_text,
+            "scheduling_eligible": validation["scheduling_eligible"], "validation_reason": validation["validation_reason"],
             "local_ai": {"status": ai_result.get("status"), "used": bool(ai_result.get("interpretation")),
                          "failure_kind": ai_result.get("failure_kind")}}
 
