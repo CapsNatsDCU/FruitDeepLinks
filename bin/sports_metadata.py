@@ -291,7 +291,10 @@ def _team_feed(title: str, category: str, participants: list[dict[str, Any]]) ->
 
 def validate_interpretation(*, title: str, description: str, category: str, sport: str | None,
                             league: str | None, participants: list[dict[str, Any]], claimed_type: Any,
-                            explicit_event: bool = False) -> dict[str, Any]:
+                            explicit_event: bool = False, independent_context: bool = True,
+                            independent_participant_count: int | None = None,
+                            independent_sport: bool | None = None,
+                            independent_league: bool | None = None) -> dict[str, Any]:
     """Deterministically gate untrusted interpretations before scheduling.
 
     Associations survive rejection for discovery/favorites, but only accepted
@@ -312,14 +315,21 @@ def validate_interpretation(*, title: str, description: str, category: str, spor
         return {"program_type": program_type, "scheduling_eligible": False, "validation": "rejected",
                 "validation_reason": "non-live program type", "program_type_source": type_source}
     if program_type == "live_race":
-        accepted = bool(sport == "motorsport" and (league or explicit_event or re.search(r"\b(race|sprint|grand prix|r\d+)\b", _norm(title))))
+        accepted = bool(independent_context and sport == "motorsport" and
+                        (league or explicit_event or re.search(r"\b(race|sprint|grand prix|r\d+)\b", _norm(title))))
         return {"program_type": program_type if accepted else "unknown", "scheduling_eligible": accepted,
                 "validation": "accepted" if accepted else "rejected", "validation_reason": "validated motorsport race" if accepted else "insufficient motorsport evidence",
                 "program_type_source": type_source}
     names = {_norm(item.get("name")) for item in participants if _norm(item.get("name"))}
     roles = {str(item.get("role") or "participant") for item in participants}
-    enough_context = bool(league or (sport and explicit_event))
-    accepted = len(names) >= 2 and enough_context and ("away" in roles and "home" in roles or explicit_event)
+    # An AI-discovered league cannot turn a source-supplied sport plus two
+    # vague names into a game.  When callers omit provenance flags, retain the
+    # legacy behavior for direct validator users.
+    enough_context = (bool(league or (sport and explicit_event)) if independent_sport is None
+                      else bool(independent_league or (independent_sport and explicit_event)))
+    independent_count = len(names) if independent_participant_count is None else independent_participant_count
+    accepted = (independent_context and independent_count >= 2 and len(names) >= 2 and enough_context
+                and ("away" in roles and "home" in roles or explicit_event))
     return {"program_type": "live_game" if accepted else "unknown", "scheduling_eligible": accepted,
             "validation": "accepted" if accepted else "rejected",
             "validation_reason": "validated two-team %s matchup" % (league or sport) if accepted else "ambiguous participants without league context",
@@ -529,6 +539,10 @@ def _title_participants(title: Any) -> list[dict[str, Any]]:
     if not match:
         return []
     away, home = (" ".join(match.group(key).split(" - ")[-1].split()) for key in ("away", "home"))
+    # IPTV titles commonly put the league immediately before a fixture.  It is
+    # event context, not part of the away team ("MLB: Nationals" / "MLS DC").
+    away = re.sub(r"^(?:NFL|NHL|MLB|MLS|NBA|WNBA|NCAAF|NCAA(?: FOOTBALL)?|F1|FORMULA 1)\s*[:|-]?\s*",
+                  "", away, flags=re.IGNORECASE)
     if not away or not home or _norm(away) == _norm(home):
         return []
     return [{"name": away, "role": "away"}, {"name": home, "role": "home"}]
@@ -663,6 +677,8 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
         participants = _associated_provider_team(title_text, league=league)
     prior_event_type = None
     prior_validated_identity = False
+    prior_independent_sport = False
+    prior_independent_league = False
     ai_sport_hint, ai_league_hint = sport, league
     # A legacy lane row is often deliberately sparse after its richer
     # provider observation has already materialized a validated event.  Do
@@ -670,12 +686,16 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     # incremental sync; a changed rich source fingerprint still re-resolves.
     if prior_is_current and not (sport or league):
         prior_identity = conn.execute(
-            "SELECT ce.event_type,s.name,l.name FROM canonical_events ce "
+            "SELECT ce.event_type,s.name,l.name,ce.metadata_json FROM canonical_events ce "
             "LEFT JOIN sports s ON s.id=ce.sport_id LEFT JOIN leagues l ON l.id=ce.league_id WHERE ce.id=?",
             (prior[0],),
         ).fetchone()
         if prior_identity:
             prior_event_type, sport, league = prior_identity[0], prior_identity[1], prior_identity[2]
+            prior_metadata = _json(prior_identity[3])
+            prior_provenance = prior_metadata.get("provenance", {}) if isinstance(prior_metadata, Mapping) else {}
+            prior_independent_sport = bool(prior_provenance.get("independent_sport"))
+            prior_independent_league = bool(prior_provenance.get("independent_league"))
             participants = [{"name": row[0], "role": row[1]} for row in conn.execute(
                 "SELECT display_name,role FROM canonical_event_participants WHERE event_id=?", (prior[0],)
             ).fetchall()]
@@ -688,6 +708,32 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     end_text = utc_text(data.get("end_utc") or data.get("end_ms") or data.get("end_time"), source_timezone=data.get("source_timezone"))
     event_type = data.get("program_type") or data.get("event_type") or raw.get("program_type") or raw.get("event_type") or raw.get("eventType") or prior_event_type or "event"
     competition = data.get("competition") or raw.get("competition")
+    # Capture provider/title/category evidence before an optional AI response
+    # is merged.  AI may clarify this record, but it cannot supply the same
+    # sport, league, or participant evidence that later authorizes it.
+    independent_participants = [dict(participant) for participant in participants]
+    independent_sport = bool(data.get("sport") or data.get("sport_name") or raw.get("sport") or raw.get("sport_name")
+                             or title_sport or category_sport or prior_independent_sport)
+    independent_league = bool(data.get("league") or data.get("league_name") or raw.get("league") or raw.get("league_name")
+                              or title_league or category_league or prior_independent_league)
+    independent_context = independent_sport or independent_league
+    deterministic_validation = validate_interpretation(
+        title=title_text, description=description_text, category=category_text,
+        sport=sport, league=league, participants=independent_participants, claimed_type=event_type,
+        explicit_event=bool(len(structured_participants) >= 2 or prior_validated_identity),
+        independent_context=independent_context,
+        independent_participant_count=len({_norm(item.get("name")) for item in independent_participants if _norm(item.get("name"))}),
+        independent_sport=independent_sport,
+        independent_league=independent_league,
+    )
+    # A deterministic accept is authoritative.  So are explicit non-live
+    # markers such as pregame/no-event: AI may add useful associations but may
+    # not downgrade, relabel, or schedule them.
+    deterministic_authoritative = bool(
+        deterministic_validation["scheduling_eligible"] or
+        (deterministic_validation["program_type"] != "unknown" and
+         deterministic_validation["program_type_source"] != "ai")
+    )
     ai_result = {"status": "not_needed", "interpretation": None}
     if ai_mode not in {"disabled", "bounded", "unlimited"}:
         raise ValueError("ai_mode must be disabled, bounded, or unlimited")
@@ -716,6 +762,7 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
         pre_match = _existing_canonical_match(conn, sport=sport, league=league, participants=participants,
                                                event_type=event_type, start_text=start_text)
     should_ask_ai = (potential_sports_record and not strong_structured_identity
+                     and not (strategy == "deterministic_first" and deterministic_authoritative)
                      and not (prior and prior[1] == "manual_override")
                      and (strategy == "ai_first" or not pre_match[0]))
     if should_ask_ai:
@@ -771,11 +818,15 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     # Structured provider competitors are explicit event evidence.  A title
     # must still have a two-sided fixture plus league/sport context; a single
     # associated team is useful catalog data but never schedule authority.
-    validation = validate_interpretation(
+    validation = (deterministic_validation if deterministic_authoritative else validate_interpretation(
         title=title_text, description=description_text, category=category_text,
         sport=sport, league=league, participants=participants, claimed_type=event_type,
         explicit_event=bool(len(structured_participants) >= 2 or prior_validated_identity),
-    )
+        independent_context=independent_context,
+        independent_participant_count=len({_norm(item.get("name")) for item in independent_participants if _norm(item.get("name"))}),
+        independent_sport=independent_sport,
+        independent_league=independent_league,
+    ))
     event_type = validation["program_type"]
     # Racing fixtures need not have home/away participants.  A local recurring
     # event match gives their common title/venue forms stable catalog identity
@@ -820,7 +871,11 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
                 "provenance": {"sport_source": "provider_metadata" if data.get("sport") or data.get("sport_name") or raw.get("sport_name") else ("epg_title" if title_sport else ("category" if category_sport else "ai")),
                                "league_source": "provider_metadata" if data.get("league") or data.get("league_name") or raw.get("league_name") else ("epg_title" if title_league else ("category" if category_league else "ai")),
                                "participant_source": "provider_metadata" if structured_participants else ("stream_name" if _title_participants(title_text) else "ai"),
-                               "program_type_source": validation["program_type_source"]},
+                               "program_type_source": validation["program_type_source"],
+                               "independent_context": independent_context,
+                               "independent_sport": independent_sport,
+                               "independent_league": independent_league,
+                               "independent_participant_count": len({_norm(item.get("name")) for item in independent_participants if _norm(item.get("name"))})},
                 "validation": validation["validation"], "validation_reason": validation["validation_reason"],
                 "scheduling_eligible": validation["scheduling_eligible"]}
     if recurring_event:
