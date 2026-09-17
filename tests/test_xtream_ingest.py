@@ -228,6 +228,39 @@ class XtreamParsingTest(unittest.TestCase):
         self.assertEqual(client.calls, ["10", "20"])
         self.assertEqual(set(streams), {"10", "20"})
 
+    def test_missing_configured_category_does_not_block_available_categories(self):
+        calls = []
+
+        class Client:
+            def get_live_categories(self):
+                return [{"category_id": "10", "category_name": "MLB PPV"}]
+
+            def get_live_streams(self, category_id):
+                calls.append(category_id)
+                return [{"stream_id": 1, "name": "MLB event"}]
+
+        diagnostics = {}
+
+        _, streams = fetch_snapshot(
+            Client(),
+            config(category_ids=("10", "retired")),
+            diagnostics,
+        )
+
+        self.assertEqual(calls, ["10"])
+        self.assertEqual(set(streams), {"10"})
+        self.assertEqual(diagnostics["missing_category_ids"], ["retired"])
+        self.assertEqual(diagnostics["failed_category_ids"], [])
+        self.assertEqual(diagnostics["fetched_category_ids"], ["10"])
+
+    def test_all_configured_categories_missing_is_an_error(self):
+        class Client:
+            def get_live_categories(self):
+                return [{"category_id": "other", "category_name": "Other"}]
+
+        with self.assertRaisesRegex(XtreamError, "None of the configured"):
+            fetch_snapshot(Client(), config(category_ids=("retired",)))
+
     def test_category_ids_support_comma_and_json_but_never_empty_full_import(self):
         self.assertEqual(parse_category_ids("10, 20,10"), ("10", "20"))
         self.assertEqual(parse_category_ids('["30", 40]'), ("30", "40"))
@@ -483,6 +516,40 @@ class XtreamStaleHandlingTest(unittest.TestCase):
         self.assertIsNotNone(
             self.conn.execute("SELECT 1 FROM events WHERE id='other-event'").fetchone()
         )
+
+    def test_partial_snapshot_preserves_unfetched_category_rows(self):
+        cfg = config(category_ids=("10", "20"), timezone_name="UTC")
+        categories = [
+            {"category_id": "10", "category_name": "MLB PPV"},
+            {"category_id": "20", "category_name": "Retired category"},
+        ]
+        ingest_payload(
+            self.conn,
+            categories,
+            {"10": [self.stream(1)], "20": [self.stream(2)]},
+            cfg,
+            now=datetime(2026, 8, 29, tzinfo=timezone.utc),
+        )
+
+        result = ingest_payload(
+            self.conn,
+            categories,
+            {"10": [self.stream(3)]},
+            cfg,
+            now=datetime(2026, 8, 29, tzinfo=timezone.utc),
+            reconciled_category_ids=("10",),
+        )
+
+        self.assertEqual(result["stale_removed"], 1)
+        self.assertIsNone(self.conn.execute(
+            "SELECT 1 FROM events WHERE id=?", (stable_event_id("10", 1),)
+        ).fetchone())
+        self.assertIsNotNone(self.conn.execute(
+            "SELECT 1 FROM events WHERE id=?", (stable_event_id("20", 2),)
+        ).fetchone())
+        self.assertIsNotNone(self.conn.execute(
+            "SELECT 1 FROM events WHERE id=?", (stable_event_id("10", 3),)
+        ).fetchone())
 
     def test_observed_but_unparseable_stream_expires_prior_normalized_row(self):
         ingest_payload(

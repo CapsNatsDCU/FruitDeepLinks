@@ -981,10 +981,16 @@ def _upsert(conn: sqlite3.Connection, table: str, columns: tuple[str, ...],
 
 def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
                    streams_by_category: Mapping[str, list[dict]], config: XtreamConfig,
-                   now: Optional[datetime] = None) -> dict[str, Any]:
+                   now: Optional[datetime] = None,
+                   reconciled_category_ids: Optional[Iterable[str]] = None) -> dict[str, Any]:
     """Normalize and atomically upsert a fully-fetched Xtream snapshot."""
     ensure_schema(conn)
     selected = set(config.category_ids)
+    partial_reconcile = reconciled_category_ids is not None
+    reconciled = (
+        {str(category_id) for category_id in reconciled_category_ids}
+        if partial_reconcile else selected
+    )
     category_names = {
         str(item.get("category_id")): str(item.get("category_name") or "Xtream")
         for item in categories
@@ -997,6 +1003,8 @@ def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
     try:
         conn.execute("BEGIN")
         for category_id in config.category_ids:
+            if category_id not in reconciled:
+                continue
             for stream in streams_by_category.get(category_id, []):
                 stream_id = stream.get("stream_id")
                 if stream_id is not None:
@@ -1021,10 +1029,32 @@ def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
                 imported += 1
 
         prior = conn.execute(
-            "SELECT event_id, playable_id FROM playables WHERE provider = ?", (PROVIDER,)
+            "SELECT p.event_id, p.playable_id, p.stream_metadata_json, e.raw_attributes_json "
+            "FROM playables p LEFT JOIN events e ON e.id=p.event_id WHERE p.provider = ?",
+            (PROVIDER,),
         ).fetchall()
-        stale_rows = [(event_id, playable_id) for event_id, playable_id in prior
-                      if playable_id not in normalized_playable_ids]
+
+        def category_in_scope(playable_metadata, event_metadata) -> bool:
+            if not partial_reconcile:
+                return True
+            for value in (playable_metadata, event_metadata):
+                try:
+                    metadata = json.loads(value or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if isinstance(metadata, Mapping) and str(metadata.get("category_id") or "") in reconciled:
+                    return True
+            # Unknown legacy provenance must survive a partial provider
+            # snapshot; deleting it would pretend an unfetched category was
+            # authoritatively empty.
+            return False
+
+        stale_rows = [
+            (event_id, playable_id)
+            for event_id, playable_id, playable_metadata, event_metadata in prior
+            if playable_id not in normalized_playable_ids
+            and category_in_scope(playable_metadata, event_metadata)
+        ]
         for event_id, playable_id in stale_rows:
             conn.execute(
                 "DELETE FROM playables WHERE event_id = ? AND playable_id = ? AND provider = ?",
@@ -1164,15 +1194,34 @@ def _enrich_streams_with_epg(client: XtreamClient,
             break
 
 
-def fetch_snapshot(client: XtreamClient, config: XtreamConfig) -> tuple[list[dict], dict[str, list[dict]]]:
+def fetch_snapshot(client: XtreamClient, config: XtreamConfig,
+                   diagnostics: Optional[dict[str, Any]] = None) -> tuple[list[dict], dict[str, list[dict]]]:
     categories = client.get_live_categories()
     available = {str(item.get("category_id")) for item in categories}
-    unknown = [category_id for category_id in config.category_ids if category_id not in available]
-    if unknown:
-        raise XtreamError(f"Configured Xtream category IDs were not returned by the provider: {', '.join(unknown)}")
-    streams = {category_id: client.get_live_streams(category_id)
-               for category_id in config.category_ids}
+    missing = [category_id for category_id in config.category_ids if category_id not in available]
+    available_selected = [category_id for category_id in config.category_ids if category_id in available]
+    if not available_selected:
+        raise XtreamError("None of the configured Xtream category IDs are currently available")
+
+    streams: dict[str, list[dict]] = {}
+    failed: list[str] = []
+    for category_id in available_selected:
+        try:
+            streams[category_id] = client.get_live_streams(category_id)
+        except XtreamError:
+            # One transient or retired category must not suppress every other
+            # configured category. Its prior rows remain untouched because the
+            # ingest transaction receives only the successfully fetched IDs.
+            failed.append(category_id)
+    if not streams:
+        raise XtreamError("Could not fetch any currently available configured Xtream categories")
     _enrich_streams_with_epg(client, streams)
+    if diagnostics is not None:
+        diagnostics.update({
+            "missing_category_ids": missing,
+            "failed_category_ids": failed,
+            "fetched_category_ids": list(streams),
+        })
     return categories, streams
 
 
@@ -1184,8 +1233,18 @@ def run(db_path: Path, environ: Optional[Mapping[str, str]] = None,
         config = load_config(conn, environ)
         config.validate()
         client = client_factory(config)
-        categories, streams = fetch_snapshot(client, config)
-        result = ingest_payload(conn, categories, streams, config)
+        snapshot_diagnostics: dict[str, Any] = {}
+        categories, streams = fetch_snapshot(client, config, snapshot_diagnostics)
+        fetched_category_ids = snapshot_diagnostics.get("fetched_category_ids", [])
+        reconcile_scope = (
+            None if set(fetched_category_ids) == set(config.category_ids)
+            else fetched_category_ids
+        )
+        result = ingest_payload(
+            conn, categories, streams, config,
+            reconciled_category_ids=reconcile_scope,
+        )
+        result.update(snapshot_diagnostics)
         maximum = client.get_account_max_connections()
         if maximum:
             # Do not overwrite an operator-managed capacity.  Only the numeric
@@ -1211,6 +1270,16 @@ def main(argv=None) -> int:
         # XtreamError messages are deliberately credential-free.
         print(f"Xtream ingest failed: {exc}")
         return 1
+    if result.get("missing_category_ids"):
+        print(
+            "Xtream ingest warning: configured categories not returned; "
+            "prior rows preserved: " + ", ".join(result["missing_category_ids"])
+        )
+    if result.get("failed_category_ids"):
+        print(
+            "Xtream ingest warning: category requests failed; "
+            "prior rows preserved: " + ", ".join(result["failed_category_ids"])
+        )
     for item in result.get("persistent_reconciliations", []):
         print(
             "Xtream persistent channel reconciled: "
