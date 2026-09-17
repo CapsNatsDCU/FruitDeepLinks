@@ -113,6 +113,52 @@ class XtreamLanePipelineTest(unittest.TestCase):
             "http://provider.example:8080/live/demo%20user/secret%2Fpass/500.ts",
         )
 
+    def test_placeholder_provider_name_with_epg_reaches_real_lane(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        self.addCleanup(conn.close)
+        cfg = XtreamConfig(
+            enabled=True,
+            server_url="http://provider.example:8080",
+            username="demo user",
+            password="secret/pass",
+            category_ids=("10",),
+            timezone_name="UTC",
+            default_duration_minutes=180,
+            event_window_days=2,
+        )
+        start = self.now.replace(minute=0, second=0, microsecond=0)
+        stream = {
+            "stream_id": "501",
+            "name": "- NO EVENT STREAMING - | NFL PPV 01",
+            "xtream_epg": {
+                "title": "NFL | Commanders @ Ravens",
+                "description": "NFL live coverage",
+                "start_timestamp": str(int(start.timestamp())),
+                "stop_timestamp": str(int((start.replace(microsecond=0).timestamp()) + 10800)),
+            },
+            "container_extension": "ts",
+        }
+
+        result = ingest_payload(
+            conn,
+            [{"category_id": "10", "category_name": "NFL PPV"}],
+            {"10": [stream]},
+            cfg,
+            now=self.now,
+        )
+        ensure_lane_schema(conn)
+        create_lanes(conn, 1)
+        events = load_future_events(conn, 2)
+        build_lanes_with_placeholders(conn, events, 1)
+
+        self.assertEqual(result["imported"], 1)
+        lane = conn.execute(
+            "SELECT title, chosen_provider FROM lane_events WHERE is_placeholder=0"
+        ).fetchone()
+        self.assertEqual(lane["title"], "NFL | Commanders @ Ravens")
+        self.assertEqual(lane["chosen_provider"], "xtream")
+
     def test_m3u_uses_lane_tuning_endpoint_without_credentials(self):
         path = Path(self.tmp.name) / "lanes.m3u"
         build_lanes_m3u(self.conn, str(path), "http://fruit.local:6655")

@@ -746,7 +746,7 @@ def normalize_stream(stream: Mapping[str, Any], category_id: str,
     stream_id = stream.get("stream_id")
     original_name = str(stream.get("name") or "").strip()
     epg = stream.get("xtream_epg") or {}
-    epg_title = _epg_text(epg, _EPG_TITLE_KEYS) if isinstance(epg, Mapping) else ""
+    epg_title = _usable_epg_title(stream)
     source_name = epg_title or original_name
     if stream_id is None or not source_name:
         return None
@@ -1001,14 +1001,18 @@ def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
                 stream_id = stream.get("stream_id")
                 if stream_id is not None:
                     observed_playable_ids.add(stable_playable_id(category_id, stream_id))
-                if is_placeholder_stream_name(stream.get("name")):
-                    skipped_placeholder += 1
-                    continue
+                placeholder_without_epg = (
+                    is_placeholder_stream_name(stream.get("name"))
+                    and not _usable_epg_title(stream)
+                )
                 normalized = normalize_stream(
                     stream, category_id, category_names.get(category_id, "Xtream"), config, now
                 )
                 if normalized is None:
-                    skipped += 1
+                    if placeholder_without_epg:
+                        skipped_placeholder += 1
+                    else:
+                        skipped += 1
                     continue
                 _upsert(conn, "events", _EVENT_COLUMNS, normalized["event"], "id")
                 _upsert(conn, "playables", _PLAYABLE_COLUMNS, normalized["playable"],
@@ -1083,6 +1087,15 @@ def _epg_text(listing: Mapping[str, Any], keys: Iterable[str]) -> str:
         elif value is not None and str(value).strip():
             return str(value).strip()
     return ""
+
+
+def _usable_epg_title(stream: Mapping[str, Any]) -> str:
+    """Return a real EPG programme title, never a provider placeholder."""
+    epg = stream.get("xtream_epg") or {}
+    if not isinstance(epg, Mapping):
+        return ""
+    title = _epg_text(epg, _EPG_TITLE_KEYS)
+    return "" if is_placeholder_stream_name(title) else title
 
 
 def _epg_has_matchup(title: str) -> bool:

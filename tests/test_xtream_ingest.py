@@ -422,6 +422,35 @@ class XtreamStaleHandlingTest(unittest.TestCase):
             "container_extension": "ts",
         }
 
+    def test_placeholder_stream_with_real_epg_is_imported(self):
+        start = int(datetime(2026, 8, 30, 18, tzinfo=timezone.utc).timestamp())
+        result = ingest_payload(
+            self.conn,
+            self.categories,
+            {"10": [{
+                "stream_id": 9,
+                "name": "- NO EVENT STREAMING - | NHL PPV 09",
+                "xtream_epg": {
+                    "title": "NHL | Capitals @ Lightning",
+                    "description": "NHL live coverage",
+                    "start_timestamp": str(start),
+                    "stop_timestamp": str(start + 7200),
+                },
+                "container_extension": "ts",
+            }]},
+            self.cfg,
+            now=datetime(2026, 8, 29, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["imported"], 1)
+        self.assertEqual(result["skipped_placeholder"], 0)
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT title FROM events WHERE id=?", (stable_event_id("10", 9),)
+            ).fetchone()[0],
+            "NHL | Capitals @ Lightning",
+        )
+
     def test_stale_cleanup_is_xtream_scoped(self):
         ingest_payload(
             self.conn, self.categories, {"10": [self.stream(1), self.stream(2)]}, self.cfg,

@@ -64,6 +64,20 @@ class SportsInterpretationSafetyTests(unittest.TestCase):
         self.assertEqual({("Washington Nationals", "away"), ("Philadelphia Phillies", "home")}, self.members(mlb))
         self.assertEqual(("baseball", "MLB"), tuple(self.event_row(mlb)[key] for key in ("sport", "league")))
 
+    def test_at_symbol_matchup_is_not_misclassified_by_live_description(self):
+        result = self.resolve(
+            "epg-live",
+            "NFL | Commanders @ Ravens",
+            raw_attributes_json=json.dumps({
+                "provider": "xtream",
+                "category_name": "US| NFL PPV",
+                "epg_description": "NFL live coverage",
+            }),
+        )
+
+        self.assertTrue(result["scheduling_eligible"])
+        self.assertEqual("live_game", self.event_row(result)["event_type"])
+
     def test_normalized_display_names_and_non_game_programming(self):
         commanders = self.resolve("nfl", "Commanders at Eagles", "US| NFL PPV")
         mls = self.resolve("mls", "D.C. vs Atlanta", "US| MLS PPV")

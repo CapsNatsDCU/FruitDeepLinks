@@ -263,7 +263,9 @@ def is_sports_discovery_candidate(*, title: str, description: str = "", category
 
 
 def _infer_program_type(title: str, description: str, claimed: Any, *, sport: str | None) -> tuple[str, str]:
-    text = _norm(" ".join((title, description)))
+    raw_text = " ".join((title, description))
+    text = _norm(raw_text)
+    has_matchup = bool(re.search(r"(?:@|\b(?:at|vs\.?|v\.?|x)\b)", raw_text, re.IGNORECASE))
     if any(marker in text for marker in _NON_EVENT_MARKERS) or title.count("#") >= 4 or not text:
         return "no_event", "deterministic_rule"
     if re.search(r"\b(pre ?game)\b", text): return "pregame", "deterministic_rule"
@@ -271,7 +273,7 @@ def _infer_program_type(title: str, description: str, claimed: Any, *, sport: st
     if "qualifying" in text: return "qualifying", "deterministic_rule"
     if re.search(r"\bpractice\b", text): return "practice", "deterministic_rule"
     if re.search(r"\b(highlights?|replay)\b", text): return ("highlights" if "highlight" in text else "replay"), "deterministic_rule"
-    if re.search(r"\b(live|studio|network)\b", text) and not re.search(r"\b(at|vs|v|x|@)\b", text):
+    if re.search(r"\b(live|studio|network)\b", text) and not has_matchup:
         return "sports_talk", "deterministic_rule"
     claimed = _norm(claimed).replace(" ", "_")
     if sport == "motorsport" and re.search(r"\b(race|sprint|grand prix|r\d+)\b", text): return "live_race", "deterministic_rule"
