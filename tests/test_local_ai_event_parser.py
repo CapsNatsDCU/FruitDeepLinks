@@ -173,6 +173,12 @@ class LocalAIEventParserTests(unittest.TestCase):
         self.assertNotIn("password", metadata)
         self.assertNotIn("url", metadata)
 
+    def test_prompt_requires_clean_team_names(self):
+        request = _request_payload("local", {"title": "#1 Capitals vs #23 Rangers 2026-10-11"})
+        system = request["messages"][0]["content"]
+        self.assertIn("never include a leading ranking/seed such as #1 or #23", system)
+        self.assertIn("never append a date or date-like suffix after the team name", system)
+
     def test_explicit_cache_validation_and_budget_are_bounded(self):
         calls = []
         def requester(_config, _metadata):
