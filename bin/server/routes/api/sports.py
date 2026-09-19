@@ -1,6 +1,7 @@
 """Metadata-first Sports Rules, coverage, resolver, and health APIs."""
 import os
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, jsonify, request
@@ -9,6 +10,12 @@ from db.connection import db_exists, get_conn
 from sports_metadata import (applicable_rule, coverage, ensure_schema, resolve_source_event,
                              save_rule, normalize_provider)
 from local_ai_event_parser import clear_cache as clear_local_ai_cache
+from sports_catalog import apply_catalog_records
+from catalog_workbench import (add_alias, apply_all as apply_all_catalog_proposals,
+                               apply_proposal as apply_catalog_proposal, entity_state,
+                               cancel_run, merge_entities, run_ai_review, set_archived,
+                               set_entity_fields, undo_merge, edit_proposal, merge_details,
+                               detach_merge_relationship, save_source_mapping)
 
 try:
     from db.preferences import get_setting
@@ -38,10 +45,168 @@ def catalog():
         teams = [dict(r) for r in conn.execute("SELECT * FROM teams ORDER BY name")]
         aliases = [dict(r) for r in conn.execute("SELECT entity_type,fruit_id,alias,source,confidence,operator_confirmed,last_verified_utc FROM catalog_aliases ORDER BY entity_type,alias")]
         provenance = [dict(r) for r in conn.execute("SELECT entity_type,fruit_id,source,external_id,source_url,details_json,operator_confirmed,last_verified_utc FROM catalog_entity_provenance ORDER BY entity_type,source,external_id")]
+        source_mappings = [dict(r) for r in conn.execute("SELECT source,entity_type,source_id,canonical_id,confidence,manual,evidence_json,last_seen_utc FROM source_entity_mappings ORDER BY entity_type,source,source_id")]
         racing_events = [dict(r) for r in conn.execute("SELECT * FROM catalog_recurring_events ORDER BY name")]
+        for entity_type, entities in (("sport", sports), ("league", leagues), ("team", teams), ("racing_event", racing_events)):
+            for entity in entities: entity["state"] = entity_state(conn, entity_type, entity["id"])
+        proposals = [dict(r) for r in conn.execute("SELECT id,run_id,entity_type,action,target_id,payload_json,evidence_json,confidence,status,result_json,created_utc,decided_utc FROM catalog_change_proposals ORDER BY id DESC LIMIT 250")]
+        runs = [dict(r) for r in conn.execute("SELECT * FROM catalog_change_runs ORDER BY id DESC LIMIT 25")]
+        merges = [dict(r) for r in conn.execute("SELECT id,entity_type,survivor_id,source_id,status,created_utc,undone_utc FROM catalog_merge_groups ORDER BY id DESC LIMIT 250")]
     return jsonify({"ok": True, "sports": sports, "leagues": leagues, "teams": teams,
-                    "racing_events": racing_events, "aliases": aliases, "provenance": provenance,
+                    "racing_events": racing_events, "aliases": aliases, "provenance": provenance, "source_mappings": source_mappings,
+                    "proposals": proposals, "runs": runs, "merges": merges,
                     "materialization": "refresh_pipeline"})
+
+
+@bp.route("/api/sports/catalog/entities", methods=["POST"])
+def catalog_create_entity():
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    body = request.get_json(silent=True) or {}
+    record = {"entity_type": body.get("entity_type"), "name": body.get("name"), "sport": body.get("sport"),
+              "league": body.get("league"), "aliases": body.get("aliases") or [], "source": "manual", "operator_confirmed": True}
+    with get_conn() as conn:
+        _prepare_write(conn)
+        result = apply_catalog_records(conn, [record], dry_run=False)
+    if result["invalid"] or result["conflicts"]: return jsonify({"ok": False, "error": "catalog record rejected", "result": result}), 400
+    return jsonify({"ok": True, "result": result}), 201
+
+
+@bp.route("/api/sports/catalog/entities/<entity_type>/<fruit_id>", methods=["PATCH", "DELETE"])
+def catalog_entity(entity_type, fruit_id):
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    with get_conn() as conn:
+        _prepare_write(conn)
+        try:
+            if request.method == "DELETE": set_archived(conn, entity_type=entity_type, fruit_id=fruit_id, archived=True)
+            else: set_entity_fields(conn, entity_type=entity_type, fruit_id=fruit_id, fields=request.get_json(silent=True) or {})
+            conn.commit()
+        except ValueError as exc: return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/sports/catalog/entities/<entity_type>/<fruit_id>/restore", methods=["POST"])
+def catalog_restore(entity_type, fruit_id):
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    with get_conn() as conn:
+        _prepare_write(conn)
+        try: set_archived(conn, entity_type=entity_type, fruit_id=fruit_id, archived=False); conn.commit()
+        except ValueError as exc: return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/sports/catalog/entities/<entity_type>/<fruit_id>/aliases", methods=["POST"])
+def catalog_alias(entity_type, fruit_id):
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    with get_conn() as conn:
+        _prepare_write(conn)
+        try: add_alias(conn, entity_type=entity_type, fruit_id=fruit_id, alias=(request.get_json(silent=True) or {}).get("alias")); conn.commit()
+        except ValueError as exc: return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/sports/catalog/source-mappings", methods=["PUT"])
+def catalog_source_mapping():
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    body = request.get_json(silent=True) or {}
+    with get_conn() as conn:
+        _prepare_write(conn)
+        try:
+            save_source_mapping(conn, entity_type=str(body.get("entity_type", "")), source=body.get("source"), source_id=body.get("source_id"), canonical_id=body.get("canonical_id"), confidence=body.get("confidence", 1)); conn.commit()
+        except ValueError as exc: return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/sports/catalog/merges", methods=["POST"])
+def catalog_merge():
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    body = request.get_json(silent=True) or {}
+    with get_conn() as conn:
+        _prepare_write(conn)
+        try:
+            merge_id = merge_entities(conn, entity_type=str(body.get("entity_type", "")), survivor_id=str(body.get("survivor_id", "")), source_id=str(body.get("source_id", ""))); conn.commit()
+        except ValueError as exc: return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "merge_id": merge_id}), 201
+
+
+@bp.route("/api/sports/catalog/merges/<int:merge_id>/undo", methods=["POST"])
+def catalog_undo_merge(merge_id):
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    with get_conn() as conn:
+        _prepare_write(conn)
+        try: undo_merge(conn, merge_id); conn.commit()
+        except ValueError as exc: return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/sports/catalog/merges/<int:merge_id>")
+def catalog_merge_details(merge_id):
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    with get_conn() as conn:
+        _prepare_write(conn)
+        try: result = merge_details(conn, merge_id)
+        except ValueError as exc: return jsonify({"ok": False, "error": str(exc)}), 404
+    return jsonify({"ok": True, "merge": result})
+
+
+@bp.route("/api/sports/catalog/merges/<int:merge_id>/detach", methods=["POST"])
+def catalog_detach_merge_relationship(merge_id):
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    body = request.get_json(silent=True) or {}
+    with get_conn() as conn:
+        _prepare_write(conn)
+        try: detached = detach_merge_relationship(conn, merge_id=merge_id, relationship=str(body.get("relationship", "")), rowids=body.get("rowids") or []); conn.commit()
+        except ValueError as exc: return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "detached": detached})
+
+
+@bp.route("/api/sports/catalog/proposals/apply-all", methods=["POST"])
+def catalog_apply_all():
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    with get_conn() as conn:
+        _prepare_write(conn); result = apply_all_catalog_proposals(conn); conn.commit()
+    return jsonify({"ok": True, **result})
+
+
+@bp.route("/api/sports/catalog/proposals/<int:proposal_id>", methods=["POST", "PATCH"])
+def catalog_decide_proposal(proposal_id):
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    reject = bool((request.get_json(silent=True) or {}).get("reject"))
+    with get_conn() as conn:
+        _prepare_write(conn)
+        try:
+            result = (edit_proposal(conn, proposal_id, (request.get_json(silent=True) or {}).get("payload"))
+                      if request.method == "PATCH" else apply_catalog_proposal(conn, proposal_id, reject=reject)); conn.commit()
+        except ValueError as exc: return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "proposal": result})
+
+
+@bp.route("/api/sports/catalog/review", methods=["POST"])
+def catalog_review():
+    """Explicit compatible-AI review.  It queues recommendations only."""
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    def worker():
+        with get_conn() as conn:
+            _prepare_write(conn); run_ai_review(conn, source="manual"); conn.commit()
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({"ok": True, "status": "started"}), 202
+
+
+@bp.route("/api/sports/catalog/runs/<int:run_id>/cancel", methods=["POST"])
+def catalog_cancel_run(run_id):
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    with get_conn() as conn:
+        _prepare_write(conn); cancelled = cancel_run(conn, run_id); conn.commit()
+    return jsonify({"ok": True, "cancelled": cancelled})
+
+
+@bp.route("/api/sports/catalog/runs/<int:run_id>/resume", methods=["POST"])
+def catalog_resume_run(run_id):
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    def worker():
+        with get_conn() as conn:
+            _prepare_write(conn); run_ai_review(conn, source="manual", resume_run_id=run_id); conn.commit()
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({"ok": True, "status": "started"}), 202
 
 
 @bp.route("/api/sports/rules", methods=["GET", "POST", "DELETE"])

@@ -85,6 +85,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_catalog_provenance_fruit
       ON catalog_entity_provenance(entity_type, fruit_id);
     """)
+    # The operator workbench is intentionally additive.  It keeps manual
+    # edits, reviewable AI proposals, and reversible merge history separate
+    # from source provenance, so an importer can never erase an operator's
+    # decision just by observing the same entity again.
+    from catalog_workbench import ensure_schema as ensure_workbench_schema
+    ensure_workbench_schema(conn)
 
 
 def _coerce_aliases(values: Any) -> list[str]:
@@ -288,7 +294,9 @@ def resolve_team_alias(conn: sqlite3.Connection, name: Any, *, sport_id: str | N
     if not normalized:
         return None
     rows = conn.execute("SELECT DISTINCT t.id,t.name FROM catalog_aliases a JOIN teams t ON t.id=a.fruit_id "
+                        "LEFT JOIN catalog_entity_state s ON s.entity_type='team' AND s.fruit_id=t.id "
                         "WHERE a.entity_type='team' AND a.normalized_alias=? AND t.sport_id IS ? AND t.league_id IS ? "
+                        "AND COALESCE(s.archived,0)=0 "
                         "ORDER BY t.id", (normalized, sport_id, league_id)).fetchall()
     if len(rows) != 1:
         return None
@@ -321,6 +329,7 @@ def recurring_event_aliases(conn: sqlite3.Connection, name: Any, *, league_id: s
     """Resolve stable racing event identity locally; this does not create dates."""
     normalized = normalize(name)
     rows = conn.execute("SELECT DISTINCT e.id,e.name FROM catalog_aliases a JOIN catalog_recurring_events e ON e.id=a.fruit_id "
-                        "WHERE a.entity_type='racing_event' AND a.normalized_alias=? AND e.league_id IS ? ORDER BY e.id",
+                        "LEFT JOIN catalog_entity_state s ON s.entity_type='racing_event' AND s.fruit_id=e.id "
+                        "WHERE a.entity_type='racing_event' AND a.normalized_alias=? AND e.league_id IS ? AND COALESCE(s.archived,0)=0 ORDER BY e.id",
                         (normalized, league_id)).fetchall()
     return {"id": str(rows[0][0]), "name": str(rows[0][1])} if len(rows) == 1 else None

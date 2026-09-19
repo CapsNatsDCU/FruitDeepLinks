@@ -342,6 +342,30 @@ class XtreamParsingTest(unittest.TestCase):
         )
         self.assertEqual(parsed, datetime(2026, 8, 28, 22, 0, tzinfo=timezone.utc))
 
+    def test_generic_nfl_slot_uses_parseable_short_epg_title(self):
+        """A provider can name the slot generically while EPG carries the fixture."""
+        now = datetime(2026, 8, 28, 17, 30, tzinfo=ZoneInfo("America/New_York"))
+        normalized = normalize_stream(
+            {
+                "stream_id": "nfl-500",
+                "name": "NFL PPV 05",
+                "xtream_epg": {
+                    "title": "NFL | 05 - 8/28 6pm Commanders at Ravens",
+                    "description": "NFL live coverage",
+                },
+            },
+            "10",
+            "NFL PPV",
+            config(event_window_days=7),
+            now=now,
+        )
+        self.assertIsNotNone(normalized)
+        self.assertEqual(
+            "NFL | 05 - 8/28 6pm Commanders at Ravens",
+            normalized["event"]["title"],
+        )
+        self.assertEqual("2026-08-28T22:00:00Z", normalized["event"]["start_utc"])
+
     def test_supported_yearless_provider_formats(self):
         now = datetime(2026, 8, 29, 12, 0, tzinfo=ZoneInfo("America/New_York"))
         cases = {

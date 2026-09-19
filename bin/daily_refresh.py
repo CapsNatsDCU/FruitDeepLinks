@@ -1134,6 +1134,15 @@ def main(argv=None):
     ]):
         return 1
 
+    # Overnight refreshes deliberately let catalog AI drain its entire review
+    # backlog.  It only queues proposals; applying them is always an explicit
+    # catalog-workbench action.
+    if args.canonical_ai_mode == "unlimited":
+        if not run_step("8d", total_steps, "Queuing AI Sports Catalog recommendations", [
+            "python3", "catalog_ai_review.py", "--db", str(DB_PATH), "--source", "scheduled",
+        ]):
+            return 1
+
 # Step 9: Build virtual lanes (Channels-style direct lanes)
     # num_lanes is a known settings key, so this resolves DB -> FRUIT_LANES env -> default (50).
     lanes = str(_get_db_setting("num_lanes"))

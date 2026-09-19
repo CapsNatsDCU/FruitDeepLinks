@@ -769,12 +769,26 @@ def normalize_stream(stream: Mapping[str, Any], category_id: str,
         timing_stream,
         ("epg_start", "start_timestamp", "start_utc", "start_time", "event_start"),
         config.timezone_name,
-    ) or (motorsport or {}).get("start") or parse_start_from_name(
-        original_name,
-        config.timezone_name,
-        now=now,
-        event_window_days=config.event_window_days,
-    )
+    ) or (motorsport or {}).get("start")
+    if start is None:
+        # A short EPG response often upgrades a generic PPV slot into the
+        # actual matchup but omits separate start_timestamp fields.  Retain
+        # the stream-name parser as the first fallback, then parse that real
+        # EPG title.  This remains bounded by the configured event window;
+        # it does not turn a date-free channel label into a scheduled event.
+        start = parse_start_from_name(
+            original_name,
+            config.timezone_name,
+            now=now,
+            event_window_days=config.event_window_days,
+        )
+        if start is None and epg_title and epg_title != original_name:
+            start = parse_start_from_name(
+                epg_title,
+                config.timezone_name,
+                now=now,
+                event_window_days=config.event_window_days,
+            )
     if start is None or not _is_within_event_window(start, now, config.event_window_days):
         return None
 

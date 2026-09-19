@@ -486,28 +486,44 @@ def _upsert_named(conn: sqlite3.Connection, table: str, name: str, *, sport_id: 
     if not name:
         return None
     normalized = _norm(name)
+    def operator_owns_name(entity_type: str, identifier: str) -> bool:
+        try:
+            row = conn.execute("SELECT operator_fields_json FROM catalog_entity_state WHERE entity_type=? AND fruit_id=?", (entity_type, identifier)).fetchone()
+            return bool(row and "name" in _json(row[0]))
+        except sqlite3.DatabaseError:
+            return False
+
     if table == "sports":
         row = conn.execute("SELECT id FROM sports WHERE normalized_name=?", (normalized,)).fetchone()
+        if not row:
+            row = conn.execute("SELECT s.id FROM catalog_aliases a JOIN sports s ON s.id=a.fruit_id WHERE a.entity_type='sport' AND a.normalized_alias=?", (normalized,)).fetchone()
         identifier = row[0] if row else _key("sport", normalized)
-        conn.execute("INSERT INTO sports(id,name,normalized_name,created_utc,updated_utc) VALUES(?,?,?,?,?) "
-                     "ON CONFLICT(normalized_name) DO UPDATE SET name=excluded.name,updated_utc=excluded.updated_utc",
-                     (identifier, name, normalized, utc_now(), utc_now()))
+        if row:
+            if not operator_owns_name("sport", identifier): conn.execute("UPDATE sports SET name=?,updated_utc=? WHERE id=?", (name, utc_now(), identifier))
+        else:
+            conn.execute("INSERT INTO sports(id,name,normalized_name,created_utc,updated_utc) VALUES(?,?,?,?,?)", (identifier, name, normalized, utc_now(), utc_now()))
     elif table == "leagues":
         row = conn.execute("SELECT id FROM leagues WHERE sport_id IS ? AND normalized_name=?", (sport_id, normalized)).fetchone()
+        if not row:
+            row = conn.execute("SELECT l.id FROM catalog_aliases a JOIN leagues l ON l.id=a.fruit_id WHERE a.entity_type='league' AND a.normalized_alias=? AND l.sport_id IS ?", (normalized, sport_id)).fetchone()
         identifier = row[0] if row else _key("league", sport_id, normalized)
         if row:
-            conn.execute("UPDATE leagues SET name=?,updated_utc=? WHERE id=?", (name, utc_now(), identifier))
+            if not operator_owns_name("league", identifier): conn.execute("UPDATE leagues SET name=?,updated_utc=? WHERE id=?", (name, utc_now(), identifier))
         else:
             conn.execute("INSERT INTO leagues(id,sport_id,name,normalized_name,created_utc,updated_utc) VALUES(?,?,?,?,?,?)",
                          (identifier, sport_id, name, normalized, utc_now(), utc_now()))
     else:
         row = conn.execute("SELECT id FROM teams WHERE league_id IS ? AND normalized_name=?", (league_id, normalized)).fetchone()
+        if not row:
+            row = conn.execute("SELECT t.id FROM catalog_aliases a JOIN teams t ON t.id=a.fruit_id WHERE a.entity_type='team' AND a.normalized_alias=? AND t.league_id IS ?", (normalized, league_id)).fetchone()
         identifier = row[0] if row else _key("team", league_id, normalized)
         prior = conn.execute("SELECT aliases_json FROM teams WHERE id=?", (identifier,)).fetchone()
         merged = sorted({_norm(x): x for x in [*(_json(prior[0]) if prior else []), *aliases] if _norm(x)}.values(), key=str.casefold)
         if row:
-            conn.execute("UPDATE teams SET name=?,aliases_json=?,updated_utc=? WHERE id=?",
-                         (name, json.dumps(merged), utc_now(), identifier))
+            if operator_owns_name("team", identifier):
+                conn.execute("UPDATE teams SET aliases_json=?,updated_utc=? WHERE id=?", (json.dumps(merged), utc_now(), identifier))
+            else:
+                conn.execute("UPDATE teams SET name=?,aliases_json=?,updated_utc=? WHERE id=?", (name, json.dumps(merged), utc_now(), identifier))
         else:
             conn.execute("INSERT INTO teams(id,sport_id,league_id,name,normalized_name,aliases_json,created_utc,updated_utc) VALUES(?,?,?,?,?,?,?,?)",
                          (identifier, sport_id, league_id, name, normalized, json.dumps(merged), utc_now(), utc_now()))

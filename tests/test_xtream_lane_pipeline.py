@@ -123,19 +123,18 @@ class XtreamLanePipelineTest(unittest.TestCase):
             username="demo user",
             password="secret/pass",
             category_ids=("10",),
-            timezone_name="UTC",
+            timezone_name="America/New_York",
             default_duration_minutes=180,
             event_window_days=2,
         )
-        start = self.now.replace(minute=0, second=0, microsecond=0)
         stream = {
             "stream_id": "501",
             "name": "- NO EVENT STREAMING - | NFL PPV 01",
             "xtream_epg": {
-                "title": "NFL | Commanders @ Ravens",
+                # The slot is generic; short EPG supplies the dated NFL
+                # fixture but no standalone start/end timestamp fields.
+                "title": self.provider_name,
                 "description": "NFL live coverage",
-                "start_timestamp": str(int(start.timestamp())),
-                "stop_timestamp": str(int((start.replace(microsecond=0).timestamp()) + 10800)),
             },
             "container_extension": "ts",
         }
@@ -156,7 +155,7 @@ class XtreamLanePipelineTest(unittest.TestCase):
         lane = conn.execute(
             "SELECT title, chosen_provider FROM lane_events WHERE is_placeholder=0"
         ).fetchone()
-        self.assertEqual(lane["title"], "NFL | Commanders @ Ravens")
+        self.assertEqual(lane["title"], self.provider_name)
         self.assertEqual(lane["chosen_provider"], "xtream")
 
     def test_m3u_uses_lane_tuning_endpoint_without_credentials(self):
