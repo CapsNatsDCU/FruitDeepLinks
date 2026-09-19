@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
-from catalog_workbench import (add_alias, add_proposal, apply_all, detach_merge_relationship,
+from catalog_workbench import (_catalog_ai_payload, add_alias, add_proposal, apply_all, detach_merge_relationship,
                                entity_state, merge_details, merge_entities, save_source_mapping,
                                set_entity_fields, undo_merge)
 from catalog_workbench import run_ai_review
@@ -58,12 +58,21 @@ class CatalogWorkbenchTests(unittest.TestCase):
         self.conn.execute("INSERT INTO user_preferences VALUES ('setting:local_ai_event_parsing_base_url','http://local','now')")
         self.conn.execute("INSERT INTO user_preferences VALUES ('setting:local_ai_event_parsing_model','test','now')")
         def requester(_config, _payload):
-            return {"proposals": [{"entity_type": "team", "action": "alias", "target_id": self.first,
-                                   "payload": {"alias": "AI Stars"}, "confidence": .95, "reason": "fixture"}]}
+            return {"proposals": [
+                {"entity_type": "team", "action": "alias", "target_id": self.first,
+                 "payload": {"alias": "AI Stars"}, "confidence": .95, "reason": "fixture"},
+                {"entity_type": "team", "action": "merge", "target_id": self.first,
+                 "payload": {"name": "North Stars Legacy"}, "confidence": .95, "reason": "missing source ID"},
+            ]}
         result = run_ai_review(self.conn, requester=requester)
         self.assertEqual("completed", result["status"])
         self.assertEqual(1, self.conn.execute("SELECT COUNT(*) FROM catalog_change_proposals WHERE status='pending'").fetchone()[0])
         self.assertEqual(0, self.conn.execute("SELECT COUNT(*) FROM catalog_aliases WHERE alias='AI Stars'").fetchone()[0])
+
+    def test_catalog_ai_prompt_requires_both_merge_ids(self):
+        system = _catalog_ai_payload([])["messages"][0]["content"]
+        self.assertIn("survivor_id", system)
+        self.assertIn("source_id", system)
 
     def test_manual_name_lock_survives_legacy_import_spelling(self):
         set_entity_fields(self.conn, entity_type="team", fruit_id=self.first, fields={"name": "Northern Stars"})
