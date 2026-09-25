@@ -33,6 +33,7 @@ except ImportError:
 
 PROVIDER = "xtream"
 LOGICAL_SERVICE = "xtream"
+PROGRESS_PREFIX = "__FDL_PROGRESS__"
 DEFAULT_TIMEOUT_SECONDS = 20
 DEFAULT_DURATION_MINUTES = 180
 _SAFE_EXTENSION_RE = re.compile(r"^[A-Za-z0-9]{1,8}$")
@@ -91,6 +92,14 @@ _SAFE_TIMEZONE_ABBREVIATIONS = {
 
 class XtreamError(RuntimeError):
     """Safe-to-display Xtream failure with no credential-bearing URL."""
+
+
+def emit_progress(event: str, **fields: Any) -> None:
+    """Send credential-free, structured ingest progress to the refresh runner."""
+    print(
+        f"{PROGRESS_PREFIX}{json.dumps({'event': event, **fields}, separators=(',', ':'))}",
+        flush=True,
+    )
 
 
 @dataclass(frozen=True)
@@ -1013,12 +1022,25 @@ def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
     observed_playable_ids: set[str] = set()
     normalized_playable_ids: set[str] = set()
     imported = skipped = skipped_placeholder = 0
+    category_stats = {
+        category_id: {
+            "category_id": category_id,
+            "category_name": category_names.get(category_id, "Xtream"),
+            "streams_fetched": len(streams_by_category.get(category_id, [])),
+            "events_recognized": 0,
+            "skipped_placeholder": 0,
+            "skipped_unparseable": 0,
+        }
+        for category_id in config.category_ids
+        if category_id in reconciled
+    }
 
     try:
         conn.execute("BEGIN")
         for category_id in config.category_ids:
             if category_id not in reconciled:
                 continue
+            category_stat = category_stats[category_id]
             for stream in streams_by_category.get(category_id, []):
                 stream_id = stream.get("stream_id")
                 if stream_id is not None:
@@ -1033,14 +1055,17 @@ def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
                 if normalized is None:
                     if placeholder_without_epg:
                         skipped_placeholder += 1
+                        category_stat["skipped_placeholder"] += 1
                     else:
                         skipped += 1
+                        category_stat["skipped_unparseable"] += 1
                     continue
                 _upsert(conn, "events", _EVENT_COLUMNS, normalized["event"], "id")
                 _upsert(conn, "playables", _PLAYABLE_COLUMNS, normalized["playable"],
                         "event_id,playable_id")
                 normalized_playable_ids.add(normalized["playable"]["playable_id"])
                 imported += 1
+                category_stat["events_recognized"] += 1
 
         prior = conn.execute(
             "SELECT p.event_id, p.playable_id, p.stream_metadata_json, e.raw_attributes_json "
@@ -1101,6 +1126,8 @@ def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
         "skipped_placeholder": skipped_placeholder,
         "skipped_unparseable": skipped,
         "stale_removed": len(stale_rows),
+        "category_results": [category_stats[category_id] for category_id in config.category_ids
+                             if category_id in category_stats],
     }
     # Persistent rows use the same category snapshot but remain separate from
     # dynamic events/playables. A reconciliation problem must never delete a
@@ -1168,7 +1195,8 @@ def _select_epg_listing(stream: Mapping[str, Any], listings: Iterable[Mapping[st
 
 
 def _enrich_streams_with_epg(client: XtreamClient,
-                             streams_by_category: dict[str, list[dict]]) -> None:
+                             streams_by_category: dict[str, list[dict]],
+                             progress_callback=None) -> None:
     get_short_epg = getattr(client, "get_short_epg", None)
     if not callable(get_short_epg):
         return
@@ -1176,6 +1204,10 @@ def _enrich_streams_with_epg(client: XtreamClient,
     epg_cache: dict[str, list[dict]] = {}
     provider_failed = False
     for category_id, streams in streams_by_category.items():
+        enriched_count = 0
+        if progress_callback:
+            progress_callback(category_id, "enriching", streams_fetched=len(streams),
+                              detail="Checking short EPG")
         for index, stream in enumerate(streams):
             stream_id = stream.get("stream_id")
             if stream_id is None:
@@ -1204,32 +1236,66 @@ def _enrich_streams_with_epg(client: XtreamClient,
                 or enriched.get("epg_id")
             )
             streams[index] = enriched
+            enriched_count += 1
+        if progress_callback:
+            progress_callback(category_id, "normalizing", streams_fetched=len(streams),
+                              epg_enriched=enriched_count, detail="Normalizing events")
         if provider_failed:
             break
 
 
 def fetch_snapshot(client: XtreamClient, config: XtreamConfig,
-                   diagnostics: Optional[dict[str, Any]] = None) -> tuple[list[dict], dict[str, list[dict]]]:
+                   diagnostics: Optional[dict[str, Any]] = None,
+                   progress_reporter=None) -> tuple[list[dict], dict[str, list[dict]]]:
     categories = client.get_live_categories()
     available = {str(item.get("category_id")) for item in categories}
+    category_names = {
+        str(item.get("category_id")): str(item.get("category_name") or "Xtream")
+        for item in categories if item.get("category_id") is not None
+    }
     missing = [category_id for category_id in config.category_ids if category_id not in available]
     available_selected = [category_id for category_id in config.category_ids if category_id in available]
+    if progress_reporter:
+        progress_reporter("xtream_categories_start", categories=[
+            {"category_id": category_id, "category_name": category_names.get(category_id, "Xtream"),
+             "status": "queued"}
+            for category_id in config.category_ids
+        ])
+        for category_id in missing:
+            progress_reporter("xtream_category_update", category_id=category_id, status="unavailable",
+                              detail="Not returned by provider")
     if not available_selected:
         raise XtreamError("None of the configured Xtream category IDs are currently available")
 
     streams: dict[str, list[dict]] = {}
     failed: list[str] = []
     for category_id in available_selected:
+        if progress_reporter:
+            progress_reporter("xtream_category_update", category_id=category_id, status="fetching",
+                              started_at=datetime.now(timezone.utc).isoformat())
         try:
             streams[category_id] = client.get_live_streams(category_id)
+            if progress_reporter:
+                progress_reporter("xtream_category_update", category_id=category_id, status="fetched",
+                                  streams_fetched=len(streams[category_id]), detail="Snapshot received")
         except XtreamError:
             # One transient or retired category must not suppress every other
             # configured category. Its prior rows remain untouched because the
             # ingest transaction receives only the successfully fetched IDs.
             failed.append(category_id)
+            if progress_reporter:
+                progress_reporter("xtream_category_update", category_id=category_id, status="failed",
+                                  finished_at=datetime.now(timezone.utc).isoformat(), detail="Category request failed")
     if not streams:
         raise XtreamError("Could not fetch any currently available configured Xtream categories")
-    _enrich_streams_with_epg(client, streams)
+    _enrich_streams_with_epg(
+        client, streams,
+        progress_callback=(
+            lambda category_id, status, **fields: progress_reporter(
+                "xtream_category_update", category_id=category_id, status=status, **fields
+            )
+        ) if progress_reporter else None,
+    )
     if diagnostics is not None:
         diagnostics.update({
             "missing_category_ids": missing,
@@ -1248,7 +1314,8 @@ def run(db_path: Path, environ: Optional[Mapping[str, str]] = None,
         config.validate()
         client = client_factory(config)
         snapshot_diagnostics: dict[str, Any] = {}
-        categories, streams = fetch_snapshot(client, config, snapshot_diagnostics)
+        categories, streams = fetch_snapshot(client, config, snapshot_diagnostics,
+                                             progress_reporter=emit_progress)
         fetched_category_ids = snapshot_diagnostics.get("fetched_category_ids", [])
         reconcile_scope = (
             None if set(fetched_category_ids) == set(config.category_ids)
@@ -1258,6 +1325,9 @@ def run(db_path: Path, environ: Optional[Mapping[str, str]] = None,
             conn, categories, streams, config,
             reconciled_category_ids=reconcile_scope,
         )
+        for category in result.get("category_results", []):
+            emit_progress("xtream_category_update", **category, status="complete",
+                          finished_at=datetime.now(timezone.utc).isoformat(), detail="Imported")
         result.update(snapshot_diagnostics)
         maximum = client.get_account_max_connections()
         if maximum:

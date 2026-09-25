@@ -508,6 +508,29 @@ class XtreamStaleHandlingTest(unittest.TestCase):
             "NHL | Capitals @ Lightning",
         )
 
+    def test_category_results_expose_safe_per_category_counts(self):
+        cfg = config(category_ids=("10", "20"), timezone_name="UTC")
+        result = ingest_payload(
+            self.conn,
+            [
+                {"category_id": "10", "category_name": "Hockey"},
+                {"category_id": "20", "category_name": "No-event feeds"},
+            ],
+            {
+                "10": [self.stream(1)],
+                "20": [{"stream_id": 2, "name": "NO EVENT", "container_extension": "ts"}],
+            },
+            cfg,
+            now=datetime(2026, 8, 29, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(result["category_results"], [
+            {"category_id": "10", "category_name": "Hockey", "streams_fetched": 1,
+             "events_recognized": 1, "skipped_placeholder": 0, "skipped_unparseable": 0},
+            {"category_id": "20", "category_name": "No-event feeds", "streams_fetched": 1,
+             "events_recognized": 0, "skipped_placeholder": 1, "skipped_unparseable": 0},
+        ])
+
     def test_stale_cleanup_is_xtream_scoped(self):
         ingest_payload(
             self.conn, self.categories, {"10": [self.stream(1), self.stream(2)]}, self.cfg,

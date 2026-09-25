@@ -48,6 +48,7 @@ def _new_progress() -> dict:
         "current_step_status": None,
         "current_detail": None,
         "completed_steps": [],
+        "xtream_categories": [],
     }
 
 
@@ -109,6 +110,31 @@ def _consume_progress_marker(line: str) -> bool:
         progress["finished_at"] = payload.get("finished_at")
         progress["duration_seconds"] = payload.get("duration_seconds")
         progress["current_step_status"] = payload.get("status")
+
+    elif event == "xtream_categories_start":
+        progress["xtream_categories"] = [
+            {
+                "category_id": str(item.get("category_id") or ""),
+                "category_name": str(item.get("category_name") or "Xtream"),
+                "status": str(item.get("status") or "queued"),
+            }
+            for item in payload.get("categories", [])
+            if isinstance(item, dict) and str(item.get("category_id") or "").strip()
+        ]
+
+    elif event == "xtream_category_update":
+        category_id = str(payload.get("category_id") or "").strip()
+        if category_id:
+            categories = progress.setdefault("xtream_categories", [])
+            item = next((row for row in categories if row.get("category_id") == category_id), None)
+            if item is None:
+                item = {"category_id": category_id, "category_name": "Xtream", "status": "queued"}
+                categories.append(item)
+            for key in ("category_name", "status", "streams_fetched", "events_recognized",
+                        "skipped_placeholder", "skipped_unparseable", "epg_enriched", "detail",
+                        "started_at", "finished_at"):
+                if key in payload:
+                    item[key] = payload[key]
 
     return True
 

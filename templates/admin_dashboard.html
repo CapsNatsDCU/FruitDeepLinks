@@ -20,6 +20,9 @@
 .progress-item:first-child { border-top: none; padding-top: 0; }
 .progress-item-label  { color: var(--text-dim); flex: 1; min-width: 0; }
 .progress-item-status { white-space: nowrap; font-weight: 600; }
+.xtream-progress { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+.xtream-progress h3 { margin: 0 0 7px; font-size: 13px; }
+.xtream-category-meta { display: block; color: var(--text-muted); font-size: 11px; margin-top: 2px; }
 .refresh-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .file-list  { list-style: none; }
 .file-item  { padding: 7px 0; border-bottom: 1px solid var(--border-dim); display: flex; justify-content: space-between; align-items: center; }
@@ -175,10 +178,7 @@ function renderRefreshProgress(refresh) {
   if (!panel) return;
   const progress = refresh.progress || {};
   const completed = Array.isArray(progress.completed_steps) ? progress.completed_steps.slice().reverse() : [];
-  const totalSteps = progress.total_steps || '?';
-  const currentKey = progress.current_step_key || refresh.current_step || 'Pending';
   const currentLabel = progress.current_step_label || (refresh.running ? 'Refresh starting' : 'No refresh running');
-  const completedCount = Array.isArray(progress.completed_steps) ? progress.completed_steps.length : 0;
   const startedAt = progress.started_at ? new Date(progress.started_at) : null;
   const finishedAt = progress.finished_at ? new Date(progress.finished_at) : null;
 
@@ -200,33 +200,43 @@ function renderRefreshProgress(refresh) {
     const d = Math.max(0, (finishedAt - startedAt) / 1000);
     summaryBits.push('Duration: ' + (d >= 60 ? `${Math.floor(d/60)}m ${(d%60).toFixed(1)}s` : `${d.toFixed(1)}s`));
   }
-  if (!refresh.running && completedCount) {
-    const tot = Number(totalSteps);
-    if (Number.isFinite(tot) && tot > 0) {
-      summaryBits.push(`Steps: ${completedCount}/${tot}`);
-      if (tot - completedCount > 0) summaryBits.push(`Skipped: ${tot - completedCount}`);
-    } else {
-      summaryBits.push(`Steps: ${completedCount}`);
-    }
-  }
-
   const rows = completed.length
     ? completed.map(item => {
         const sc = item.status === 'ok' ? 'status-success' : item.status === 'failed_nonfatal' ? 'status-running' : 'status-failed';
         const sl = item.status === 'ok' ? 'Done' : item.status === 'failed_nonfatal' ? 'Non-fatal' : 'Failed';
-        return `<div class="progress-item"><span class="progress-item-label">[${item.step}/${totalSteps}] ${_escapeHtml(item.label)}</span><span class="progress-item-status ${sc}">${sl}</span></div>`;
+        return `<div class="progress-item"><span class="progress-item-label">${_escapeHtml(item.label)}</span><span class="progress-item-status ${sc}">${sl}</span></div>`;
       }).join('')
     : '<div class="status-muted">No completed steps yet.</div>';
 
-  const titleLine = refresh.running ? `[${currentKey}/${totalSteps}] ${_escapeHtml(currentLabel)}`
+  const titleLine = refresh.running ? `Refreshing: ${_escapeHtml(currentLabel)}`
     : ((refresh.last_status||progress.phase) === 'success' ? 'Refresh completed successfully'
     : ((refresh.last_status||progress.phase) ? `Refresh finished: ${refresh.last_status||progress.phase}` : 'No refresh running'));
+  const categories = Array.isArray(progress.xtream_categories) ? progress.xtream_categories : [];
+  const categoryClass = status => ({complete:'status-success',failed:'status-failed',unavailable:'status-failed',fetching:'status-running',fetched:'status-running',enriching:'status-running',normalizing:'status-running',queued:'status-muted'}[status] || 'status-muted');
+  const categoryLabel = status => ({complete:'Complete',failed:'Failed',unavailable:'Unavailable',fetching:'Fetching',fetched:'Fetched',enriching:'Checking EPG',normalizing:'Normalizing',queued:'Queued'}[status] || 'Queued');
+  const categoryRows = categories.map(item => {
+    const started = item.started_at ? new Date(item.started_at) : null;
+    const finished = item.finished_at ? new Date(item.finished_at) : null;
+    const elapsed = started && !Number.isNaN(started) ? Math.max(0, ((finished || new Date()) - started) / 1000) : null;
+    const timing = elapsed == null ? '' : (elapsed >= 60 ? `${Math.floor(elapsed/60)}m ${Math.floor(elapsed%60)}s` : `${Math.floor(elapsed)}s`);
+    const detail = [
+      item.streams_fetched != null ? `${item.streams_fetched} streams` : '',
+      item.events_recognized != null ? `${item.events_recognized} events recognized` : '',
+      item.skipped_placeholder ? `${item.skipped_placeholder} placeholders skipped` : '',
+      item.skipped_unparseable ? `${item.skipped_unparseable} unparseable` : '',
+      timing ? `${finished ? 'finished in' : 'elapsed'} ${timing}` : '',
+      item.detail || ''
+    ].filter(Boolean).join(' · ');
+    return `<div class="progress-item"><span class="progress-item-label"><strong>${_escapeHtml(item.category_name || 'Xtream')}</strong> <span class="status-muted">#${_escapeHtml(item.category_id)}</span>${detail ? `<span class="xtream-category-meta">${_escapeHtml(detail)}</span>` : ''}</span><span class="progress-item-status ${categoryClass(item.status)}">${categoryLabel(item.status)}</span></div>`;
+  }).join('');
+  const xtreamPanel = categories.length ? `<section class="xtream-progress"><h3>Xtream category import</h3><div class="progress-list">${categoryRows}</div></section>` : '';
 
   panel.innerHTML = `
     <div class="progress-title ${statusClass}">${statusText}</div>
     <div class="progress-meta">${titleLine}${metaBits.length ? ' &bull; ' + metaBits.map(_escapeHtml).join(' &bull; ') : ''}</div>
     ${summaryBits.length ? `<div class="progress-detail">${_escapeHtml(summaryBits.join(' &bull; '))}</div>` : ''}
     ${!refresh.running && (progress.current_detail||'') ? `<div class="progress-detail">${_escapeHtml(progress.current_detail)}</div>` : ''}
+    ${xtreamPanel}
     <div class="progress-list">${rows}</div>`;
 }
 

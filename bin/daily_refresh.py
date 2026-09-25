@@ -908,7 +908,7 @@ def main(argv=None):
         print(f"\n[7-xtream/{total_steps}] Ingesting Xtream IPTV events. {reason}")
     else:
         run_step("7-xtream", total_steps, "Ingesting configured Xtream IPTV categories", [
-            "python3", "xtream_ingest.py",
+            "python3", "-u", "xtream_ingest.py",
             "--db", str(DB_PATH),
         ], allow_fail=True)
 
