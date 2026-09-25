@@ -133,6 +133,16 @@ class SportsGetSafetyTests(unittest.TestCase):
         searched = self.client.get("/api/sports/catalog/identities?q=NHL&types=league").get_json()["items"]
         self.assertTrue(any(item["id"] == league_id and item["effective_visibility"]["visibility"] == "hidden" for item in searched))
 
+    def test_identity_filters_read_pre_visibility_database_without_writing_schema(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DROP TABLE catalog_identity_attention")
+            conn.execute("DROP TABLE catalog_saved_views")
+        with patch("server.routes.api.sports.ensure_schema", side_effect=AssertionError("GET wrote schema")):
+            response = self.client.get("/api/sports/catalog/identities")
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.get_json()["items"])
+        self.assertEqual([], response.get_json()["saved_views"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -69,6 +69,7 @@ def _catalog_identity_rows(conn):
     conn.row_factory = sqlite3.Row
     tables = (("sport", "sports"), ("league", "leagues"), ("team", "teams"),
               ("racing_event", "catalog_recurring_events"))
+    available_tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     aliases, provenance, mappings, attention = {}, {}, {}, {}
     for row in conn.execute("SELECT entity_type,fruit_id,alias FROM catalog_aliases"):
         aliases.setdefault((row[0], str(row[1])), []).append(str(row[2]))
@@ -76,12 +77,13 @@ def _catalog_identity_rows(conn):
         provenance.setdefault((row[0], str(row[1])), []).append({"source": row[2], "external_id": row[3]})
     for row in conn.execute("SELECT entity_type,canonical_id,source,source_id FROM source_entity_mappings"):
         mappings.setdefault((row[0], str(row[1])), []).append({"source": row[2], "source_id": row[3]})
-    for row in conn.execute("SELECT id,entity_type,fruit_id,kind,evidence_json,last_seen_utc FROM catalog_identity_attention WHERE status='open'"):
-        try:
-            evidence = json.loads(row[4] or "{}")
-        except (TypeError, ValueError):
-            evidence = {}
-        attention.setdefault((row[1], str(row[2])), []).append({"id": row[0], "kind": row[3], "evidence": evidence, "last_seen_utc": row[5]})
+    if "catalog_identity_attention" in available_tables:
+        for row in conn.execute("SELECT id,entity_type,fruit_id,kind,evidence_json,last_seen_utc FROM catalog_identity_attention WHERE status='open'"):
+            try:
+                evidence = json.loads(row[4] or "{}")
+            except (TypeError, ValueError):
+                evidence = {}
+            attention.setdefault((row[1], str(row[2])), []).append({"id": row[0], "kind": row[3], "evidence": evidence, "last_seen_utc": row[5]})
     sport_names = {str(row[0]): str(row[1]) for row in conn.execute("SELECT id,name FROM sports")}
     league_names = {str(row[0]): str(row[1]) for row in conn.execute("SELECT id,name FROM leagues")}
     now_sql = "datetime('now')"
@@ -150,7 +152,8 @@ def catalog_identities():
             return not query or query in haystack
         rows = [row for row in rows if matches(row)]
         hidden_count = sum(1 for row in _catalog_identity_rows(conn) if row["effective_visibility"]["visibility"] == "hidden")
-        saved_views = [dict(row) for row in conn.execute("SELECT id,name,filters_json,created_utc,updated_utc FROM catalog_saved_views ORDER BY name")]
+        saved_views = ([dict(row) for row in conn.execute("SELECT id,name,filters_json,created_utc,updated_utc FROM catalog_saved_views ORDER BY name")]
+                       if "catalog_saved_views" in {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")} else [])
     start = (page - 1) * per_page
     return jsonify({"ok": True, "items": rows[start:start + per_page], "page": page, "per_page": per_page,
                     "total": len(rows), "hidden_count": hidden_count, "catalog_count": total_before_hidden,
@@ -245,6 +248,9 @@ def catalog_saved_views():
     if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
     if request.method == "GET":
         with get_conn() as conn:
+            tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "catalog_saved_views" not in tables:
+                return jsonify({"ok": True, "views": []})
             return jsonify({"ok": True, "views": [dict(row) for row in conn.execute("SELECT id,name,filters_json,created_utc,updated_utc FROM catalog_saved_views ORDER BY name")]})
     body = request.get_json(silent=True) or {}
     name = " ".join(str(body.get("name") or "").split())
