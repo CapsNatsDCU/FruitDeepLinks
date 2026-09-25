@@ -15,6 +15,9 @@ from typing import Any, Mapping
 from sports_catalog import ENTITY_TYPES, _coerce_aliases, _upsert_alias, normalize, utc_now
 
 
+VISIBILITY_OVERRIDES = {"normal", "quiet", "hidden"}
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS catalog_entity_state (
@@ -47,7 +50,36 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     );
     CREATE INDEX IF NOT EXISTS idx_catalog_proposals_status ON catalog_change_proposals(status, id);
     CREATE INDEX IF NOT EXISTS idx_catalog_merge_source ON catalog_merge_groups(entity_type, source_id, status);
+    CREATE TABLE IF NOT EXISTS catalog_visibility_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL,
+      created_utc TEXT NOT NULL, undone_utc TEXT
+    );
+    CREATE TABLE IF NOT EXISTS catalog_visibility_batch_items (
+      batch_id INTEGER NOT NULL REFERENCES catalog_visibility_batches(id),
+      entity_type TEXT NOT NULL, fruit_id TEXT NOT NULL,
+      before_override TEXT, after_override TEXT,
+      PRIMARY KEY(batch_id, entity_type, fruit_id)
+    );
+    CREATE TABLE IF NOT EXISTS catalog_identity_attention (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT, fruit_id TEXT,
+      kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','resolved')),
+      evidence_json TEXT NOT NULL DEFAULT '{}', first_seen_utc TEXT NOT NULL,
+      last_seen_utc TEXT NOT NULL, resolved_utc TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_catalog_attention_open
+      ON catalog_identity_attention(status, entity_type, fruit_id, kind);
+    CREATE TABLE IF NOT EXISTS catalog_saved_views (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      filters_json TEXT NOT NULL DEFAULT '{}', created_utc TEXT NOT NULL, updated_utc TEXT NOT NULL
+    );
     """)
+    # Existing databases already have catalog_entity_state. Keep the preference
+    # migration additive so a refresh can upgrade it without rebuilding data.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(catalog_entity_state)")}
+    if "visibility_override" not in columns:
+        conn.execute("ALTER TABLE catalog_entity_state ADD COLUMN visibility_override TEXT")
+    if "visibility_reason" not in columns:
+        conn.execute("ALTER TABLE catalog_entity_state ADD COLUMN visibility_reason TEXT")
 
 
 _TABLES = {"sport": "sports", "league": "leagues", "team": "teams", "racing_event": "catalog_recurring_events"}
@@ -73,13 +105,144 @@ def _audit(conn: sqlite3.Connection, action: str, entity_type: str | None, fruit
 
 
 def entity_state(conn: sqlite3.Connection, entity_type: str, fruit_id: str) -> dict[str, Any]:
-    row = conn.execute("SELECT archived,merged_into_id,operator_fields_json FROM catalog_entity_state WHERE entity_type=? AND fruit_id=?",
-                       (entity_type, fruit_id)).fetchone()
+    try:
+        row = conn.execute("SELECT archived,merged_into_id,operator_fields_json,visibility_override,visibility_reason "
+                           "FROM catalog_entity_state WHERE entity_type=? AND fruit_id=?",
+                           (entity_type, fruit_id)).fetchone()
+    except sqlite3.OperationalError:
+        # A read-only UI may briefly run against a pre-migration database. It
+        # must remain a harmless snapshot read until the next write/refresh.
+        row = conn.execute("SELECT archived,merged_into_id,operator_fields_json FROM catalog_entity_state WHERE entity_type=? AND fruit_id=?",
+                           (entity_type, fruit_id)).fetchone()
     if not row:
-        return {"archived": False, "merged_into_id": None, "operator_fields": {}}
+        return {"archived": False, "merged_into_id": None, "operator_fields": {},
+                "visibility_override": None, "visibility_reason": None}
     try: fields = json.loads(row[2] or "{}")
     except (TypeError, ValueError): fields = {}
-    return {"archived": bool(row[0]), "merged_into_id": row[1], "operator_fields": fields if isinstance(fields, dict) else {}}
+    return {"archived": bool(row[0]), "merged_into_id": row[1], "operator_fields": fields if isinstance(fields, dict) else {},
+            "visibility_override": row[3] if len(row) > 3 else None,
+            "visibility_reason": row[4] if len(row) > 4 else None}
+
+
+def effective_visibility(conn: sqlite3.Connection, entity_type: str, fruit_id: str) -> dict[str, str]:
+    """Return the effective catalog visibility without changing resolver state."""
+    state = entity_state(conn, entity_type, fruit_id)
+    if state["archived"]:
+        return {"visibility": "archived", "source": "archive"}
+    override = state.get("visibility_override")
+    if override:
+        return {"visibility": override, "source": "self"}
+    row = _row(conn, entity_type, fruit_id)
+    if not row:
+        raise ValueError("catalog entity not found")
+    if entity_type in {"league", "team", "racing_event"}:
+        league_id = row["league_id"] if isinstance(row, sqlite3.Row) and "league_id" in row.keys() else row[2 if entity_type == "league" else 2]
+        if entity_type == "league":
+            sport_id = row["sport_id"] if isinstance(row, sqlite3.Row) else row[1]
+        else:
+            league_row = _row(conn, "league", str(league_id)) if league_id else None
+            league_state = entity_state(conn, "league", str(league_id)) if league_row else None
+            if league_state and league_state["archived"]:
+                return {"visibility": "archived", "source": "league_archive"}
+            if league_state and league_state.get("visibility_override"):
+                return {"visibility": str(league_state["visibility_override"]), "source": "league"}
+            sport_id = (league_row["sport_id"] if isinstance(league_row, sqlite3.Row) else league_row[1]) if league_row else None
+        if sport_id:
+            sport_state = entity_state(conn, "sport", str(sport_id))
+            if sport_state["archived"]:
+                return {"visibility": "archived", "source": "sport_archive"}
+            if sport_state.get("visibility_override"):
+                return {"visibility": str(sport_state["visibility_override"]), "source": "sport"}
+    return {"visibility": "normal", "source": "default"}
+
+
+def set_visibility_override(conn: sqlite3.Connection, *, entity_type: str, fruit_id: str,
+                            visibility: str | None, reason: Any = None) -> dict[str, Any]:
+    """Set a reversible sport/league override; NULL means inherit."""
+    if entity_type not in {"sport", "league"} or not _row(conn, entity_type, fruit_id):
+        raise ValueError("visibility can only be changed for an existing sport or league")
+    clean_visibility = str(visibility or "").strip().casefold() or None
+    if clean_visibility not in VISIBILITY_OVERRIDES | {None}:
+        raise ValueError("visibility must be normal, quiet, hidden, or inherit")
+    state = entity_state(conn, entity_type, fruit_id)
+    if state["archived"]:
+        raise ValueError("restore an archived identity before changing visibility")
+    clean_reason = " ".join(str(reason or "").split()) or None
+    conn.execute(
+        "INSERT INTO catalog_entity_state(entity_type,fruit_id,archived,merged_into_id,operator_fields_json,updated_utc,visibility_override,visibility_reason) "
+        "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(entity_type,fruit_id) DO UPDATE SET "
+        "visibility_override=excluded.visibility_override,visibility_reason=excluded.visibility_reason,updated_utc=excluded.updated_utc",
+        (entity_type, fruit_id, int(state["archived"]), state["merged_into_id"],
+         json.dumps(state["operator_fields"], sort_keys=True), utc_now(), clean_visibility, clean_reason),
+    )
+    _audit(conn, "visibility", entity_type, fruit_id,
+           {"before": state.get("visibility_override"), "after": clean_visibility, "reason": clean_reason})
+    return {**entity_state(conn, entity_type, fruit_id), "effective": effective_visibility(conn, entity_type, fruit_id)}
+
+
+def set_visibility_bulk(conn: sqlite3.Connection, *, entity_type: str, fruit_ids: list[Any],
+                        visibility: str | None, reason: Any = None) -> dict[str, Any]:
+    unique_ids = list(dict.fromkeys(str(value) for value in fruit_ids if str(value).strip()))
+    if not unique_ids:
+        raise ValueError("select one or more identities")
+    clean_visibility = str(visibility or "").strip().casefold() or None
+    if clean_visibility not in VISIBILITY_OVERRIDES | {None}:
+        raise ValueError("visibility must be normal, quiet, hidden, or inherit")
+    batch = conn.execute("INSERT INTO catalog_visibility_batches(action,created_utc) VALUES(?,?)",
+                         ("visibility", utc_now())).lastrowid
+    changed, skipped = [], []
+    for fruit_id in unique_ids:
+        if entity_type not in {"sport", "league"} or not _row(conn, entity_type, fruit_id) or entity_state(conn, entity_type, fruit_id)["archived"]:
+            skipped.append(fruit_id); continue
+        before = entity_state(conn, entity_type, fruit_id).get("visibility_override")
+        set_visibility_override(conn, entity_type=entity_type, fruit_id=fruit_id, visibility=clean_visibility, reason=reason)
+        conn.execute("INSERT INTO catalog_visibility_batch_items(batch_id,entity_type,fruit_id,before_override,after_override) VALUES(?,?,?,?,?)",
+                     (batch, entity_type, fruit_id, before, clean_visibility))
+        changed.append(fruit_id)
+    if not changed:
+        conn.execute("DELETE FROM catalog_visibility_batches WHERE id=?", (batch,))
+        raise ValueError("no selected active sports or leagues could be changed")
+    return {"batch_id": int(batch), "changed": changed, "skipped": skipped}
+
+
+def undo_visibility_batch(conn: sqlite3.Connection, batch_id: int) -> dict[str, list[str]]:
+    batch = conn.execute("SELECT undone_utc FROM catalog_visibility_batches WHERE id=?", (batch_id,)).fetchone()
+    if not batch: raise ValueError("visibility batch not found")
+    if batch[0]: raise ValueError("visibility batch already undone")
+    restored, conflicts = [], []
+    rows = conn.execute("SELECT entity_type,fruit_id,before_override,after_override FROM catalog_visibility_batch_items WHERE batch_id=?", (batch_id,)).fetchall()
+    for entity_type, fruit_id, before, after in rows:
+        state = entity_state(conn, entity_type, fruit_id)
+        if state.get("visibility_override") != after:
+            conflicts.append(str(fruit_id)); continue
+        set_visibility_override(conn, entity_type=entity_type, fruit_id=str(fruit_id), visibility=before,
+                                reason="Undo visibility batch %s" % batch_id)
+        restored.append(str(fruit_id))
+    conn.execute("UPDATE catalog_visibility_batches SET undone_utc=? WHERE id=?", (utc_now(), batch_id))
+    return {"restored": restored, "conflicts": conflicts}
+
+
+def record_attention(conn: sqlite3.Connection, *, entity_type: str | None, fruit_id: str | None,
+                     kind: str, evidence: Mapping[str, Any]) -> None:
+    """Persist a concrete catalog issue at a write boundary, never from GETs."""
+    existing = conn.execute(
+        "SELECT id FROM catalog_identity_attention WHERE status='open' AND entity_type IS ? AND fruit_id IS ? AND kind=?",
+        (entity_type, fruit_id, kind),
+    ).fetchone()
+    now = utc_now()
+    if existing:
+        conn.execute("UPDATE catalog_identity_attention SET evidence_json=?,last_seen_utc=? WHERE id=?",
+                     (json.dumps(dict(evidence), sort_keys=True), now, existing[0]))
+    else:
+        conn.execute("INSERT INTO catalog_identity_attention(entity_type,fruit_id,kind,evidence_json,first_seen_utc,last_seen_utc) VALUES(?,?,?,?,?,?)",
+                     (entity_type, fruit_id, kind, json.dumps(dict(evidence), sort_keys=True), now, now))
+
+
+def resolve_attention(conn: sqlite3.Connection, attention_id: int) -> None:
+    cursor = conn.execute("UPDATE catalog_identity_attention SET status='resolved',resolved_utc=? WHERE id=? AND status='open'",
+                          (utc_now(), attention_id))
+    if not cursor.rowcount:
+        raise ValueError("open attention item not found")
 
 
 def set_entity_fields(conn: sqlite3.Connection, *, entity_type: str, fruit_id: str, fields: Mapping[str, Any]) -> dict[str, Any]:
@@ -320,7 +483,12 @@ def apply_proposal(conn: sqlite3.Connection, proposal_id: int, *, reject: bool =
             result = outcome
         else: raise ValueError("unsupported proposal action")
     except ValueError as exc:
-        conn.execute("UPDATE catalog_change_proposals SET status='conflict',result_json=?,decided_utc=? WHERE id=?", (json.dumps({"error": str(exc)}), utc_now(), proposal_id)); return {**proposal, "status": "conflict", "result": {"error": str(exc)}}
+        error = str(exc)
+        conn.execute("UPDATE catalog_change_proposals SET status='conflict',result_json=?,decided_utc=? WHERE id=?", (json.dumps({"error": error}), utc_now(), proposal_id))
+        attention_id = proposal.get("target_id") or payload.get("survivor_id") or payload.get("source_id")
+        record_attention(conn, entity_type=entity_type, fruit_id=attention_id,
+                         kind="proposal_conflict", evidence={"proposal_id": proposal_id, "error": error})
+        return {**proposal, "status": "conflict", "result": {"error": error}}
     conn.execute("UPDATE catalog_change_proposals SET status='accepted',result_json=?,decided_utc=? WHERE id=?", (json.dumps(result), utc_now(), proposal_id))
     return {**proposal, "status": "accepted", "result": result}
 

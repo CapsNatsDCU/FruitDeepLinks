@@ -20,6 +20,7 @@ from fruit_export_lanes import build_lanes_m3u, build_lanes_xmltv  # noqa: E402
 from server.app import create_app  # noqa: E402
 from server.services.lanes import get_lane_direct_stream  # noqa: E402
 from xtream_ingest import XtreamConfig, ingest_payload  # noqa: E402
+from catalog_workbench import set_visibility_override  # noqa: E402
 
 
 class XtreamLanePipelineTest(unittest.TestCase):
@@ -157,6 +158,15 @@ class XtreamLanePipelineTest(unittest.TestCase):
         ).fetchone()
         self.assertEqual(lane["title"], self.provider_name)
         self.assertEqual(lane["chosen_provider"], "xtream")
+
+    def test_hidden_league_remains_ingested_but_cannot_enter_a_lane(self):
+        league_id = self.conn.execute("SELECT league_id FROM canonical_events LIMIT 1").fetchone()[0]
+        self.assertIsNotNone(league_id)
+        set_visibility_override(self.conn, entity_type="league", fruit_id=league_id, visibility="hidden")
+        self.conn.commit()
+        self.assertEqual([], load_future_events(self.conn, 2))
+        self.assertGreater(self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 0)
+        self.assertGreater(self.conn.execute("SELECT COUNT(*) FROM canonical_events").fetchone()[0], 0)
 
     def test_m3u_uses_lane_tuning_endpoint_without_credentials(self):
         path = Path(self.tmp.name) / "lanes.m3u"

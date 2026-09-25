@@ -1139,10 +1139,23 @@ def coverage(conn: sqlite3.Connection, *, days: int = 14) -> list[dict[str, Any]
     ):
         decisions_by_event.setdefault(item["canonical_event_id"], item)
 
+    from catalog_workbench import effective_visibility
+    visibility_cache: dict[tuple[str, str], dict[str, str]] = {}
+    def event_visibility(event: dict[str, Any]) -> dict[str, str]:
+        entity_type = "league" if event.get("league_id") else "sport"
+        entity_id = str(event.get("league_id") or event.get("sport_id") or "")
+        if not entity_id:
+            return {"visibility": "normal", "source": "default"}
+        return visibility_cache.setdefault((entity_type, entity_id), effective_visibility(conn, entity_type, entity_id))
+
     result = []
     for event in events:
         rule = batched_rule(event)
         if rule["policy"] not in {"ALWAYS_SCHEDULE", "PRIORITIZE"}: continue
+        visibility = event_visibility(event)
+        # Quiet events may still be scheduled, but neither Quiet nor Hidden
+        # identities produce status/attention work in the default dashboard.
+        if visibility["visibility"] in {"quiet", "hidden", "archived"}: continue
         playable_count = playable_counts[event["id"]]
         lane_id = lane_by_event.get(event["id"])
         decision = decisions_by_event.get(event["id"])
@@ -1153,5 +1166,5 @@ def coverage(conn: sqlite3.Connection, *, days: int = 14) -> list[dict[str, Any]
             status = "lane_capacity_conflict"
         participants = [{"display_name": item["display_name"], "role": item["role"]}
                         for item in participants_by_event[event["id"]]]
-        result.append({"canonical_event_id": event["id"], "title": event.get("title"), "start_utc": event["start_utc"], "participants": participants, "rule": rule["policy"], "coverage_state": status, "playable_count": playable_count, "lane_id": lane_id, "decision": decision["decision"] if decision else None})
+        result.append({"canonical_event_id": event["id"], "title": event.get("title"), "start_utc": event["start_utc"], "participants": participants, "rule": rule["policy"], "coverage_state": status, "playable_count": playable_count, "lane_id": lane_id, "decision": decision["decision"] if decision else None, "visibility": visibility["visibility"]})
     return result

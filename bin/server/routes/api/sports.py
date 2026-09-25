@@ -1,4 +1,5 @@
 """Metadata-first Sports Rules, coverage, resolver, and health APIs."""
+import json
 import os
 import sqlite3
 import threading
@@ -15,7 +16,10 @@ from catalog_workbench import (add_alias, apply_all as apply_all_catalog_proposa
                                apply_proposal as apply_catalog_proposal, entity_state,
                                cancel_run, merge_entities, run_ai_review, set_archived,
                                set_entity_fields, undo_merge, edit_proposal, merge_details,
-                               detach_merge_relationship, save_source_mapping)
+                               detach_merge_relationship, save_source_mapping,
+                               effective_visibility, set_visibility_override,
+                               set_visibility_bulk, undo_visibility_batch,
+                               resolve_attention)
 
 try:
     from db.preferences import get_setting
@@ -48,7 +52,9 @@ def catalog():
         source_mappings = [dict(r) for r in conn.execute("SELECT source,entity_type,source_id,canonical_id,confidence,manual,evidence_json,last_seen_utc FROM source_entity_mappings ORDER BY entity_type,source,source_id")]
         racing_events = [dict(r) for r in conn.execute("SELECT * FROM catalog_recurring_events ORDER BY name")]
         for entity_type, entities in (("sport", sports), ("league", leagues), ("team", teams), ("racing_event", racing_events)):
-            for entity in entities: entity["state"] = entity_state(conn, entity_type, entity["id"])
+            for entity in entities:
+                entity["state"] = entity_state(conn, entity_type, entity["id"])
+                entity["effective_visibility"] = effective_visibility(conn, entity_type, entity["id"])
         proposals = [dict(r) for r in conn.execute("SELECT id,run_id,entity_type,action,target_id,payload_json,evidence_json,confidence,status,result_json,created_utc,decided_utc FROM catalog_change_proposals ORDER BY id DESC LIMIT 250")]
         runs = [dict(r) for r in conn.execute("SELECT * FROM catalog_change_runs ORDER BY id DESC LIMIT 25")]
         merges = [dict(r) for r in conn.execute("SELECT id,entity_type,survivor_id,source_id,status,created_utc,undone_utc FROM catalog_merge_groups ORDER BY id DESC LIMIT 250")]
@@ -56,6 +62,99 @@ def catalog():
                     "racing_events": racing_events, "aliases": aliases, "provenance": provenance, "source_mappings": source_mappings,
                     "proposals": proposals, "runs": runs, "merges": merges,
                     "materialization": "refresh_pipeline"})
+
+
+def _catalog_identity_rows(conn):
+    """Materialized catalog facts for filterable operator reads only."""
+    conn.row_factory = sqlite3.Row
+    tables = (("sport", "sports"), ("league", "leagues"), ("team", "teams"),
+              ("racing_event", "catalog_recurring_events"))
+    aliases, provenance, mappings, attention = {}, {}, {}, {}
+    for row in conn.execute("SELECT entity_type,fruit_id,alias FROM catalog_aliases"):
+        aliases.setdefault((row[0], str(row[1])), []).append(str(row[2]))
+    for row in conn.execute("SELECT entity_type,fruit_id,source,external_id FROM catalog_entity_provenance"):
+        provenance.setdefault((row[0], str(row[1])), []).append({"source": row[2], "external_id": row[3]})
+    for row in conn.execute("SELECT entity_type,canonical_id,source,source_id FROM source_entity_mappings"):
+        mappings.setdefault((row[0], str(row[1])), []).append({"source": row[2], "source_id": row[3]})
+    for row in conn.execute("SELECT id,entity_type,fruit_id,kind,evidence_json,last_seen_utc FROM catalog_identity_attention WHERE status='open'"):
+        try:
+            evidence = json.loads(row[4] or "{}")
+        except (TypeError, ValueError):
+            evidence = {}
+        attention.setdefault((row[1], str(row[2])), []).append({"id": row[0], "kind": row[3], "evidence": evidence, "last_seen_utc": row[5]})
+    sport_names = {str(row[0]): str(row[1]) for row in conn.execute("SELECT id,name FROM sports")}
+    league_names = {str(row[0]): str(row[1]) for row in conn.execute("SELECT id,name FROM leagues")}
+    now_sql = "datetime('now')"
+    upcoming = {("sport", str(row[0])): int(row[1]) for row in conn.execute(
+        f"SELECT sport_id,COUNT(*) FROM canonical_events WHERE sport_id IS NOT NULL AND datetime(start_utc)>= {now_sql} GROUP BY sport_id")}
+    upcoming.update({("league", str(row[0])): int(row[1]) for row in conn.execute(
+        f"SELECT league_id,COUNT(*) FROM canonical_events WHERE league_id IS NOT NULL AND datetime(start_utc)>= {now_sql} GROUP BY league_id")})
+    upcoming.update({("racing_event", str(row[0])): int(row[1]) for row in conn.execute(
+        f"SELECT recurring_event_id,COUNT(*) FROM canonical_events WHERE recurring_event_id IS NOT NULL AND datetime(start_utc)>= {now_sql} GROUP BY recurring_event_id")})
+    upcoming.update({("team", str(row[0])): int(row[1]) for row in conn.execute(
+        f"SELECT cep.team_id,COUNT(DISTINCT cep.event_id) FROM canonical_event_participants cep JOIN canonical_events ce ON ce.id=cep.event_id WHERE cep.team_id IS NOT NULL AND datetime(ce.start_utc)>= {now_sql} GROUP BY cep.team_id")})
+    result = []
+    for entity_type, table in tables:
+        for row in conn.execute(f"SELECT * FROM {table} ORDER BY name"):
+            entity = dict(row); fruit_id = str(entity["id"])
+            state = entity_state(conn, entity_type, fruit_id)
+            effective = effective_visibility(conn, entity_type, fruit_id)
+            scope = None
+            if entity_type == "league": scope = sport_names.get(str(entity.get("sport_id") or ""))
+            elif entity_type in {"team", "racing_event"}:
+                scope = league_names.get(str(entity.get("league_id") or "")) or sport_names.get(str(entity.get("sport_id") or ""))
+            key = (entity_type, fruit_id)
+            result.append({"id": fruit_id, "entity_type": entity_type, "name": entity["name"], "scope": scope,
+                           "state": state, "effective_visibility": effective,
+                           "aliases": aliases.get(key, []), "provenance": provenance.get(key, []),
+                           "mappings": mappings.get(key, []), "upcoming_event_count": upcoming.get(key, 0),
+                           "attention": attention.get(key, [])})
+    return result
+
+
+@bp.route("/api/sports/catalog/identities")
+def catalog_identities():
+    """Server-side catalog filtering; unlike the compatibility catalog payload this is paginated."""
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    query = (request.args.get("q") or "").strip().casefold()
+    entity_types = {value for value in (request.args.get("types") or "").split(",") if value}
+    visibility = {value for value in (request.args.get("visibility") or "").split(",") if value}
+    source = (request.args.get("source") or "").strip().casefold()
+    mapping = (request.args.get("mapping") or "").strip()
+    aliases = (request.args.get("aliases") or "").strip()
+    upcoming = (request.args.get("upcoming") or "").strip()
+    needs_attention = (request.args.get("needs_attention") or "").strip().lower() in {"1", "true", "yes"}
+    include_hidden = (request.args.get("include_hidden") or "").strip().lower() in {"1", "true", "yes"} or bool(query) or "hidden" in visibility
+    include_archived = (request.args.get("include_archived") or "").strip().lower() in {"1", "true", "yes"} or "archived" in visibility
+    page = max(1, request.args.get("page", 1, type=int)); per_page = min(200, max(10, request.args.get("per_page", 50, type=int)))
+    with get_conn() as conn:
+        rows = _catalog_identity_rows(conn)
+        total_before_hidden = len(rows)
+        def matches(item):
+            state, effective = item["state"], item["effective_visibility"]["visibility"]
+            if state["archived"] and not include_archived: return False
+            if effective == "hidden" and not include_hidden: return False
+            if entity_types and item["entity_type"] not in entity_types: return False
+            if visibility and effective not in visibility: return False
+            if source and source not in " ".join([p["source"] for p in item["provenance"]] + [m["source"] for m in item["mappings"]]).casefold(): return False
+            if mapping == "mapped" and not (item["mappings"] or item["provenance"]): return False
+            if mapping == "unmapped" and (item["mappings"] or item["provenance"]): return False
+            if aliases == "yes" and not item["aliases"]: return False
+            if aliases == "no" and item["aliases"]: return False
+            if upcoming == "yes" and not item["upcoming_event_count"]: return False
+            if upcoming == "no" and item["upcoming_event_count"]: return False
+            if needs_attention and not item["attention"]: return False
+            haystack = " ".join([item["name"], item.get("scope") or "", *item["aliases"],
+                                  *[p["source"] + " " + str(p["external_id"]) for p in item["provenance"]],
+                                  *[m["source"] + " " + str(m["source_id"]) for m in item["mappings"]]]).casefold()
+            return not query or query in haystack
+        rows = [row for row in rows if matches(row)]
+        hidden_count = sum(1 for row in _catalog_identity_rows(conn) if row["effective_visibility"]["visibility"] == "hidden")
+        saved_views = [dict(row) for row in conn.execute("SELECT id,name,filters_json,created_utc,updated_utc FROM catalog_saved_views ORDER BY name")]
+    start = (page - 1) * per_page
+    return jsonify({"ok": True, "items": rows[start:start + per_page], "page": page, "per_page": per_page,
+                    "total": len(rows), "hidden_count": hidden_count, "catalog_count": total_before_hidden,
+                    "saved_views": saved_views})
 
 
 @bp.route("/api/sports/catalog/entities", methods=["POST"])
@@ -92,6 +191,81 @@ def catalog_restore(entity_type, fruit_id):
         try: set_archived(conn, entity_type=entity_type, fruit_id=fruit_id, archived=False); conn.commit()
         except ValueError as exc: return jsonify({"ok": False, "error": str(exc)}), 400
     return jsonify({"ok": True})
+
+
+@bp.route("/api/sports/catalog/entities/<entity_type>/<fruit_id>/visibility", methods=["PUT"])
+def catalog_entity_visibility(entity_type, fruit_id):
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    body = request.get_json(silent=True) or {}
+    with get_conn() as conn:
+        _prepare_write(conn)
+        try:
+            state = set_visibility_override(conn, entity_type=entity_type, fruit_id=fruit_id,
+                                            visibility=body.get("visibility"), reason=body.get("reason")); conn.commit()
+        except ValueError as exc: return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "state": state})
+
+
+@bp.route("/api/sports/catalog/visibility/bulk", methods=["POST"])
+def catalog_visibility_bulk():
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    body = request.get_json(silent=True) or {}
+    with get_conn() as conn:
+        _prepare_write(conn)
+        try:
+            result = set_visibility_bulk(conn, entity_type=str(body.get("entity_type", "")),
+                                         fruit_ids=body.get("ids") or [], visibility=body.get("visibility"),
+                                         reason=body.get("reason")); conn.commit()
+        except ValueError as exc: return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, **result})
+
+
+@bp.route("/api/sports/catalog/visibility/batches/<int:batch_id>/undo", methods=["POST"])
+def catalog_visibility_undo(batch_id):
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    with get_conn() as conn:
+        _prepare_write(conn)
+        try: result = undo_visibility_batch(conn, batch_id); conn.commit()
+        except ValueError as exc: return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, **result})
+
+
+@bp.route("/api/sports/catalog/attention/<int:attention_id>/resolve", methods=["POST"])
+def catalog_resolve_attention(attention_id):
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    with get_conn() as conn:
+        _prepare_write(conn)
+        try: resolve_attention(conn, attention_id); conn.commit()
+        except ValueError as exc: return jsonify({"ok": False, "error": str(exc)}), 404
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/sports/catalog/saved-views", methods=["GET", "POST"])
+def catalog_saved_views():
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    if request.method == "GET":
+        with get_conn() as conn:
+            return jsonify({"ok": True, "views": [dict(row) for row in conn.execute("SELECT id,name,filters_json,created_utc,updated_utc FROM catalog_saved_views ORDER BY name")]})
+    body = request.get_json(silent=True) or {}
+    name = " ".join(str(body.get("name") or "").split())
+    filters = body.get("filters")
+    if not name or not isinstance(filters, dict): return jsonify({"ok": False, "error": "name and filters are required"}), 400
+    allowed = {"q", "types", "visibility", "source", "mapping", "aliases", "upcoming", "needs_attention", "include_hidden", "include_archived"}
+    clean = {key: value for key, value in filters.items() if key in allowed}
+    with get_conn() as conn:
+        _prepare_write(conn)
+        conn.execute("INSERT INTO catalog_saved_views(name,filters_json,created_utc,updated_utc) VALUES(?,?,datetime('now'),datetime('now')) "
+                     "ON CONFLICT(name) DO UPDATE SET filters_json=excluded.filters_json,updated_utc=excluded.updated_utc",
+                     (name, json.dumps(clean, sort_keys=True))); conn.commit()
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/sports/catalog/saved-views/<int:view_id>", methods=["DELETE"])
+def catalog_delete_saved_view(view_id):
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    with get_conn() as conn:
+        _prepare_write(conn); cursor = conn.execute("DELETE FROM catalog_saved_views WHERE id=?", (view_id,)); conn.commit()
+    return jsonify({"ok": True, "deleted": bool(cursor.rowcount)})
 
 
 @bp.route("/api/sports/catalog/entities/<entity_type>/<fruit_id>/aliases", methods=["POST"])

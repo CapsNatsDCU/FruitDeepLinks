@@ -246,7 +246,18 @@ def apply_catalog_records(conn: sqlite3.Connection, records: Iterable[Mapping[st
     """
     materialized = [dict(record) for record in records]
     preview = preview_catalog_records(conn, materialized)
-    if dry_run or preview["conflicts"] or preview["invalid"]:
+    if dry_run or preview["invalid"]:
+        return preview
+    if preview["conflicts"]:
+        # A source identity conflict is operational evidence, not a reason to
+        # mutate canonical IDs. Persist it for the catalog workbench's Needs
+        # attention view while leaving the conflicting import unapplied.
+        from catalog_workbench import record_attention
+        for conflict in preview["conflicts"]:
+            record_attention(conn, entity_type=conflict.get("entity_type"),
+                             fruit_id=conflict.get("existing_fruit_id"),
+                             kind="source_identity_conflict", evidence=conflict)
+        conn.commit()
         return preview
     ensure_schema(conn)
     conn.execute("SAVEPOINT catalog_import")

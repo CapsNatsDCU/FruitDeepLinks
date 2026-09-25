@@ -7,7 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 from catalog_workbench import (_catalog_ai_payload, add_alias, add_proposal, apply_all, detach_merge_relationship,
                                entity_state, merge_details, merge_entities, save_source_mapping,
-                               set_entity_fields, undo_merge)
+                               set_entity_fields, undo_merge, effective_visibility,
+                               set_visibility_override, set_visibility_bulk, undo_visibility_batch)
 from catalog_workbench import run_ai_review
 from sports_catalog import apply_catalog_records
 from sports_metadata import _upsert_named, ensure_schema, save_rule
@@ -93,6 +94,28 @@ class CatalogWorkbenchTests(unittest.TestCase):
         self.assertEqual(1, detach_merge_relationship(self.conn, merge_id=merge_id, relationship=relationship, rowids=[rowid]))
         self.assertFalse(entity_state(self.conn, "team", self.second)["archived"])
         self.assertEqual(self.second, self.conn.execute("SELECT fruit_id FROM catalog_aliases WHERE alias='Detached Stars'").fetchone()[0])
+
+    def test_visibility_inherits_and_explicit_normal_overrides_hidden_sport(self):
+        sport_id = self.conn.execute("SELECT id FROM sports WHERE name='Hockey'").fetchone()[0]
+        league_id = self.conn.execute("SELECT id FROM leagues WHERE name='NHL'").fetchone()[0]
+        set_visibility_override(self.conn, entity_type="sport", fruit_id=sport_id, visibility="hidden", reason="not interested")
+        self.assertEqual("hidden", effective_visibility(self.conn, "league", league_id)["visibility"])
+        self.assertEqual("sport", effective_visibility(self.conn, "league", league_id)["source"])
+        set_visibility_override(self.conn, entity_type="league", fruit_id=league_id, visibility="normal")
+        self.assertEqual("normal", effective_visibility(self.conn, "league", league_id)["visibility"])
+        self.assertEqual("self", effective_visibility(self.conn, "league", league_id)["source"])
+
+    def test_visibility_bulk_undo_does_not_overwrite_later_change(self):
+        sport_id = self.conn.execute("SELECT id FROM sports WHERE name='Hockey'").fetchone()[0]
+        outcome = set_visibility_bulk(self.conn, entity_type="sport", fruit_ids=[sport_id], visibility="quiet", reason="batch")
+        self.assertEqual("quiet", entity_state(self.conn, "sport", sport_id)["visibility_override"])
+        undone = undo_visibility_batch(self.conn, outcome["batch_id"])
+        self.assertEqual([sport_id], undone["restored"])
+        self.assertIsNone(entity_state(self.conn, "sport", sport_id)["visibility_override"])
+        outcome = set_visibility_bulk(self.conn, entity_type="sport", fruit_ids=[sport_id], visibility="quiet")
+        set_visibility_override(self.conn, entity_type="sport", fruit_id=sport_id, visibility="hidden")
+        undone = undo_visibility_batch(self.conn, outcome["batch_id"])
+        self.assertEqual([sport_id], undone["conflicts"])
 
 
 if __name__ == "__main__": unittest.main()

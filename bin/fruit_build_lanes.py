@@ -177,15 +177,16 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int, *, canonical_a
         if channel_name in FAKE_CHANNELS:
             continue
 
-        # Apply sports/league filtering if available
+        # Preserve raw legacy filters only until a canonical identity can make
+        # the durable visibility decision below.  Provider strings alone are
+        # not sufficient to override an explicit canonical Normal setting.
+        legacy_filtered = False
         if FILTERING_AVAILABLE and (disabled_sports or disabled_leagues):
             event_dict = {
                 "genres_json": genres_json,
                 "classification_json": classification_json
             }
-            if not should_include_event(event_dict, prefs):
-                filtered_count += 1
-                continue
+            legacy_filtered = not should_include_event(event_dict, prefs)
 
         # Use the database columns directly (works for both Peacock and Apple TV)
         try:
@@ -273,6 +274,29 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int, *, canonical_a
                 if sports_rule == "IGNORE":
                     filtered_count += 1
                     continue
+                try:
+                    from catalog_workbench import effective_visibility, entity_state
+                    visibility_type = "league" if mapping[3] else "sport"
+                    visibility_id = str(mapping[3] or mapping[2] or "")
+                    visibility = effective_visibility(conn, visibility_type, visibility_id) if visibility_id else {"visibility": "normal", "source": "default"}
+                    if visibility["visibility"] in {"hidden", "archived"}:
+                        filtered_count += 1
+                        continue
+                    # An explicit canonical preference wins over old raw-name
+                    # filters. Until migration, unmatched/default identities
+                    # retain the legacy exclusion for compatibility.
+                    if legacy_filtered and visibility["source"] == "default":
+                        filtered_count += 1
+                        continue
+                except Exception:
+                    # A pre-migration/read-only database retains its historic
+                    # raw filter behavior rather than risking unexpected lanes.
+                    if legacy_filtered:
+                        filtered_count += 1
+                        continue
+        elif legacy_filtered:
+            filtered_count += 1
+            continue
 
         end_padded = end_dt + timedelta(minutes=PADDING_MINUTES)
         events.append(

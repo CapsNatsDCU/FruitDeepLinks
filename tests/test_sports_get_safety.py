@@ -10,7 +10,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 from server.app import create_app
-from sports_metadata import ensure_schema, resolve_source_event
+from sports_metadata import ensure_schema, resolve_source_event, save_rule, coverage
+from catalog_workbench import set_visibility_override
 
 
 class SportsGetSafetyTests(unittest.TestCase):
@@ -109,6 +110,28 @@ class SportsGetSafetyTests(unittest.TestCase):
         self.assertEqual("absolute_utc", coverage["timestamp_contract"])
         page = self.client.get("/my-sports")
         self.assertIn(b"formatUtc", page.data)
+
+    def test_quiet_league_stays_materialized_but_has_no_coverage_status(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            league_id = conn.execute("SELECT league_id FROM canonical_events WHERE id=?", (self.event["canonical_event_id"],)).fetchone()[0]
+            save_rule(conn, target_type="league", target_id=league_id, policy="PRIORITIZE")
+            self.assertEqual(1, len(coverage(conn, days=90)))
+            set_visibility_override(conn, entity_type="league", fruit_id=league_id, visibility="quiet")
+            conn.commit()
+            self.assertEqual([], coverage(conn, days=90))
+            self.assertEqual(1, conn.execute("SELECT COUNT(*) FROM canonical_events").fetchone()[0])
+
+    def test_identity_filters_hide_hidden_by_default_but_direct_search_reveals_it(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            league_id = conn.execute("SELECT league_id FROM canonical_events WHERE id=?", (self.event["canonical_event_id"],)).fetchone()[0]
+            set_visibility_override(conn, entity_type="league", fruit_id=league_id, visibility="hidden")
+            conn.commit()
+        default_items = self.client.get("/api/sports/catalog/identities?types=league").get_json()["items"]
+        self.assertFalse(any(item["id"] == league_id for item in default_items))
+        searched = self.client.get("/api/sports/catalog/identities?q=NHL&types=league").get_json()["items"]
+        self.assertTrue(any(item["id"] == league_id and item["effective_visibility"]["visibility"] == "hidden" for item in searched))
 
 
 if __name__ == "__main__":

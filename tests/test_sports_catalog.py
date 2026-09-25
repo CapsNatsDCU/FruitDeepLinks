@@ -49,6 +49,15 @@ class SportsCatalogTests(unittest.TestCase):
         self.assertEqual("conflict", conflict["conflicts"][0]["kind"])
         self.assertEqual(first, self.conn.execute("SELECT fruit_id FROM catalog_entity_provenance WHERE source='wikidata' AND external_id='Q170185'").fetchone()[0])
 
+    def test_conflicting_apply_is_preserved_as_catalog_attention(self):
+        record = self.capitals_record()
+        self.apply(record)
+        conflict = apply_catalog_records(self.conn, [{**record, "name": "Washington Capitals Hockey Club"}], dry_run=False)
+        self.assertEqual(1, len(conflict["conflicts"]))
+        attention = self.conn.execute("SELECT kind,fruit_id FROM catalog_identity_attention WHERE status='open'").fetchone()
+        self.assertEqual("source_identity_conflict", attention[0])
+        self.assertTrue(attention[1])
+
     def test_catalog_alias_is_scoped_and_generic_mascot_is_not_imported(self):
         self.apply(self.capitals_record())
         sport_id = self.conn.execute("SELECT id FROM sports WHERE name='Ice hockey'").fetchone()[0]
