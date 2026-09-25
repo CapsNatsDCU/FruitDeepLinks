@@ -48,6 +48,7 @@ def _new_progress() -> dict:
         "current_step_status": None,
         "current_detail": None,
         "completed_steps": [],
+        "activities": [],
         "xtream_categories": [],
         "event_resolution": None,
         "catalog_ai": None,
@@ -60,6 +61,19 @@ refresh_status["progress"] = _new_progress()
 def _trim_completed_steps(steps: list, limit: int = 8) -> None:
     if len(steps) > limit:
         del steps[:-limit]
+
+
+def _activity(progress: dict, step: object, label: object) -> dict:
+    """Return the current run's durable, user-safe activity record."""
+    step_key = str(step or "")
+    activities = progress.setdefault("activities", [])
+    current = next((item for item in reversed(activities)
+                    if item.get("step") == step_key and item.get("status") == "running"), None)
+    if current is None:
+        current = {"step": step_key, "label": str(label or "Refresh activity"), "status": "running",
+                   "started_at": datetime.now(timezone.utc).isoformat()}
+        activities.append(current)
+    return current
 
 
 def _consume_progress_marker(line: str) -> bool:
@@ -90,6 +104,7 @@ def _consume_progress_marker(line: str) -> bool:
         progress["current_step_status"] = "running"
         progress["current_detail"] = None
         progress["total_steps"] = payload.get("total_steps") or progress.get("total_steps")
+        _activity(progress, payload.get("step"), payload.get("description"))
         refresh_status["current_step"] = (
             f"[{payload.get('step')}/{progress.get('total_steps')}] {payload.get('description')}"
         )
@@ -104,6 +119,11 @@ def _consume_progress_marker(line: str) -> bool:
             record["exit_code"] = payload.get("exit_code")
         progress["completed_steps"].append(record)
         _trim_completed_steps(progress["completed_steps"])
+        activity = _activity(progress, payload.get("step"), payload.get("description"))
+        activity["status"] = payload.get("status") or "ok"
+        activity["finished_at"] = datetime.now(timezone.utc).isoformat()
+        if payload.get("exit_code") is not None:
+            activity["exit_code"] = payload.get("exit_code")
         progress["current_step_status"] = payload.get("status")
         progress["current_detail"] = None
 
@@ -174,6 +194,10 @@ def _update_progress_detail(line: str) -> None:
     if stripped.startswith("[OK] Step "):
         return
     progress["current_detail"] = stripped
+    activities = progress.get("activities") or []
+    active = next((item for item in reversed(activities) if item.get("status") == "running"), None)
+    if active:
+        active["detail"] = stripped
 
 
 def run_refresh(skip_scrape: bool = False, source: str = "manual") -> None:

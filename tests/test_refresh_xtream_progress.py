@@ -67,6 +67,26 @@ class RefreshXtreamProgressTest(unittest.TestCase):
             "proposals": 3, "run_id": 91, "finished_at": "2026-09-25T15:00:16Z",
         })
 
+    def test_keeps_the_full_activity_timeline_and_latest_activity_detail(self):
+        refresh._consume_progress_marker(self.marker(
+            "step_start", step="import-one", total_steps=20, description="Importing first source",
+        ))
+        refresh._update_progress_detail("Found 42 events")
+        refresh._consume_progress_marker(self.marker(
+            "step_done", step="import-one", total_steps=20,
+            description="Importing first source", status="ok",
+        ))
+        refresh._consume_progress_marker(self.marker(
+            "step_start", step="import-two", total_steps=20, description="Importing second source",
+        ))
+
+        activities = refresh.refresh_status["progress"]["activities"]
+        self.assertEqual([(item["label"], item["status"]) for item in activities], [
+            ("Importing first source", "ok"),
+            ("Importing second source", "running"),
+        ])
+        self.assertEqual(activities[0]["detail"], "Found 42 events")
+
 
 if __name__ == "__main__":
     unittest.main()

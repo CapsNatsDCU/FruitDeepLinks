@@ -25,6 +25,8 @@
 .xtream-category-meta { display: block; color: var(--text-muted); font-size: 11px; margin-top: 2px; }
 .resolution-progress { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
 .resolution-progress h3 { margin: 0 0 7px; font-size: 13px; }
+.activity-progress { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+.activity-progress h3 { margin: 0 0 7px; font-size: 13px; }
 .refresh-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .file-list  { list-style: none; }
 .file-item  { padding: 7px 0; border-bottom: 1px solid var(--border-dim); display: flex; justify-content: space-between; align-items: center; }
@@ -179,7 +181,7 @@ function renderRefreshProgress(refresh) {
   const panel = document.getElementById('refresh-progress-panel');
   if (!panel) return;
   const progress = refresh.progress || {};
-  const completed = Array.isArray(progress.completed_steps) ? progress.completed_steps.slice().reverse() : [];
+  const activities = Array.isArray(progress.activities) ? progress.activities : [];
   const currentLabel = progress.current_step_label || (refresh.running ? 'Refresh starting' : 'No refresh running');
   const startedAt = progress.started_at ? new Date(progress.started_at) : null;
   const finishedAt = progress.finished_at ? new Date(progress.finished_at) : null;
@@ -202,13 +204,14 @@ function renderRefreshProgress(refresh) {
     const d = Math.max(0, (finishedAt - startedAt) / 1000);
     summaryBits.push('Duration: ' + (d >= 60 ? `${Math.floor(d/60)}m ${(d%60).toFixed(1)}s` : `${d.toFixed(1)}s`));
   }
-  const rows = completed.length
-    ? completed.map(item => {
-        const sc = item.status === 'ok' ? 'status-success' : item.status === 'failed_nonfatal' ? 'status-running' : 'status-failed';
-        const sl = item.status === 'ok' ? 'Done' : item.status === 'failed_nonfatal' ? 'Non-fatal' : 'Failed';
-        return `<div class="progress-item"><span class="progress-item-label">${_escapeHtml(item.label)}</span><span class="progress-item-status ${sc}">${sl}</span></div>`;
+  const rows = activities.length
+    ? activities.map(item => {
+        const sc = item.status === 'ok' ? 'status-success' : item.status === 'failed_nonfatal' || item.status === 'running' ? 'status-running' : 'status-failed';
+        const sl = item.status === 'ok' ? 'Done' : item.status === 'failed_nonfatal' ? 'Completed with a warning' : item.status === 'running' ? 'In progress' : 'Failed';
+        const detail = item.detail ? `<span class="xtream-category-meta">${_escapeHtml(item.detail)}</span>` : '';
+        return `<div class="progress-item"><span class="progress-item-label">${_escapeHtml(item.label)}${detail}</span><span class="progress-item-status ${sc}">${sl}</span></div>`;
       }).join('')
-    : '<div class="status-muted">No completed steps yet.</div>';
+    : '<div class="status-muted">No refresh activities have started yet.</div>';
 
   const titleLine = refresh.running ? `Refreshing: ${_escapeHtml(currentLabel)}`
     : ((refresh.last_status||progress.phase) === 'success' ? 'Refresh completed successfully'
@@ -264,11 +267,11 @@ function renderRefreshProgress(refresh) {
     <div class="progress-title ${statusClass}">${statusText}</div>
     <div class="progress-meta">${titleLine}${metaBits.length ? ' &bull; ' + metaBits.map(_escapeHtml).join(' &bull; ') : ''}</div>
     ${summaryBits.length ? `<div class="progress-detail">${_escapeHtml(summaryBits.join(' &bull; '))}</div>` : ''}
-    ${!refresh.running && (progress.current_detail||'') ? `<div class="progress-detail">${_escapeHtml(progress.current_detail)}</div>` : ''}
+    ${progress.current_detail ? `<div class="progress-detail">Latest update: ${_escapeHtml(progress.current_detail)}</div>` : ''}
+    <section class="activity-progress"><h3>Refresh activity</h3><div class="progress-list">${rows}</div></section>
     ${xtreamPanel}
     ${resolutionPanel}
-    ${catalogAiPanel}
-    <div class="progress-list">${rows}</div>`;
+    ${catalogAiPanel}`;
 }
 
 async function loadStatus() {
