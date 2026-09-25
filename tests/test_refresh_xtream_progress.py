@@ -41,6 +41,32 @@ class RefreshXtreamProgressTest(unittest.TestCase):
             "skipped_placeholder": 2, "detail": "Imported",
         })
 
+    def test_tracks_event_resolution_and_catalog_review_as_distinct_phases(self):
+        refresh._consume_progress_marker(self.marker(
+            "event_resolution_start", ai_mode="bounded", started_at="2026-09-25T15:00:00Z",
+        ))
+        refresh._consume_progress_marker(self.marker(
+            "event_resolution_done", status="complete", ai_mode="bounded", resolved=25,
+            resolved_without_ai=21, ai_interpretations_used=2, requests=3, cache_hits=1,
+            failures=1, budget_exhausted=4, finished_at="2026-09-25T15:00:07Z",
+        ))
+        refresh._consume_progress_marker(self.marker(
+            "catalog_ai_start", started_at="2026-09-25T15:00:08Z",
+        ))
+        refresh._consume_progress_marker(self.marker(
+            "catalog_ai_done", status="completed", proposals=3, run_id=91,
+            finished_at="2026-09-25T15:00:16Z",
+        ))
+
+        resolution = refresh.refresh_status["progress"]["event_resolution"]
+        self.assertEqual(resolution["resolved_without_ai"], 21)
+        self.assertEqual(resolution["ai_interpretations_used"], 2)
+        self.assertEqual(resolution["budget_exhausted"], 4)
+        self.assertEqual(refresh.refresh_status["progress"]["catalog_ai"], {
+            "status": "completed", "started_at": "2026-09-25T15:00:08Z",
+            "proposals": 3, "run_id": 91, "finished_at": "2026-09-25T15:00:16Z",
+        })
+
 
 if __name__ == "__main__":
     unittest.main()

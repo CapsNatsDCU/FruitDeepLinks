@@ -50,6 +50,14 @@ LANE_START_CH_DEFAULT = _get_int_env(
 )
 LANE_COUNT_DEFAULT = _get_int_env(["FRUIT_LANES", "PEACOCK_LANES"], 10)
 FAKE_CHANNELS = {"NBC Sports NOW", "NFL Channel", "Telemundo Deportes Ahora"}
+PROGRESS_PREFIX = "__FDL_PROGRESS__"
+
+
+def emit_progress(event: str, **fields: Any) -> None:
+    """Send concise, credential-free refresh updates to the dashboard."""
+    if os.getenv("FDL_REFRESH_PROGRESS") != "1":
+        return
+    print(f"{PROGRESS_PREFIX}{json.dumps({'event': event, **fields}, separators=(',', ':'))}", flush=True)
 
 
 @dataclass
@@ -116,11 +124,18 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int, *, canonical_a
     # changing their provider IDs or creating another event scheduler.
     try:
         from sports_metadata import applicable_rule, sync_legacy_events
-        sync_legacy_events(conn, ai_mode=canonical_ai_mode)
+        emit_progress("event_resolution_start", ai_mode=canonical_ai_mode,
+                      started_at=datetime.now(timezone.utc).isoformat())
+        resolution = sync_legacy_events(conn, ai_mode=canonical_ai_mode)
+        emit_progress("event_resolution_done", ai_mode=canonical_ai_mode, status="complete",
+                      finished_at=datetime.now(timezone.utc).isoformat(), **resolution)
     except Exception as exc:
         # Canonical enrichment must never silently alter legacy availability.
         # Continue with the existing rows, but leave an actionable diagnostic.
         print(f"Warning: canonical sports sync failed; using legacy fallback ({type(exc).__name__}: {exc})")
+        emit_progress("event_resolution_done", ai_mode=canonical_ai_mode, status="failed",
+                      finished_at=datetime.now(timezone.utc).isoformat(),
+                      detail="Canonical event resolution failed; using existing event data")
         applicable_rule = None
     
     # Load user preferences if filtering is available

@@ -23,6 +23,8 @@
 .xtream-progress { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
 .xtream-progress h3 { margin: 0 0 7px; font-size: 13px; }
 .xtream-category-meta { display: block; color: var(--text-muted); font-size: 11px; margin-top: 2px; }
+.resolution-progress { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+.resolution-progress h3 { margin: 0 0 7px; font-size: 13px; }
 .refresh-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .file-list  { list-style: none; }
 .file-item  { padding: 7px 0; border-bottom: 1px solid var(--border-dim); display: flex; justify-content: space-between; align-items: center; }
@@ -230,6 +232,33 @@ function renderRefreshProgress(refresh) {
     return `<div class="progress-item"><span class="progress-item-label"><strong>${_escapeHtml(item.category_name || 'Xtream')}</strong> <span class="status-muted">#${_escapeHtml(item.category_id)}</span>${detail ? `<span class="xtream-category-meta">${_escapeHtml(detail)}</span>` : ''}</span><span class="progress-item-status ${categoryClass(item.status)}">${categoryLabel(item.status)}</span></div>`;
   }).join('');
   const xtreamPanel = categories.length ? `<section class="xtream-progress"><h3>Xtream category import</h3><div class="progress-list">${categoryRows}</div></section>` : '';
+  const phaseClass = status => ({complete:'status-success',completed:'status-success',disabled:'status-muted',running:'status-running',failed:'status-failed',error:'status-failed'}[status] || 'status-muted');
+  const resolution = progress.event_resolution;
+  const resolutionPanel = resolution ? (() => {
+    const resolutionRows = [];
+    if (resolution.status === 'running') {
+      resolutionRows.push(['Resolving imported events', `Local AI ${resolution.ai_mode === 'disabled' ? 'disabled' : 'available for weak metadata'}`]);
+    } else {
+      if (resolution.resolved_without_ai != null) resolutionRows.push(['Resolved without AI', `${resolution.resolved_without_ai} events`]);
+      if (resolution.ai_interpretations_used != null) resolutionRows.push(['Local AI interpretations used', `${resolution.ai_interpretations_used} events`]);
+      if (resolution.requests != null || resolution.cache_hits != null) resolutionRows.push(['Local AI activity', `${resolution.requests || 0} requests · ${resolution.cache_hits || 0} cached`]);
+      if (resolution.budget_exhausted) resolutionRows.push(['Deferred to a later refresh', `${resolution.budget_exhausted} events`]);
+      if (resolution.failures) resolutionRows.push(['AI parsing failures', `${resolution.failures} events; deterministic data retained`]);
+      if (resolution.unchanged) resolutionRows.push(['Resolution state', 'No input changes since the previous refresh']);
+      if (resolution.detail) resolutionRows.push(['Status', resolution.detail]);
+    }
+    const rows = resolutionRows.length ? resolutionRows.map(([label, value]) => `<div class="progress-item"><span class="progress-item-label">${_escapeHtml(label)}</span><span class="progress-item-status">${_escapeHtml(value)}</span></div>`).join('') : '<div class="status-muted">No event-resolution details were reported.</div>';
+    const label = resolution.status === 'running' ? 'Resolving events' : (resolution.status === 'complete' ? 'Event resolution complete' : `Event resolution: ${resolution.status || 'unknown'}`);
+    return `<section class="resolution-progress"><h3>Event resolution <span class="${phaseClass(resolution.status)}">${_escapeHtml(label)}</span></h3><div class="progress-list">${rows}</div></section>`;
+  })() : '';
+  const catalogAi = progress.catalog_ai;
+  const catalogAiPanel = catalogAi ? (() => {
+    const status = catalogAi.status || 'unknown';
+    const detail = status === 'running' ? 'Reviewing canonical sports, leagues, teams, and events. Recommendations require your approval.'
+      : (status === 'completed' ? `${catalogAi.proposals || 0} recommendations queued for review.`
+      : (status === 'disabled' ? 'Catalog AI is disabled; no recommendations were requested.' : `Catalog review ${status}.`));
+    return `<section class="resolution-progress"><h3>Catalog recommendations <span class="${phaseClass(status)}">${_escapeHtml(status === 'running' ? 'Reviewing' : status)}</span></h3><div class="progress-detail">${_escapeHtml(detail)}</div></section>`;
+  })() : '';
 
   panel.innerHTML = `
     <div class="progress-title ${statusClass}">${statusText}</div>
@@ -237,6 +266,8 @@ function renderRefreshProgress(refresh) {
     ${summaryBits.length ? `<div class="progress-detail">${_escapeHtml(summaryBits.join(' &bull; '))}</div>` : ''}
     ${!refresh.running && (progress.current_detail||'') ? `<div class="progress-detail">${_escapeHtml(progress.current_detail)}</div>` : ''}
     ${xtreamPanel}
+    ${resolutionPanel}
+    ${catalogAiPanel}
     <div class="progress-list">${rows}</div>`;
 }
 

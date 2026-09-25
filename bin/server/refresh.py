@@ -49,6 +49,8 @@ def _new_progress() -> dict:
         "current_detail": None,
         "completed_steps": [],
         "xtream_categories": [],
+        "event_resolution": None,
+        "catalog_ai": None,
     }
 
 
@@ -135,6 +137,29 @@ def _consume_progress_marker(line: str) -> bool:
                         "started_at", "finished_at"):
                 if key in payload:
                     item[key] = payload[key]
+
+    elif event == "event_resolution_start":
+        progress["event_resolution"] = {
+            "status": "running", "ai_mode": payload.get("ai_mode"),
+            "started_at": payload.get("started_at"),
+        }
+
+    elif event == "event_resolution_done":
+        resolution = dict(progress.get("event_resolution") or {})
+        resolution.update({key: payload[key] for key in (
+            "status", "ai_mode", "finished_at", "resolved", "skipped", "eligible", "requests",
+            "cache_hits", "valid", "failures", "timeouts", "transport_failures", "budget_exhausted",
+            "resolved_without_ai", "ai_interpretations_used", "pending_local_ai", "unchanged", "detail",
+        ) if key in payload})
+        progress["event_resolution"] = resolution
+
+    elif event == "catalog_ai_start":
+        progress["catalog_ai"] = {"status": "running", "started_at": payload.get("started_at")}
+
+    elif event == "catalog_ai_done":
+        catalog_ai = dict(progress.get("catalog_ai") or {})
+        catalog_ai.update({key: payload[key] for key in ("status", "proposals", "run_id", "finished_at") if key in payload})
+        progress["catalog_ai"] = catalog_ai
 
     return True
 

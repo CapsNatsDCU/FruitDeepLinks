@@ -966,7 +966,8 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded") ->
     summary = {"eligible": 0, "cache_hits": 0, "requests": 0, "valid": 0,
                "low_confidence": 0, "failures": 0, "timeouts": 0,
                "transport_failures": 0, "validation_failures": 0,
-               "budget_exhausted": 0}
+               "budget_exhausted": 0, "resolved_without_ai": 0,
+               "ai_interpretations_used": 0}
     started = time.monotonic()
     for row in rows:
         # The production lane builder uses the default tuple row factory.
@@ -988,8 +989,12 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded") ->
         result = resolve_source_event(conn, source=source, source_event_id=str(data["id"]), data=data, commit=False, schema_ready=True,
                                       ai_budget=ai_budget, ai_mode=ai_mode,
                                       recheck_inferred_mapping=False)
-        resolved += int(bool(result.get("resolved"))); skipped += int(not result.get("resolved"))
+        was_resolved = bool(result.get("resolved"))
+        resolved += int(was_resolved); skipped += int(not was_resolved)
         status = result.get("local_ai", {}).get("status")
+        ai_used = bool(result.get("local_ai", {}).get("used"))
+        summary["ai_interpretations_used"] += int(ai_used)
+        summary["resolved_without_ai"] += int(was_resolved and not ai_used)
         if status not in {"not_needed", "disabled", "missing_title"}:
             summary["eligible"] += 1
         summary["cache_hits"] += int(status == "cache_hit")

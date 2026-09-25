@@ -910,7 +910,7 @@ def main(argv=None):
         run_step("7-xtream", total_steps, "Ingesting configured Xtream IPTV categories", [
             "python3", "-u", "xtream_ingest.py",
             "--db", str(DB_PATH),
-        ], allow_fail=True)
+        ], allow_fail=True, env={"FDL_REFRESH_PROGRESS": "1"})
 
     # Step 7a: Scrape Victory+ events
     # Victory+ uses guest authentication (no user credentials required)
@@ -1140,7 +1140,7 @@ def main(argv=None):
     if args.canonical_ai_mode == "unlimited":
         if not run_step("8d", total_steps, "Queuing AI Sports Catalog recommendations", [
             "python3", "catalog_ai_review.py", "--db", str(DB_PATH), "--source", "scheduled",
-        ]):
+        ], env={"FDL_REFRESH_PROGRESS": "1"}):
             return 1
 
 # Step 9: Build virtual lanes (Channels-style direct lanes)
@@ -1151,7 +1151,7 @@ def main(argv=None):
         "--db", str(DB_PATH),
         "--lanes", lanes,
         "--canonical-ai-mode", args.canonical_ai_mode,
-    ]):
+    ], env={"FDL_REFRESH_PROGRESS": "1"}):
         return 1
 
     # Step 10: Export direct channels (primary XML/M3U)

@@ -96,6 +96,8 @@ class XtreamError(RuntimeError):
 
 def emit_progress(event: str, **fields: Any) -> None:
     """Send credential-free, structured ingest progress to the refresh runner."""
+    if os.getenv("FDL_REFRESH_PROGRESS") != "1":
+        return
     print(
         f"{PROGRESS_PREFIX}{json.dumps({'event': event, **fields}, separators=(',', ':'))}",
         flush=True,
