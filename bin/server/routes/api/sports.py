@@ -14,7 +14,7 @@ from local_ai_event_parser import clear_cache as clear_local_ai_cache
 from sports_catalog import apply_catalog_records
 from catalog_workbench import (add_alias, apply_all as apply_all_catalog_proposals,
                                apply_proposal as apply_catalog_proposal, entity_state,
-                               cancel_run, merge_entities, run_ai_review, set_archived,
+                               cancel_run, merge_entities, merge_selected_entities, run_ai_review, set_archived,
                                set_entity_fields, undo_merge, edit_proposal, merge_details,
                                detach_merge_relationship, save_source_mapping,
                                effective_visibility, set_visibility_override,
@@ -126,7 +126,7 @@ def catalog_identities():
     aliases = (request.args.get("aliases") or "").strip()
     upcoming = (request.args.get("upcoming") or "").strip()
     needs_attention = (request.args.get("needs_attention") or "").strip().lower() in {"1", "true", "yes"}
-    include_hidden = (request.args.get("include_hidden") or "").strip().lower() in {"1", "true", "yes"} or bool(query) or "hidden" in visibility
+    include_hidden = (request.args.get("include_hidden") or "").strip().lower() in {"1", "true", "yes"} or "hidden" in visibility
     include_archived = (request.args.get("include_archived") or "").strip().lower() in {"1", "true", "yes"} or "archived" in visibility
     page = max(1, request.args.get("page", 1, type=int)); per_page = min(200, max(10, request.args.get("per_page", 50, type=int)))
     with get_conn() as conn:
@@ -306,6 +306,24 @@ def catalog_merge():
             merge_id = merge_entities(conn, entity_type=str(body.get("entity_type", "")), survivor_id=str(body.get("survivor_id", "")), source_id=str(body.get("source_id", ""))); conn.commit()
         except ValueError as exc: return jsonify({"ok": False, "error": str(exc)}), 400
     return jsonify({"ok": True, "merge_id": merge_id}), 201
+
+
+@bp.route("/api/sports/catalog/merges/bulk", methods=["POST"])
+def catalog_merge_selected():
+    """Merge a UI-checked set into one selected survivor in one transaction."""
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    body = request.get_json(silent=True) or {}
+    with get_conn() as conn:
+        _prepare_write(conn)
+        try:
+            merge_ids = merge_selected_entities(
+                conn, entity_type=str(body.get("entity_type", "")),
+                survivor_id=body.get("survivor_id"), source_ids=body.get("source_ids") or [],
+            )
+            conn.commit()
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "merge_ids": merge_ids, "merged": len(merge_ids)}), 201
 
 
 @bp.route("/api/sports/catalog/merges/<int:merge_id>/undo", methods=["POST"])

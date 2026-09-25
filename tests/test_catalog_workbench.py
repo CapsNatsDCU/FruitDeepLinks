@@ -9,6 +9,7 @@ from catalog_workbench import (_catalog_ai_payload, add_alias, add_proposal, app
                                entity_state, merge_details, merge_entities, save_source_mapping,
                                set_entity_fields, undo_merge, effective_visibility,
                                set_visibility_override, set_visibility_bulk, undo_visibility_batch)
+from catalog_workbench import merge_selected_entities
 from catalog_workbench import run_ai_review
 from sports_catalog import apply_catalog_records
 from sports_metadata import _upsert_named, ensure_schema, save_rule
@@ -43,6 +44,23 @@ class CatalogWorkbenchTests(unittest.TestCase):
         undo_merge(self.conn, merge_id)
         self.assertFalse(entity_state(self.conn, "team", self.second)["archived"])
         self.assertEqual(self.second, self.conn.execute("SELECT target_id FROM sports_rules").fetchone()[0])
+
+    def test_checked_team_merge_is_atomic_and_requires_one_scope(self):
+        apply_catalog_records(self.conn, [
+            {"entity_type": "team", "name": "North Stars Reserve", "sport": "Hockey", "league": "NHL", "source": "manual", "operator_confirmed": True},
+            {"entity_type": "team", "name": "North Stars AHL", "sport": "Hockey", "league": "AHL", "source": "manual", "operator_confirmed": True},
+        ], dry_run=False)
+        reserve = self.conn.execute("SELECT id FROM teams WHERE name='North Stars Reserve'").fetchone()[0]
+        ahl = self.conn.execute("SELECT id FROM teams WHERE name='North Stars AHL'").fetchone()[0]
+        with self.assertRaisesRegex(ValueError, "same sport and league"):
+            merge_selected_entities(self.conn, entity_type="team", survivor_id=self.first,
+                                    source_ids=[self.second, ahl])
+        self.assertFalse(entity_state(self.conn, "team", self.second)["archived"])
+        merge_ids = merge_selected_entities(self.conn, entity_type="team", survivor_id=self.first,
+                                            source_ids=[self.second, reserve])
+        self.assertEqual(2, len(merge_ids))
+        self.assertTrue(entity_state(self.conn, "team", self.second)["archived"])
+        self.assertTrue(entity_state(self.conn, "team", reserve)["archived"])
 
     def test_apply_all_accepts_safe_alias_and_marks_bad_merge_conflict(self):
         add_proposal(self.conn, run_id=None, entity_type="team", action="alias", target_id=self.first,

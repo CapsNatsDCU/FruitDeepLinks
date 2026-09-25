@@ -403,6 +403,15 @@ def merge_entities(conn: sqlite3.Connection, *, entity_type: str, survivor_id: s
     if entity_type not in ENTITY_TYPES or survivor_id == source_id: raise ValueError("same-type distinct entities required")
     if not _row(conn, entity_type, survivor_id) or not _row(conn, entity_type, source_id): raise ValueError("merge entity not found")
     if entity_state(conn, entity_type, survivor_id)["archived"] or entity_state(conn, entity_type, source_id)["archived"]: raise ValueError("archived entities cannot be merged")
+    # A team identity is meaningful only within its sport/league scope.  Moving
+    # an MLB team into an NCAA or USL team would silently make later resolver
+    # matches incorrect, so reject it at the write boundary as well as in the
+    # multi-select UI.
+    if entity_type == "team":
+        survivor_scope = conn.execute("SELECT sport_id,league_id FROM teams WHERE id=?", (survivor_id,)).fetchone()
+        source_scope = conn.execute("SELECT sport_id,league_id FROM teams WHERE id=?", (source_id,)).fetchone()
+        if not survivor_scope or not source_scope or tuple(survivor_scope) != tuple(source_scope):
+            raise ValueError("teams must be in the same sport and league to merge")
     # Do not smuggle child merges into a parent merge.  Identically named
     # descendants are identity conflicts which need their own operator choice.
     if entity_type == "sport":
@@ -439,6 +448,30 @@ def merge_entities(conn: sqlite3.Connection, *, entity_type: str, survivor_id: s
                           (entity_type, survivor_id, source_id, json.dumps(snapshot), utc_now()))
     merge_id = int(cursor.lastrowid); _audit(conn, "merge", entity_type, source_id, {"merge_id": merge_id, "survivor_id": survivor_id})
     return merge_id
+
+
+def merge_selected_entities(conn: sqlite3.Connection, *, entity_type: str, survivor_id: Any,
+                            source_ids: Iterable[Any]) -> list[int]:
+    """Merge a checked set of same-type identities into one visible survivor.
+
+    The individual merge snapshots remain intact, so each merged record can
+    still be undone independently.  A savepoint makes the checked-set action
+    atomic: if any selected identity is invalid, none of the selection moves.
+    """
+    survivor = str(survivor_id or "").strip()
+    sources = list(dict.fromkeys(str(value or "").strip() for value in source_ids if str(value or "").strip()))
+    if entity_type not in ENTITY_TYPES or not survivor or not sources or survivor in sources:
+        raise ValueError("select two or more same-type identities and choose one survivor")
+    conn.execute("SAVEPOINT merge_selected")
+    try:
+        merge_ids = [merge_entities(conn, entity_type=entity_type, survivor_id=survivor, source_id=source)
+                     for source in sources]
+    except Exception:
+        conn.execute("ROLLBACK TO merge_selected")
+        conn.execute("RELEASE merge_selected")
+        raise
+    conn.execute("RELEASE merge_selected")
+    return merge_ids
 
 
 def undo_merge(conn: sqlite3.Connection, merge_id: int) -> None:
