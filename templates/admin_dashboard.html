@@ -219,7 +219,7 @@ function renderRefreshProgress(refresh) {
     : ((refresh.last_status||progress.phase) ? `Refresh finished: ${refresh.last_status||progress.phase}` : 'No refresh running'));
   const categories = Array.isArray(progress.xtream_categories) ? progress.xtream_categories : [];
   const categoryClass = status => ({complete:'status-success',failed:'status-failed',unavailable:'status-failed',fetching:'status-running',fetched:'status-running',enriching:'status-running',normalizing:'status-running',queued:'status-muted'}[status] || 'status-muted');
-  const categoryLabel = status => ({complete:'Complete',failed:'Failed',unavailable:'Unavailable',fetching:'Fetching',fetched:'Fetched',enriching:'Checking EPG',normalizing:'Deterministic normalization',queued:'Queued'}[status] || 'Queued');
+  const categoryLabel = status => ({complete:'Complete',failed:'Failed',unavailable:'Unavailable',fetching:'Fetching',fetched:'Fetched',enriching:'Checking EPG',normalizing:'Normalizing imported metadata',queued:'Queued'}[status] || 'Queued');
   const categoryStages = ['queued', 'fetching', 'fetched', 'enriching', 'normalizing', 'complete', 'unavailable', 'failed'];
   const categoryCounts = categories.reduce((counts, item) => {
     const status = categoryStages.includes(item.status) ? item.status : 'queued';
@@ -266,7 +266,7 @@ function renderRefreshProgress(refresh) {
     const rows = resolutionRows.length ? resolutionRows.map(([label, value]) => `<div class="progress-item"><span class="progress-item-label">${_escapeHtml(label)}</span><span class="progress-item-status">${_escapeHtml(value)}</span></div>`).join('') : '<div class="status-muted">No event-resolution details were reported.</div>';
     const label = resolution.status === 'running' ? 'Resolving events' : (resolution.status === 'complete' ? 'Event resolution complete' : `Event resolution: ${resolution.status || 'unknown'}`);
     return `<section class="resolution-progress"><h3>Event resolution <span class="${phaseClass(resolution.status)}">${_escapeHtml(label)}</span></h3><div class="progress-list">${rows}</div></section>`;
-  })() : '';
+  })() : (categories.length ? `<section class="resolution-progress"><h3>Event resolution <span class="status-muted">Queued</span></h3><div class="progress-list"><div class="progress-item"><span class="progress-item-label">Deterministic event pass</span><span class="progress-item-status">Queued after category import</span></div><div class="progress-item"><span class="progress-item-label">Optional local-AI pass</span><span class="progress-item-status">Queued after deterministic event pass</span></div></div></section>` : '');
   const catalogAi = progress.catalog_ai;
   const catalogAiPanel = catalogAi ? (() => {
     const status = catalogAi.status || 'unknown';
