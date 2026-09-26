@@ -143,6 +143,20 @@ class SportsGetSafetyTests(unittest.TestCase):
         self.assertTrue(response.get_json()["items"])
         self.assertEqual([], response.get_json()["saved_views"])
 
+    def test_catalog_pages_expose_entries_beyond_first_fifty(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany(
+                "INSERT INTO sports(id,name,normalized_name,created_utc,updated_utc) VALUES(?,?,?,?,?)",
+                [(f"paging-{index:03d}", f"Paging Sport {index:03d}", f"paging sport {index:03d}", "now", "now")
+                 for index in range(53)],
+            )
+        first = self.client.get("/api/sports/catalog/identities?q=Paging&types=sport&page=1&per_page=50").get_json()
+        second = self.client.get("/api/sports/catalog/identities?q=Paging&types=sport&page=2&per_page=50").get_json()
+        past_end = self.client.get("/api/sports/catalog/identities?q=Paging&types=sport&page=99&per_page=50").get_json()
+        self.assertEqual((53, 50, 1), (first["total"], len(first["items"]), first["page"]))
+        self.assertEqual((53, 3, 2), (second["total"], len(second["items"]), second["page"]))
+        self.assertEqual([item["id"] for item in second["items"]], [item["id"] for item in past_end["items"]])
+
 
 if __name__ == "__main__":
     unittest.main()

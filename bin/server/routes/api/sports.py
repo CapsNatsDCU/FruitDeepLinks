@@ -160,6 +160,7 @@ def catalog_identities():
         hidden_count = sum(1 for row in _catalog_identity_rows(conn) if row["effective_visibility"]["visibility"] == "hidden")
         saved_views = ([dict(row) for row in conn.execute("SELECT id,name,filters_json,created_utc,updated_utc FROM catalog_saved_views ORDER BY name")]
                        if "catalog_saved_views" in {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")} else [])
+    page = min(page, max(1, (len(rows) + per_page - 1) // per_page))
     start = (page - 1) * per_page
     return jsonify({"ok": True, "items": rows[start:start + per_page], "page": page, "per_page": per_page,
                     "total": len(rows), "hidden_count": hidden_count, "catalog_count": total_before_hidden,
