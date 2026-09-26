@@ -219,22 +219,16 @@ function renderRefreshProgress(refresh) {
   const categories = Array.isArray(progress.xtream_categories) ? progress.xtream_categories : [];
   const categoryClass = status => ({complete:'status-success',failed:'status-failed',unavailable:'status-failed',fetching:'status-running',fetched:'status-running',enriching:'status-running',normalizing:'status-running',queued:'status-muted'}[status] || 'status-muted');
   const categoryLabel = status => ({complete:'Complete',failed:'Failed',unavailable:'Unavailable',fetching:'Fetching',fetched:'Fetched',enriching:'Checking EPG',normalizing:'Normalizing',queued:'Queued'}[status] || 'Queued');
-  const categoryRows = categories.map(item => {
-    const started = item.started_at ? new Date(item.started_at) : null;
-    const finished = item.finished_at ? new Date(item.finished_at) : null;
-    const elapsed = started && !Number.isNaN(started) ? Math.max(0, ((finished || new Date()) - started) / 1000) : null;
-    const timing = elapsed == null ? '' : (elapsed >= 60 ? `${Math.floor(elapsed/60)}m ${Math.floor(elapsed%60)}s` : `${Math.floor(elapsed)}s`);
-    const detail = [
-      item.streams_fetched != null ? `${item.streams_fetched} streams` : '',
-      item.events_recognized != null ? `${item.events_recognized} events recognized` : '',
-      item.skipped_placeholder ? `${item.skipped_placeholder} placeholders skipped` : '',
-      item.skipped_unparseable ? `${item.skipped_unparseable} unparseable` : '',
-      timing ? `${finished ? 'finished in' : 'elapsed'} ${timing}` : '',
-      item.detail || ''
-    ].filter(Boolean).join(' · ');
-    return `<div class="progress-item"><span class="progress-item-label"><strong>${_escapeHtml(item.category_name || 'Xtream')}</strong> <span class="status-muted">#${_escapeHtml(item.category_id)}</span>${detail ? `<span class="xtream-category-meta">${_escapeHtml(detail)}</span>` : ''}</span><span class="progress-item-status ${categoryClass(item.status)}">${categoryLabel(item.status)}</span></div>`;
-  }).join('');
-  const xtreamPanel = categories.length ? `<section class="xtream-progress"><h3>Xtream category import</h3><div class="progress-list">${categoryRows}</div></section>` : '';
+  const categoryStages = ['queued', 'fetching', 'fetched', 'enriching', 'normalizing', 'complete', 'unavailable', 'failed'];
+  const categoryCounts = categories.reduce((counts, item) => {
+    const status = categoryStages.includes(item.status) ? item.status : 'queued';
+    counts[status] = (counts[status] || 0) + 1;
+    return counts;
+  }, {});
+  const categoryRows = categoryStages.map(status =>
+    `<div class="progress-item"><span class="progress-item-label">${categoryLabel(status)}</span><span class="progress-item-status ${categoryClass(status)}">${categoryCounts[status] || 0} categories</span></div>`
+  ).join('');
+  const xtreamPanel = categories.length ? `<section class="xtream-progress"><h3>Xtream category import</h3><div class="progress-detail">${categories.length} configured categories</div><div class="progress-list">${categoryRows}</div></section>` : '';
   const phaseClass = status => ({complete:'status-success',completed:'status-success',disabled:'status-muted',running:'status-running',failed:'status-failed',error:'status-failed'}[status] || 'status-muted');
   const resolution = progress.event_resolution;
   const resolutionPanel = resolution ? (() => {
