@@ -218,7 +218,7 @@ function renderRefreshProgress(refresh) {
     : ((refresh.last_status||progress.phase) ? `Refresh finished: ${refresh.last_status||progress.phase}` : 'No refresh running'));
   const categories = Array.isArray(progress.xtream_categories) ? progress.xtream_categories : [];
   const categoryClass = status => ({complete:'status-success',failed:'status-failed',unavailable:'status-failed',fetching:'status-running',fetched:'status-running',enriching:'status-running',normalizing:'status-running',queued:'status-muted'}[status] || 'status-muted');
-  const categoryLabel = status => ({complete:'Complete',failed:'Failed',unavailable:'Unavailable',fetching:'Fetching',fetched:'Fetched',enriching:'Checking EPG',normalizing:'Normalizing',queued:'Queued'}[status] || 'Queued');
+  const categoryLabel = status => ({complete:'Complete',failed:'Failed',unavailable:'Unavailable',fetching:'Fetching',fetched:'Fetched',enriching:'Checking EPG',normalizing:'Deterministic normalization',queued:'Queued'}[status] || 'Queued');
   const categoryStages = ['queued', 'fetching', 'fetched', 'enriching', 'normalizing', 'complete', 'unavailable', 'failed'];
   const categoryCounts = categories.reduce((counts, item) => {
     const status = categoryStages.includes(item.status) ? item.status : 'queued';
@@ -233,17 +233,35 @@ function renderRefreshProgress(refresh) {
   const resolution = progress.event_resolution;
   const resolutionPanel = resolution ? (() => {
     const resolutionRows = [];
-    if (resolution.status === 'running') {
-      resolutionRows.push(['Resolving imported events', `Local AI ${resolution.ai_mode === 'disabled' ? 'disabled' : 'available for weak metadata'}`]);
-    } else {
-      if (resolution.resolved_without_ai != null) resolutionRows.push(['Resolved without AI', `${resolution.resolved_without_ai} events`]);
-      if (resolution.ai_interpretations_used != null) resolutionRows.push(['Local AI interpretations used', `${resolution.ai_interpretations_used} events`]);
-      if (resolution.requests != null || resolution.cache_hits != null) resolutionRows.push(['Local AI activity', `${resolution.requests || 0} requests · ${resolution.cache_hits || 0} cached`]);
-      if (resolution.budget_exhausted) resolutionRows.push(['Deferred to a later refresh', `${resolution.budget_exhausted} events`]);
-      if (resolution.failures) resolutionRows.push(['AI parsing failures', `${resolution.failures} events; deterministic data retained`]);
-      if (resolution.unchanged) resolutionRows.push(['Resolution state', 'No input changes since the previous refresh']);
-      if (resolution.detail) resolutionRows.push(['Status', resolution.detail]);
+    const passes = resolution.passes || {};
+    const deterministic = passes.deterministic;
+    const aiPass = passes.ai;
+    if (deterministic) {
+      const deterministicValue = deterministic.status === 'running'
+        ? `Checking ${deterministic.records ?? 'imported'} events without AI`
+        : (deterministic.unchanged ? 'No input changes since the previous refresh'
+        : `${deterministic.resolved || 0} resolved · ${deterministic.skipped || 0} skipped`);
+      resolutionRows.push(['Deterministic pass', deterministicValue]);
     }
+    if (aiPass) {
+      const aiValue = aiPass.status === 'disabled' ? 'Disabled for this refresh'
+        : (aiPass.status === 'running' ? `Reviewing weak metadata${aiPass.records != null ? ` across ${aiPass.records} events` : ''}`
+        : `${aiPass.ai_interpretations_used || 0} interpretations · ${aiPass.requests || 0} requests · ${aiPass.cache_hits || 0} cached`);
+      resolutionRows.push(['Optional local-AI pass', aiValue]);
+      if (aiPass.budget_exhausted) resolutionRows.push(['Deferred to a later refresh', `${aiPass.budget_exhausted} events`]);
+      if (aiPass.failures) resolutionRows.push(['AI parsing failures', `${aiPass.failures} events; deterministic results retained`]);
+    }
+    // Compatibility for a refresh launched before pass-level progress existed.
+    if (!deterministic && !aiPass) {
+      if (resolution.status === 'running') resolutionRows.push(['Deterministic pass', 'Checking imported events']);
+      else {
+        if (resolution.resolved_without_ai != null) resolutionRows.push(['Deterministic pass', `${resolution.resolved_without_ai} resolved without AI`]);
+        if (resolution.ai_interpretations_used != null) resolutionRows.push(['Optional local-AI pass', `${resolution.ai_interpretations_used} interpretations used`]);
+        if (resolution.requests != null || resolution.cache_hits != null) resolutionRows.push(['Local AI activity', `${resolution.requests || 0} requests · ${resolution.cache_hits || 0} cached`]);
+        if (resolution.unchanged) resolutionRows.push(['Resolution state', 'No input changes since the previous refresh']);
+      }
+    }
+    if (resolution.detail) resolutionRows.push(['Status', resolution.detail]);
     const rows = resolutionRows.length ? resolutionRows.map(([label, value]) => `<div class="progress-item"><span class="progress-item-label">${_escapeHtml(label)}</span><span class="progress-item-status">${_escapeHtml(value)}</span></div>`).join('') : '<div class="status-muted">No event-resolution details were reported.</div>';
     const label = resolution.status === 'running' ? 'Resolving events' : (resolution.status === 'complete' ? 'Event resolution complete' : `Event resolution: ${resolution.status || 'unknown'}`);
     return `<section class="resolution-progress"><h3>Event resolution <span class="${phaseClass(resolution.status)}">${_escapeHtml(label)}</span></h3><div class="progress-list">${rows}</div></section>`;

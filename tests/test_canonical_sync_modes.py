@@ -85,6 +85,23 @@ class CanonicalSyncModesTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_deterministic_and_ai_work_are_reported_as_separate_passes(self):
+        conn = self.build(1)
+        reports = []
+        try:
+            with patch("local_ai_event_parser.urlopen", return_value=_Response()):
+                summary = sync_legacy_events(
+                    conn, ai_mode="bounded", progress_callback=lambda **payload: reports.append(payload),
+                )
+            self.assertEqual("deterministic", reports[0]["pass_name"])
+            self.assertEqual("running", reports[0]["status"])
+            self.assertEqual("ai", reports[-1]["pass_name"])
+            self.assertEqual("complete", reports[-1]["status"])
+            self.assertEqual(1, summary["deterministic_pass"]["resolved"])
+            self.assertEqual(1, summary["ai_pass"]["requests"])
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

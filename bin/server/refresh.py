@@ -161,8 +161,24 @@ def _consume_progress_marker(line: str) -> bool:
     elif event == "event_resolution_start":
         progress["event_resolution"] = {
             "status": "running", "ai_mode": payload.get("ai_mode"),
-            "started_at": payload.get("started_at"),
+            "started_at": payload.get("started_at"), "passes": {},
         }
+
+    elif event == "event_resolution_pass":
+        resolution = dict(progress.get("event_resolution") or {})
+        passes = dict(resolution.get("passes") or {})
+        pass_name = str(payload.get("pass_name") or "")
+        if pass_name in {"deterministic", "ai"}:
+            passes[pass_name] = {
+                key: payload[key] for key in (
+                    "status", "ai_mode", "records", "resolved", "skipped", "unchanged",
+                    "eligible", "requests", "cache_hits", "valid", "failures", "timeouts",
+                    "transport_failures", "validation_failures", "budget_exhausted",
+                    "resolved_without_ai", "ai_interpretations_used", "pending_local_ai", "duration",
+                ) if key in payload
+            }
+            resolution["passes"] = passes
+            progress["event_resolution"] = resolution
 
     elif event == "event_resolution_done":
         resolution = dict(progress.get("event_resolution") or {})

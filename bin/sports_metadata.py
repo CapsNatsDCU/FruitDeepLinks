@@ -961,7 +961,8 @@ def _legacy_sync_fingerprint(conn: sqlite3.Connection) -> str:
     return "|".join(map(str, row))
 
 
-def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded") -> dict[str, int]:
+def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
+                       progress_callback=None, _pass: str | None = None) -> dict[str, Any]:
     """Incrementally materialize canonical records during refresh/import only.
 
     ``unlimited`` is represented by a ``None`` budget, never a fabricated
@@ -970,9 +971,33 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded") ->
     """
     if ai_mode not in {"disabled", "bounded", "unlimited"}:
         raise ValueError("ai_mode must be disabled, bounded, or unlimited")
+    # Keep the deterministic catalog/validation work observable and complete
+    # before an optional model is allowed to see the unresolved remainder.
+    # The second pass repeats deterministic guards by design; AI never becomes
+    # scheduling authority and it receives only records that still need help.
+    if _pass is None:
+        deterministic = sync_legacy_events(
+            conn, ai_mode="disabled", progress_callback=progress_callback,
+            _pass="deterministic",
+        )
+        if ai_mode == "disabled":
+            ai_pass = {"requests": 0, "cache_hits": 0, "ai_interpretations_used": 0}
+            if progress_callback:
+                progress_callback(pass_name="ai", status="disabled", **ai_pass)
+            return {**deterministic, "deterministic_pass": deterministic, "ai_pass": ai_pass}
+        ai_pass = sync_legacy_events(
+            conn, ai_mode=ai_mode, progress_callback=progress_callback, _pass="ai",
+        )
+        return {**ai_pass, "deterministic_pass": deterministic, "ai_pass": ai_pass}
     ensure_schema(conn)
+    if progress_callback:
+        progress_callback(pass_name=_pass, status="running", ai_mode=ai_mode)
     columns = {r[1] for r in conn.execute("PRAGMA table_info(events)")}
-    if not {"id", "start_utc"}.issubset(columns): return {"resolved": 0, "skipped": 0}
+    if not {"id", "start_utc"}.issubset(columns):
+        result = {"resolved": 0, "skipped": 0, "status": "complete", "pass_name": _pass}
+        if progress_callback:
+            progress_callback(**result)
+        return result
     try:
         from local_ai_event_parser import PARSER_VERSION, load_config
         ai_config = load_config(conn)
@@ -986,9 +1011,14 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded") ->
     fingerprint = f"{_legacy_sync_fingerprint(conn)}|{ai_state}|{ai_mode}"
     state = conn.execute("SELECT value FROM sports_metadata_state WHERE key='legacy_events_fingerprint'").fetchone()
     if state and state[0] == fingerprint:
-        return {"resolved": 0, "skipped": 0, "unchanged": 1}
+        result = {"resolved": 0, "skipped": 0, "unchanged": 1, "status": "complete", "pass_name": _pass}
+        if progress_callback:
+            progress_callback(**result)
+        return result
     cursor = conn.execute("SELECT * FROM events WHERE start_utc IS NOT NULL")
     rows = cursor.fetchall()
+    if progress_callback:
+        progress_callback(pass_name=_pass, status="running", ai_mode=ai_mode, records=len(rows))
     # One bounded budget covers this incremental sync.  Cache hits are free,
     # while a large provider catalog cannot cause an unbounded model walk.
     ai_budget = (None if ai_mode == "unlimited" else
@@ -1049,7 +1079,11 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded") ->
              ai_mode, summary["eligible"], summary["cache_hits"], summary["requests"], summary["valid"],
              summary["low_confidence"], summary["failures"], summary["duration"], summary["timeouts"],
              summary["transport_failures"], summary["validation_failures"], summary["budget_exhausted"])
-    return {"resolved": resolved, "skipped": skipped, "pending_local_ai": pending_ai, "unchanged": 0, **summary}
+    result = {"resolved": resolved, "skipped": skipped, "pending_local_ai": pending_ai,
+              "unchanged": 0, "status": "complete", "pass_name": _pass, **summary}
+    if progress_callback:
+        progress_callback(**result)
+    return result
 
 
 def save_rule(conn: sqlite3.Connection, *, target_type: str, target_id: str, policy: str,

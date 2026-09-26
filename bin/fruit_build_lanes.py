@@ -126,7 +126,10 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int, *, canonical_a
         from sports_metadata import applicable_rule, sync_legacy_events
         emit_progress("event_resolution_start", ai_mode=canonical_ai_mode,
                       started_at=datetime.now(timezone.utc).isoformat())
-        resolution = sync_legacy_events(conn, ai_mode=canonical_ai_mode)
+        resolution = sync_legacy_events(
+            conn, ai_mode=canonical_ai_mode,
+            progress_callback=lambda **payload: emit_progress("event_resolution_pass", **payload),
+        )
         emit_progress("event_resolution_done", ai_mode=canonical_ai_mode, status="complete",
                       finished_at=datetime.now(timezone.utc).isoformat(), **resolution)
     except Exception as exc:

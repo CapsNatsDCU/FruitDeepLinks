@@ -67,6 +67,23 @@ class RefreshXtreamProgressTest(unittest.TestCase):
             "proposals": 3, "run_id": 91, "finished_at": "2026-09-25T15:00:16Z",
         })
 
+    def test_tracks_deterministic_and_ai_resolution_passes_separately(self):
+        refresh._consume_progress_marker(self.marker(
+            "event_resolution_start", ai_mode="bounded", started_at="2026-09-25T15:00:00Z",
+        ))
+        refresh._consume_progress_marker(self.marker(
+            "event_resolution_pass", pass_name="deterministic", status="complete", records=25,
+            resolved=23, skipped=2, resolved_without_ai=23,
+        ))
+        refresh._consume_progress_marker(self.marker(
+            "event_resolution_pass", pass_name="ai", status="complete", records=25,
+            requests=2, cache_hits=1, ai_interpretations_used=2,
+        ))
+        passes = refresh.refresh_status["progress"]["event_resolution"]["passes"]
+        self.assertEqual(23, passes["deterministic"]["resolved"])
+        self.assertEqual((2, 1, 2), (passes["ai"]["requests"], passes["ai"]["cache_hits"],
+                                       passes["ai"]["ai_interpretations_used"]))
+
     def test_keeps_the_full_activity_timeline_and_latest_activity_detail(self):
         refresh._consume_progress_marker(self.marker(
             "step_start", step="import-one", total_steps=20, description="Importing first source",
