@@ -65,6 +65,7 @@
       <button class="btn" onclick="triggerRefresh(false)" id="btn-refresh">Full Refresh</button>
       <button class="btn btn-secondary" onclick="triggerRefresh(true)" id="btn-refresh-skip">Skip Scrape</button>
     </div>
+    <div id="local-ai-failures" style="margin-top:12px"></div>
 
     <details class="advanced-section" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
       <summary>Advanced operations</summary>
@@ -286,6 +287,27 @@ function renderRefreshProgress(refresh) {
     ${catalogAiPanel}`;
 }
 
+function renderLocalAiFailures(failures, refreshRunning) {
+  const panel = document.getElementById('local-ai-failures');
+  if (!panel) return;
+  const items = Array.isArray(failures) ? failures : [];
+  const active = items.filter(item => !item.resolved);
+  if (!items.length) {
+    panel.innerHTML = '<div class="status-muted" style="font-size:12px">No local-AI parsing failures recorded.</div>';
+    return;
+  }
+  const rows = items.map(item => {
+    const input = item.input || {};
+    const label = input.title || 'Untitled provider item';
+    const state = item.resolved ? 'Recovered on automatic retry' : `Still failed: ${item.failure_kind || item.status}`;
+    const statusClass = item.resolved ? 'status-success' : 'status-failed';
+    const sample = JSON.stringify(input, null, 2);
+    return `<details class="progress-item"><summary class="progress-item-label"><strong>${_escapeHtml(label)}</strong> <span class="status-muted">(${_escapeHtml(item.provider || 'source')})</span><br><span class="small ${statusClass}">${_escapeHtml(state)} · ${Number(item.failure_count || 1)} attempt${Number(item.failure_count || 1) === 1 ? '' : 's'}</span></summary><pre class="progress-detail" style="margin:8px 0 0">${_escapeHtml(sample)}</pre></details>`;
+  }).join('');
+  const retry = active.length ? `<button class="btn btn-secondary" onclick="retryLocalAiFailures()" ${refreshRunning ? 'disabled' : ''}>Retry ${active.length} failed AI item${active.length === 1 ? '' : 's'}</button>` : '';
+  panel.innerHTML = `<section class="resolution-progress"><h3>Local-AI failure log</h3><div class="progress-detail">Each failed item is retried once automatically. Only sanitized parser input is retained.</div><div class="refresh-actions" style="margin-top:8px">${retry}</div><div class="progress-list" style="margin-top:8px">${rows}</div></section>`;
+}
+
 async function loadStatus() {
   try {
     const data = await fetch('/api/status').then(r => r.json());
@@ -322,6 +344,7 @@ async function loadStatus() {
     const btnRef = document.getElementById('btn-refresh');
     const btnSkip = document.getElementById('btn-refresh-skip');
     renderRefreshProgress(refresh);
+    renderLocalAiFailures(data.local_ai_failures, refresh.running);
     if (refresh.running) {
       btnRef.disabled = btnSkip.disabled = true;
       document.getElementById('refresh-status').innerHTML = '';
@@ -371,6 +394,17 @@ async function triggerRefresh(skipScrape) {
       const d = await res.json().catch(()=>({}));
       showToast(d.error || 'Failed to start refresh', 'error');
     }
+  } catch (err) {
+    showToast('Error: ' + err.message, 'error');
+  }
+}
+
+async function retryLocalAiFailures() {
+  try {
+    const res = await fetch('/api/local-ai/failures/retry', {method: 'POST'});
+    if (!res.ok) { const data = await res.json().catch(() => ({})); showToast(data.error || 'Could not retry AI failures', 'error'); return; }
+    showToast('Retrying logged AI failures', 'success');
+    loadStatus();
   } catch (err) {
     showToast('Error: ' + err.message, 'error');
   }

@@ -26,6 +26,7 @@ _ALLOWED_KEYS = {"event_name", "sports_related", "program_type", "sport", "leagu
 _ALLOWED_ROLES = {"home", "away", "participant"}
 _URL = re.compile(r"\b(?:https?|rtsp)://\S+", re.IGNORECASE)
 _SENSITIVE_ASSIGNMENT = re.compile(r"\b(username|user|password|pass|token|cookie|authorization)\s*[:=]\s*[^\s,;]+", re.IGNORECASE)
+RETRYABLE_FAILURE_STATUSES = {"transport_failure", "invalid_schema", "invalid_confidence", "invalid_participants"}
 
 
 @dataclass(frozen=True)
@@ -87,7 +88,32 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     );
     CREATE INDEX IF NOT EXISTS idx_local_ai_event_cache_source
       ON local_ai_event_cache(provider, source_event_id, updated_utc);
+    CREATE TABLE IF NOT EXISTS local_ai_failure_log (
+      cache_key TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      source_event_id TEXT NOT NULL,
+      model TEXT NOT NULL,
+      parser_version TEXT NOT NULL,
+      input_json TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL,
+      failure_kind TEXT,
+      first_failed_utc TEXT NOT NULL,
+      last_failed_utc TEXT NOT NULL,
+      failure_count INTEGER NOT NULL DEFAULT 1,
+      resolved_utc TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_local_ai_failure_log_active
+      ON local_ai_failure_log(resolved_utc, last_failed_utc);
     """)
+    # Preserve retryability for failures cached before the review log existed.
+    # Historical rows deliberately have no input sample because raw provider
+    # payloads were never stored as diagnostic data.
+    conn.execute(
+        "INSERT OR IGNORE INTO local_ai_failure_log(cache_key,provider,source_event_id,model,parser_version,input_json,status,failure_kind,first_failed_utc,last_failed_utc,failure_count,resolved_utc) "
+        "SELECT cache_key,provider,source_event_id,model,parser_version,'{}',validation_status,failure_kind,parsed_utc,updated_utc,1,NULL "
+        "FROM local_ai_event_cache WHERE validation_status IN (?,?,?,?)",
+        tuple(sorted(RETRYABLE_FAILURE_STATUSES)),
+    )
 
 
 def _text(value: Any, maximum: int) -> str | None:
@@ -254,6 +280,62 @@ def _store(conn: sqlite3.Connection, *, cache_key: str, provider: str, source_ev
     )
 
 
+def _record_failure(conn: sqlite3.Connection, *, cache_key: str, provider: str, source_event_id: str,
+                    config: LocalAIConfig, payload: Mapping[str, Any], status: str,
+                    failure_kind: str | None, now: str) -> None:
+    """Persist a credential-safe, operator-reviewable AI failure record."""
+    conn.execute(
+        "INSERT INTO local_ai_failure_log(cache_key,provider,source_event_id,model,parser_version,input_json,status,failure_kind,first_failed_utc,last_failed_utc,failure_count,resolved_utc) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(cache_key) DO UPDATE SET "
+        "input_json=excluded.input_json,status=excluded.status,failure_kind=excluded.failure_kind,"
+        "last_failed_utc=excluded.last_failed_utc,failure_count=local_ai_failure_log.failure_count+1,resolved_utc=NULL",
+        (cache_key, provider, source_event_id, config.model, PARSER_VERSION,
+         json.dumps(dict(payload), separators=(",", ":")), status, failure_kind, now, now, 1),
+    )
+
+
+def _mark_failure_resolved(conn: sqlite3.Connection, *, provider: str, source_event_id: str, now: str) -> None:
+    # The model or parser version may have changed since a prior failure.  A
+    # valid current interpretation resolves every active record for this item.
+    conn.execute("UPDATE local_ai_failure_log SET resolved_utc=? WHERE provider=? AND source_event_id=? AND resolved_utc IS NULL",
+                 (now, provider, source_event_id))
+
+
+def recent_failures(conn: sqlite3.Connection, *, limit: int = 100,
+                    active_only: bool = False) -> list[dict[str, Any]]:
+    """Return retryable parser diagnostics with sanitized input only."""
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "local_ai_failure_log" not in tables:
+        return []
+    where = "resolved_utc IS NULL AND " if active_only else ""
+    rows = conn.execute(
+        "SELECT provider,source_event_id,model,input_json,status,failure_kind,first_failed_utc,last_failed_utc,failure_count,resolved_utc "
+        f"FROM local_ai_failure_log WHERE {where}status IN (?,?,?,?) ORDER BY last_failed_utc DESC LIMIT ?",
+        (*sorted(RETRYABLE_FAILURE_STATUSES), max(1, min(int(limit), 500))),
+    ).fetchall()
+    failures = []
+    for row in rows:
+        try:
+            input_data = json.loads(row[3] or "{}")
+        except (TypeError, ValueError):
+            input_data = {}
+        failures.append({
+            "provider": row[0], "source_event_id": row[1], "model": row[2],
+            "input": input_data if isinstance(input_data, dict) else {}, "status": row[4],
+            "failure_kind": row[5], "first_failed_utc": row[6], "last_failed_utc": row[7],
+            "failure_count": row[8], "resolved": bool(row[9]), "resolved_utc": row[9],
+        })
+    return failures
+
+
+def active_failures(conn: sqlite3.Connection, *, limit: int = 100) -> list[dict[str, Any]]:
+    return recent_failures(conn, limit=limit, active_only=True)
+
+
+def retryable_failure_targets(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    return {(item["provider"], item["source_event_id"]) for item in active_failures(conn, limit=500)}
+
+
 def enrich(conn: sqlite3.Connection, *, provider: str, source_event_id: str, title: Any,
            category: Any = None, sport_hint: Any = None, league_hint: Any = None,
            start_time: Any = None, canonical_candidates: Any = None, config: LocalAIConfig | None = None,
@@ -281,27 +363,58 @@ def enrich(conn: sqlite3.Connection, *, provider: str, source_event_id: str, tit
             cached = json.loads(row[0] or "{}") if row[1] == "valid" else None
         except (TypeError, ValueError):
             cached = None
-        return {"status": "cache_hit", "interpretation": cached, "cache_key": key}
-    if budget is not None and budget[0] <= 0:
-        return {"status": "budget_exhausted", "interpretation": None}
-    if budget is not None:
-        budget[0] -= 1
+        if cached:
+            now_text = now() if now else __import__("datetime").datetime.now(__import__("datetime").timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            _mark_failure_resolved(conn, provider=provider, source_event_id=source_event_id, now=now_text)
+        return {"status": "cache_hit", "interpretation": cached, "cache_key": key, "attempts": 0}
     now_text = now() if now else __import__("datetime").datetime.now(__import__("datetime").timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    try:
-        raw = requester(config, payload)
-        interpretation, status = validate_output(raw, minimum_confidence=config.minimum_confidence)
-    except RuntimeError as exc:
-        failure_kind = "timeout" if str(exc) == "timeout" else "transport_failure"
-        _store(conn, cache_key=key, provider=provider, source_event_id=source_event_id, fingerprint=fingerprint,
-               config=config, result=None, status="transport_failure", failure_kind=failure_kind, now=now_text)
-        return {"status": "transport_failure", "interpretation": None, "failure_kind": failure_kind}
-    except (TypeError, ValueError, KeyError):
-        _store(conn, cache_key=key, provider=provider, source_event_id=source_event_id, fingerprint=fingerprint,
-               config=config, result=None, status="invalid_schema", failure_kind="malformed_json", now=now_text)
-        return {"status": "invalid_schema", "interpretation": None}
-    _store(conn, cache_key=key, provider=provider, source_event_id=source_event_id, fingerprint=fingerprint,
-           config=config, result=interpretation, status=status, failure_kind=None if status == "valid" else status, now=now_text)
-    return {"status": "fresh" if interpretation else status, "interpretation": interpretation, "cache_key": key}
+    attempts = 0
+    while True:
+        # The configured budget limits how many distinct items begin an AI
+        # request.  A one-time retry for the same item is reserved reliability
+        # work, so a transient failure cannot suppress its promised retry.
+        if attempts == 0:
+            if budget is not None and budget[0] <= 0:
+                return {"status": "budget_exhausted", "interpretation": None, "attempts": attempts}
+            if budget is not None:
+                budget[0] -= 1
+        attempts += 1
+        try:
+            raw = requester(config, payload)
+            interpretation, status = validate_output(raw, minimum_confidence=config.minimum_confidence)
+        except RuntimeError as exc:
+            failure_kind = "timeout" if str(exc) == "timeout" else "transport_failure"
+            status, interpretation = "transport_failure", None
+            _store(conn, cache_key=key, provider=provider, source_event_id=source_event_id, fingerprint=fingerprint,
+                   config=config, result=None, status=status, failure_kind=failure_kind, now=now_text)
+            _record_failure(conn, cache_key=key, provider=provider, source_event_id=source_event_id,
+                            config=config, payload=payload, status=status, failure_kind=failure_kind, now=now_text)
+            result = {"status": status, "interpretation": None, "failure_kind": failure_kind,
+                      "cache_key": key, "attempts": attempts}
+        except (TypeError, ValueError, KeyError):
+            status, interpretation, failure_kind = "invalid_schema", None, "malformed_json"
+            _store(conn, cache_key=key, provider=provider, source_event_id=source_event_id, fingerprint=fingerprint,
+                   config=config, result=None, status=status, failure_kind=failure_kind, now=now_text)
+            _record_failure(conn, cache_key=key, provider=provider, source_event_id=source_event_id,
+                            config=config, payload=payload, status=status, failure_kind=failure_kind, now=now_text)
+            result = {"status": status, "interpretation": None, "failure_kind": failure_kind,
+                      "cache_key": key, "attempts": attempts}
+        else:
+            _store(conn, cache_key=key, provider=provider, source_event_id=source_event_id, fingerprint=fingerprint,
+                   config=config, result=interpretation, status=status,
+                   failure_kind=None if status == "valid" else status, now=now_text)
+            if interpretation:
+                _mark_failure_resolved(conn, provider=provider, source_event_id=source_event_id, now=now_text)
+                return {"status": "fresh", "interpretation": interpretation, "cache_key": key,
+                        "attempts": attempts}
+            if status in RETRYABLE_FAILURE_STATUSES:
+                _record_failure(conn, cache_key=key, provider=provider, source_event_id=source_event_id,
+                                config=config, payload=payload, status=status, failure_kind=status, now=now_text)
+            result = {"status": status, "interpretation": None, "cache_key": key, "attempts": attempts}
+        # Retry exactly once for a retryable parser failure. This heals short
+        # local endpoint/model hiccups without creating an unbounded loop.
+        if result["status"] not in RETRYABLE_FAILURE_STATUSES or attempts >= 2:
+            return result
 
 
 def clear_cache(conn: sqlite3.Connection, *, provider: str | None = None, source_event_id: str | None = None) -> int:

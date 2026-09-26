@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import sys
 import unittest
@@ -8,7 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 from local_ai_event_parser import (LocalAIConfig, _request_payload, enrich,
-                                   sanitized_input)
+                                   recent_failures, sanitized_input)
 from sports_metadata import ensure_schema, resolve_source_event
 
 
@@ -129,6 +130,25 @@ class LocalAIEventParserTests(unittest.TestCase):
             offline = enrich(self.conn, provider="xtream", source_event_id="offline-url", title="Offline", config=CONFIG)
         self.assertEqual("transport_failure", timeout["status"])
         self.assertEqual("transport_failure", offline["status"])
+
+    def test_failure_log_uses_sanitized_input_and_auto_retry_recovers(self):
+        calls = []
+        def requester(_config, _payload):
+            calls.append(_payload)
+            if len(calls) == 1:
+                raise RuntimeError("timeout")
+            return interpretation(sport="Hockey", league="NHL")
+
+        result = enrich(self.conn, provider="xtream", source_event_id="retryable",
+                        title="NHL game token=secret https://provider.invalid/live",
+                        config=CONFIG, requester=requester)
+        self.assertEqual("fresh", result["status"])
+        self.assertEqual(2, result["attempts"])
+        failures = recent_failures(self.conn)
+        self.assertEqual(1, len(failures))
+        self.assertTrue(failures[0]["resolved"])
+        self.assertEqual("[redacted-url]", failures[0]["input"]["title"].split()[-1])
+        self.assertNotIn("secret", json.dumps(failures[0]["input"]))
 
     def test_cache_hit_and_title_change_reparse(self):
         calls = []

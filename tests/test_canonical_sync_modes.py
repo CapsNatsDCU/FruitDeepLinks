@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
-from sports_metadata import ensure_schema, sync_legacy_events
+from local_ai_event_parser import active_failures
+from sports_metadata import ensure_schema, retry_failed_local_ai, sync_legacy_events
 
 
 class _Response:
@@ -79,9 +80,23 @@ class CanonicalSyncModesTests(unittest.TestCase):
         try:
             with patch("local_ai_event_parser.urlopen", side_effect=TimeoutError) as request:
                 summary = sync_legacy_events(conn, ai_mode="unlimited")
-            self.assertEqual(1, request.call_count)
+            self.assertEqual(2, request.call_count)
             self.assertEqual(1, summary["timeouts"])
             self.assertEqual(1, summary["transport_failures"])
+        finally:
+            conn.close()
+
+    def test_operator_retry_reprocesses_only_logged_failures(self):
+        conn = self.build(2)
+        try:
+            with patch("local_ai_event_parser.urlopen", side_effect=TimeoutError):
+                sync_legacy_events(conn, ai_mode="unlimited")
+            self.assertEqual(2, len(active_failures(conn)))
+            with patch("local_ai_event_parser.urlopen", return_value=_Response()) as request:
+                result = retry_failed_local_ai(conn)
+            self.assertEqual(2, result["retry_targets"])
+            self.assertEqual(2, request.call_count)
+            self.assertEqual([], active_failures(conn))
         finally:
             conn.close()
 

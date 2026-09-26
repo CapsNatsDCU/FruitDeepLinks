@@ -950,7 +950,8 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     return {"resolved": True, "canonical_event_id": canonical_id, "confidence": confidence, "resolution_kind": kind, "start_utc": start_text,
             "scheduling_eligible": validation["scheduling_eligible"], "validation_reason": validation["validation_reason"],
             "local_ai": {"status": ai_result.get("status"), "used": bool(ai_result.get("interpretation")),
-                         "failure_kind": ai_result.get("failure_kind")}}
+                         "failure_kind": ai_result.get("failure_kind"),
+                         "attempts": int(ai_result.get("attempts") or 0)}}
 
 
 def _legacy_sync_fingerprint(conn: sqlite3.Connection) -> str:
@@ -961,8 +962,44 @@ def _legacy_sync_fingerprint(conn: sqlite3.Connection) -> str:
     return "|".join(map(str, row))
 
 
+def _legacy_event_source(data: Mapping[str, Any], raw: Mapping[str, Any]) -> str:
+    return ("apple" if str(data.get("id", "")).startswith("appletv-")
+            else "xtream" if raw.get("provider") == "xtream" or str(data.get("id", "")).startswith("xtream:")
+            else str(data.get("channel_provider_id") or "legacy"))
+
+
+def retry_failed_local_ai(conn: sqlite3.Connection, *, progress_callback=None) -> dict[str, Any]:
+    """Retry only currently logged local-AI failures using the normal cap.
+
+    This deliberately does not run a deterministic pass or rebuild lanes.  It
+    only re-materializes failed optional interpretations; a later normal
+    refresh remains responsible for lane/export publication.
+    """
+    ensure_schema(conn)
+    from local_ai_event_parser import clear_cache, load_config, retryable_failure_targets
+    targets = retryable_failure_targets(conn)
+    if not targets:
+        return {"status": "complete", "pass_name": "ai", "retry_targets": 0,
+                "requests": 0, "failures": 0, "detail": "No logged AI failures to retry"}
+    config = load_config(conn)
+    if not config.usable:
+        return {"status": "disabled", "pass_name": "ai", "retry_targets": len(targets),
+                "requests": 0, "failures": len(targets),
+                "detail": "Local AI is not configured or enabled"}
+    # Invalid responses are normally cached to avoid repeatedly spending model
+    # time.  An explicit operator retry is the safe boundary that clears them.
+    for provider, source_event_id in targets:
+        clear_cache(conn, provider=provider, source_event_id=source_event_id)
+    conn.commit()
+    result = sync_legacy_events(conn, ai_mode="bounded", progress_callback=progress_callback,
+                                _pass="ai", retry_targets=targets)
+    result["retry_targets"] = len(targets)
+    return result
+
+
 def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
-                       progress_callback=None, _pass: str | None = None) -> dict[str, Any]:
+                       progress_callback=None, _pass: str | None = None,
+                       retry_targets: set[tuple[str, str]] | None = None) -> dict[str, Any]:
     """Incrementally materialize canonical records during refresh/import only.
 
     ``unlimited`` is represented by a ``None`` budget, never a fabricated
@@ -1010,13 +1047,23 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
     # backlog was already processed.
     fingerprint = f"{_legacy_sync_fingerprint(conn)}|{ai_state}|{ai_mode}"
     state = conn.execute("SELECT value FROM sports_metadata_state WHERE key='legacy_events_fingerprint'").fetchone()
-    if state and state[0] == fingerprint:
+    if not retry_targets and state and state[0] == fingerprint:
         result = {"resolved": 0, "skipped": 0, "unchanged": 1, "status": "complete", "pass_name": _pass}
         if progress_callback:
             progress_callback(**result)
         return result
     cursor = conn.execute("SELECT * FROM events WHERE start_utc IS NOT NULL")
     rows = cursor.fetchall()
+    if retry_targets is not None:
+        filtered_rows = []
+        for row in rows:
+            row_data = row_to_dict(cursor, row) or {}
+            row_raw = _json(row_data.get("raw_attributes_json"))
+            if not isinstance(row_raw, Mapping):
+                row_raw = {}
+            if (_legacy_event_source(row_data, row_raw), str(row_data.get("id", ""))) in retry_targets:
+                filtered_rows.append(row)
+        rows = filtered_rows
     if progress_callback:
         progress_callback(pass_name=_pass, status="running", ai_mode=ai_mode, records=len(rows))
     # One bounded budget covers this incremental sync.  Cache hits are free,
@@ -1044,9 +1091,7 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
         league = raw.get("league_name") or raw.get("league") or raw.get("series") or classified.get("league")
         competitors = raw.get("competitors") or raw.get("participants") or _title_participants(data.get("title") or raw.get("original_stream_name"))
         data.update({"sport_name": sport, "league_name": league, "competitors": competitors})
-        source = ("apple" if str(data.get("id", "")).startswith("appletv-")
-                  else "xtream" if raw.get("provider") == "xtream" or str(data.get("id", "")).startswith("xtream:")
-                  else str(data.get("channel_provider_id") or "legacy"))
+        source = _legacy_event_source(data, raw)
         result = resolve_source_event(conn, source=source, source_event_id=str(data["id"]), data=data, commit=False, schema_ready=True,
                                       ai_budget=ai_budget, ai_mode=ai_mode,
                                       recheck_inferred_mapping=False)
@@ -1059,7 +1104,7 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
         if status not in {"not_needed", "disabled", "missing_title"}:
             summary["eligible"] += 1
         summary["cache_hits"] += int(status == "cache_hit")
-        summary["requests"] += int(status in {"fresh", "low_confidence", "invalid_schema", "invalid_confidence", "invalid_participants", "transport_failure"})
+        summary["requests"] += int(result.get("local_ai", {}).get("attempts") or 0)
         summary["valid"] += int(status in {"fresh", "cache_hit"} and bool(result.get("local_ai", {}).get("used")))
         summary["low_confidence"] += int(status == "low_confidence")
         summary["timeouts"] += int(result.get("local_ai", {}).get("failure_kind") == "timeout")

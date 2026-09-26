@@ -32,7 +32,8 @@ from db.stats import get_db_stats
 from server import scheduler as sched
 from server.config import cfg
 from server.logging_setup import get_recent_logs, log
-from server.refresh import refresh_status, start_apply_filters_thread, start_refresh_thread
+from server.refresh import (refresh_status, start_ai_failure_retry_thread,
+                            start_apply_filters_thread, start_refresh_thread)
 from server.services.filters import get_auto_refresh, save_auto_refresh
 from server.services.favorite_teams import (
     StoredFavoriteTeamsMalformed,
@@ -73,6 +74,7 @@ def health():
 def api_status():
     stats = get_db_stats()
     operational = {"live_events": 0, "xtream_enabled": False, "xtream_only": False, "xtream_categories": 0}
+    local_ai_failures = []
     try:
         with get_conn() as conn:
             operational["live_events"] = conn.execute(
@@ -82,6 +84,8 @@ def api_status():
             operational["xtream_only"] = bool(get_setting(conn, "xtream_only", False))
             categories = str(get_setting(conn, "xtream_category_ids", "") or "")
             operational["xtream_categories"] = len([value for value in categories.split(",") if value.strip()])
+            from local_ai_event_parser import recent_failures
+            local_ai_failures = recent_failures(conn, limit=50)
     except Exception:
         pass
 
@@ -129,6 +133,7 @@ def api_status():
         "operational": operational,
         "files": files,
         "refresh": refresh_status,
+        "local_ai_failures": local_ai_failures,
         "auto_refresh": {
             "enabled": auto_settings.get("enabled", False),
             "time": auto_settings.get("time", "02:30"),
@@ -191,6 +196,16 @@ def api_refresh():
     skip = bool((request.json or {}).get("skip_scrape", False))
     start_refresh_thread(skip_scrape=skip, source="manual")
     return jsonify({"status": "started"})
+
+
+@bp.route("/api/local-ai/failures/retry", methods=["POST"])
+def api_retry_local_ai_failures():
+    if not db_exists():
+        return jsonify({"error": "Database not found"}), 404
+    if refresh_status["running"]:
+        return jsonify({"error": "Another refresh operation is already running"}), 409
+    start_ai_failure_retry_thread()
+    return jsonify({"status": "started"}), 202
 
 
 @bp.route("/api/auto-refresh", methods=["GET", "POST"])

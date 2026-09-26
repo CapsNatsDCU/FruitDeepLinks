@@ -359,6 +359,49 @@ def run_apply_filters() -> None:
         refresh_status["last_run"] = datetime.now(timezone.utc).isoformat()
 
 
+def run_ai_failure_retry() -> None:
+    """Retry only AI failures recorded by the optional metadata parser."""
+    if refresh_status["running"]:
+        log("AI failure retry requested while another operation is running; skipping", "WARNING")
+        return
+    refresh_status["running"] = True
+    refresh_status["current_step"] = "Retrying failed local-AI interpretations..."
+    progress = _new_progress()
+    progress.update({"phase": "running", "started_at": datetime.now(timezone.utc).isoformat(),
+                     "current_step_label": "Retrying failed local-AI interpretations"})
+    progress["event_resolution"] = {"status": "running", "ai_mode": "bounded", "passes": {}}
+    refresh_status["progress"] = progress
+    outcome = "error"
+    log("Retrying logged local-AI failures (one automatic retry already occurred per item)", "INFO")
+    try:
+        from db.connection import get_conn
+        from sports_metadata import retry_failed_local_ai
+        with get_conn() as conn:
+            result = retry_failed_local_ai(conn)
+        pass_keys = ("status", "ai_mode", "records", "resolved", "skipped", "unchanged", "eligible",
+                     "requests", "cache_hits", "valid", "failures", "timeouts", "transport_failures",
+                     "validation_failures", "budget_exhausted", "resolved_without_ai",
+                     "ai_interpretations_used", "pending_local_ai", "duration", "retry_targets", "detail")
+        progress["event_resolution"] = {
+            "status": result.get("status", "complete"), "ai_mode": "bounded",
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "passes": {"ai": {key: result[key] for key in pass_keys if key in result}},
+        }
+        outcome = "success" if result.get("status") != "disabled" else "disabled"
+        log(result.get("detail") or f"Local-AI retry completed for {result.get('retry_targets', 0)} logged item(s)", "INFO")
+    except Exception as exc:
+        progress["phase"] = "error"
+        progress["event_resolution"] = {"status": "failed", "detail": "AI failure retry could not complete"}
+        log(f"Local-AI retry failed ({type(exc).__name__})", "ERROR")
+    finally:
+        refresh_status["running"] = False
+        refresh_status["current_step"] = None
+        progress["phase"] = "success" if outcome in {"success", "disabled"} else "error"
+        progress["finished_at"] = datetime.now(timezone.utc).isoformat()
+        refresh_status["last_ai_retry"] = progress["finished_at"]
+        refresh_status["last_ai_retry_status"] = outcome
+
+
 def start_refresh_thread(skip_scrape: bool = False, source: str = "manual") -> None:
     """Launch run_refresh() in a daemon thread."""
     threading.Thread(
@@ -370,3 +413,8 @@ def start_refresh_thread(skip_scrape: bool = False, source: str = "manual") -> N
 def start_apply_filters_thread() -> None:
     """Launch run_apply_filters() in a daemon thread."""
     threading.Thread(target=run_apply_filters, daemon=True).start()
+
+
+def start_ai_failure_retry_thread() -> None:
+    """Launch an AI-failure-only retry in the background."""
+    threading.Thread(target=run_ai_failure_retry, daemon=True).start()
