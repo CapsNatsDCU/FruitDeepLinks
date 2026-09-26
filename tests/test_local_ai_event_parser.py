@@ -179,6 +179,28 @@ class LocalAIEventParserTests(unittest.TestCase):
         self.assertIn("never include a leading ranking/seed such as #1 or #23", system)
         self.assertIn("never append a date or date-like suffix after the team name", system)
 
+    def test_provider_category_reaches_ai_as_a_disambiguation_hint(self):
+        calls = []
+        resolved = resolve_source_event(
+            self.conn, source="xtream", source_event_id="ambiguous-tigers", data={
+                "title": "Tigers vs Wildcats", "category": "US | NCAA Football",
+                "start_utc": UTC_START,
+            }, ai_config=LocalAIConfig(True, "http://127.0.0.1:11434/v1", "fruit-local", 1, .8, 3, "ai_first"),
+            ai_requester=lambda _config, metadata: calls.append(metadata) or interpretation(
+                sport="American football", league="NCAA Football",
+                participants=[
+                    {"name": "Tigers", "role": "away"},
+                    {"name": "Wildcats", "role": "home"},
+                ],
+            ),
+        )
+        self.assertEqual("fresh", resolved["local_ai"]["status"])
+        self.assertEqual(1, len(calls))
+        self.assertEqual("US | NCAA Football", calls[0]["category"])
+        request = _request_payload("local", calls[0])
+        self.assertIn("category is a non-authoritative provider discovery hint", request["messages"][0]["content"])
+        self.assertIn('"category": "US | NCAA Football"', request["messages"][1]["content"])
+
     def test_explicit_cache_validation_and_budget_are_bounded(self):
         calls = []
         def requester(_config, _metadata):
