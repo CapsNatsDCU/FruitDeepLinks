@@ -17,6 +17,7 @@ from catalog_workbench import (add_alias, apply_all as apply_all_catalog_proposa
                                cancel_run, merge_entities, merge_selected_entities, run_ai_review, set_archived,
                                set_entity_fields, undo_merge, edit_proposal, merge_details,
                                detach_merge_relationship, save_source_mapping,
+                               save_classification_mapping, delete_classification_mapping,
                                effective_visibility, set_visibility_override,
                                set_visibility_bulk, undo_visibility_batch,
                                resolve_attention)
@@ -50,6 +51,10 @@ def catalog():
         aliases = [dict(r) for r in conn.execute("SELECT entity_type,fruit_id,alias,source,confidence,operator_confirmed,last_verified_utc FROM catalog_aliases ORDER BY entity_type,alias")]
         provenance = [dict(r) for r in conn.execute("SELECT entity_type,fruit_id,source,external_id,source_url,details_json,operator_confirmed,last_verified_utc FROM catalog_entity_provenance ORDER BY entity_type,source,external_id")]
         source_mappings = [dict(r) for r in conn.execute("SELECT source,entity_type,source_id,canonical_id,confidence,manual,evidence_json,last_seen_utc FROM source_entity_mappings ORDER BY entity_type,source,source_id")]
+        classification_mappings = [dict(r) for r in conn.execute(
+            "SELECT source,label,target_type,canonical_id,created_utc,updated_utc "
+            "FROM catalog_classification_mappings ORDER BY source,label"
+        )]
         racing_events = [dict(r) for r in conn.execute("SELECT * FROM catalog_recurring_events ORDER BY name")]
         for entity_type, entities in (("sport", sports), ("league", leagues), ("team", teams), ("racing_event", racing_events)):
             for entity in entities:
@@ -60,6 +65,7 @@ def catalog():
         merges = [dict(r) for r in conn.execute("SELECT id,entity_type,survivor_id,source_id,status,created_utc,undone_utc FROM catalog_merge_groups ORDER BY id DESC LIMIT 250")]
     return jsonify({"ok": True, "sports": sports, "leagues": leagues, "teams": teams,
                     "racing_events": racing_events, "aliases": aliases, "provenance": provenance, "source_mappings": source_mappings,
+                    "classification_mappings": classification_mappings,
                     "proposals": proposals, "runs": runs, "merges": merges,
                     "materialization": "refresh_pipeline"})
 
@@ -293,6 +299,28 @@ def catalog_source_mapping():
         try:
             save_source_mapping(conn, entity_type=str(body.get("entity_type", "")), source=body.get("source"), source_id=body.get("source_id"), canonical_id=body.get("canonical_id"), confidence=body.get("confidence", 1)); conn.commit()
         except ValueError as exc: return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/sports/catalog/classification-mappings", methods=["PUT", "DELETE"])
+def catalog_classification_mapping():
+    """Maintain operator label overrides for providers that misuse sport fields."""
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    body = request.get_json(silent=True) or {}
+    with get_conn() as conn:
+        _prepare_write(conn)
+        try:
+            if request.method == "DELETE":
+                if not delete_classification_mapping(conn, source=body.get("source"), label=body.get("label")):
+                    return jsonify({"ok": False, "error": "classification mapping not found"}), 404
+            else:
+                save_classification_mapping(
+                    conn, source=body.get("source"), label=body.get("label"),
+                    target_type=str(body.get("target_type", "")), canonical_id=body.get("canonical_id"),
+                )
+            conn.commit()
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
     return jsonify({"ok": True})
 
 

@@ -677,9 +677,39 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
                                        or prior_evidence.get("source_input_fingerprint") == source_fingerprint))
     title_text, description_text, category_text = _metadata_text(data, raw)
     # Explicit EPG fields win.  When absent, title/description evidence outranks
-    # a category because real providers miscategorize sports inventory.
-    sport = data.get("sport") or data.get("sport_name") or raw.get("sport_name") or raw.get("sport")
-    league = data.get("league") or data.get("league_name") or raw.get("league_name") or raw.get("league")
+    # A provider's field name is not authoritative: several providers put a
+    # league such as NFL or MLB in ``sport``.  Operator-managed Catalog Workbench
+    # mappings get the first say over those raw labels, before the built-in
+    # vocabulary and title/category heuristics run.
+    raw_sport = data.get("sport") or data.get("sport_name") or raw.get("sport_name") or raw.get("sport")
+    raw_league = data.get("league") or data.get("league_name") or raw.get("league_name") or raw.get("league")
+    sport, league = raw_sport, raw_league
+    try:
+        from catalog_workbench import classification_mapping_for_label
+        league_mapping = classification_mapping_for_label(conn, source=source, label=raw_league)
+        sport_mapping = classification_mapping_for_label(conn, source=source, label=raw_sport)
+    except Exception:
+        # A pre-migration database should remain compatible until its normal
+        # refresh/write boundary installs the Settings mapping table.
+        league_mapping = sport_mapping = None
+    applied_classification_mappings = []
+    if league_mapping:
+        if league_mapping["target_type"] == "league":
+            league, sport = league_mapping.get("league"), league_mapping.get("sport") or sport
+        else:
+            sport = league_mapping.get("sport") or sport
+        applied_classification_mappings.append(league_mapping)
+    if sport_mapping:
+        if sport_mapping["target_type"] == "league":
+            # An explicit provider league field remains more specific if it
+            # differs.  This prevents one stale raw label from overwriting a
+            # contradictory structured identity.
+            if not league:
+                league = sport_mapping.get("league")
+            sport = sport_mapping.get("sport") or sport
+        else:
+            sport = sport_mapping.get("sport") or sport
+        applied_classification_mappings.append(sport_mapping)
     title_sport, title_league = _context_from_text(f"{title_text} {description_text}")
     category_sport, category_league = _context_from_text(category_text)
     sport = sport or title_sport or category_sport
@@ -893,6 +923,7 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
                                "independent_context": independent_context,
                                "independent_sport": independent_sport,
                                "independent_league": independent_league,
+                               "classification_mappings": applied_classification_mappings,
                                "independent_participant_count": len({_norm(item.get("name")) for item in independent_participants if _norm(item.get("name"))})},
                 "validation": validation["validation"], "validation_reason": validation["validation_reason"],
                 "scheduling_eligible": validation["scheduling_eligible"]}

@@ -72,6 +72,17 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
       id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
       filters_json TEXT NOT NULL DEFAULT '{}', created_utc TEXT NOT NULL, updated_utc TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS catalog_classification_mappings (
+      source TEXT NOT NULL COLLATE NOCASE,
+      normalized_label TEXT NOT NULL,
+      label TEXT NOT NULL,
+      target_type TEXT NOT NULL CHECK(target_type IN ('sport','league')),
+      canonical_id TEXT NOT NULL,
+      created_utc TEXT NOT NULL, updated_utc TEXT NOT NULL,
+      PRIMARY KEY(source, normalized_label)
+    );
+    CREATE INDEX IF NOT EXISTS idx_catalog_classification_mapping_target
+      ON catalog_classification_mappings(target_type, canonical_id);
     """)
     # Existing databases already have catalog_entity_state. Keep the preference
     # migration additive so a refresh can upgrade it without rebuilding data.
@@ -317,6 +328,82 @@ def save_source_mapping(conn: sqlite3.Connection, *, entity_type: str, source: A
     _audit(conn, "source_mapping", entity_type, canonical_text, {"source": source_text.casefold(), "source_id": source_id_text, "confidence": score})
 
 
+def save_classification_mapping(conn: sqlite3.Connection, *, source: Any, label: Any,
+                                target_type: str, canonical_id: Any) -> dict[str, str]:
+    """Save an operator-owned provider-label classification override.
+
+    ``source='*'`` is an explicit all-provider fallback; a provider-specific
+    row always wins.  This is intentionally distinct from source entity IDs:
+    providers frequently put a league label in a field named ``sport``.
+    """
+    source_text = str(source or "*").strip().casefold() or "*"
+    label_text = " ".join(str(label or "").split())
+    normalized_label = normalize(label_text)
+    canonical_text = str(canonical_id or "").strip()
+    if target_type not in {"sport", "league"}:
+        raise ValueError("mapping target must be a sport or league")
+    if not normalized_label or not canonical_text or not _row(conn, target_type, canonical_text):
+        raise ValueError("label and an existing canonical sport or league are required")
+    now = utc_now()
+    conn.execute(
+        "INSERT INTO catalog_classification_mappings(source,normalized_label,label,target_type,canonical_id,created_utc,updated_utc) "
+        "VALUES(?,?,?,?,?,?,?) ON CONFLICT(source,normalized_label) DO UPDATE SET "
+        "label=excluded.label,target_type=excluded.target_type,canonical_id=excluded.canonical_id,updated_utc=excluded.updated_utc",
+        (source_text, normalized_label, label_text, target_type, canonical_text, now, now),
+    )
+    _audit(conn, "classification_mapping", target_type, canonical_text,
+           {"source": source_text, "label": label_text})
+    return {"source": source_text, "label": label_text, "target_type": target_type, "canonical_id": canonical_text}
+
+
+def delete_classification_mapping(conn: sqlite3.Connection, *, source: Any, label: Any) -> bool:
+    source_text = str(source or "*").strip().casefold() or "*"
+    normalized_label = normalize(label)
+    if not normalized_label:
+        raise ValueError("label is required")
+    cursor = conn.execute("DELETE FROM catalog_classification_mappings WHERE source=? AND normalized_label=?",
+                          (source_text, normalized_label))
+    if cursor.rowcount:
+        _audit(conn, "delete_classification_mapping", None, None,
+               {"source": source_text, "label": " ".join(str(label).split())})
+    return bool(cursor.rowcount)
+
+
+def classification_mapping_for_label(conn: sqlite3.Connection, *, source: Any, label: Any) -> dict[str, str] | None:
+    """Find a provider-specific label mapping, then the explicit global fallback."""
+    source_text = str(source or "").strip().casefold()
+    normalized_label = normalize(label)
+    if not normalized_label:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT source,label,target_type,canonical_id FROM catalog_classification_mappings "
+            "WHERE source IN (?, '*') AND normalized_label=? "
+            "ORDER BY CASE source WHEN ? THEN 0 ELSE 1 END LIMIT 1",
+            (source_text, normalized_label, source_text),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row:
+        return None
+    mapping = {"source": str(row[0]), "label": str(row[1]), "target_type": str(row[2]), "canonical_id": str(row[3])}
+    if mapping["target_type"] == "sport":
+        target = conn.execute("SELECT name FROM sports WHERE id=?", (mapping["canonical_id"],)).fetchone()
+        if not target:
+            return None
+        return {**mapping, "sport": str(target[0])}
+    target = conn.execute(
+        "SELECT l.name,s.name FROM leagues l LEFT JOIN sports s ON s.id=l.sport_id WHERE l.id=?",
+        (mapping["canonical_id"],),
+    ).fetchone()
+    if not target:
+        return None
+    result = {**mapping, "league": str(target[0])}
+    if target[1]:
+        result["sport"] = str(target[1])
+    return result
+
+
 def create_run(conn: sqlite3.Connection, source: str) -> int:
     running = conn.execute("SELECT id FROM catalog_change_runs WHERE status='running'").fetchone()
     if running: raise RuntimeError("catalog review already running")
@@ -421,7 +508,8 @@ def merge_entities(conn: sqlite3.Connection, *, entity_type: str, survivor_id: s
         collision = conn.execute("SELECT 1 FROM teams a JOIN teams b ON a.normalized_name=b.normalized_name WHERE a.league_id=? AND b.league_id=?", (survivor_id, source_id)).fetchone()
         if collision: raise ValueError("merge child teams first")
     snapshot: dict[str, Any] = {"source_state": entity_state(conn, entity_type, source_id), "moved": {}}
-    tables = [("catalog_aliases", "fruit_id"), ("catalog_entity_provenance", "fruit_id"), ("source_entity_mappings", "canonical_id")]
+    tables = [("catalog_aliases", "fruit_id"), ("catalog_entity_provenance", "fruit_id"),
+              ("source_entity_mappings", "canonical_id"), ("catalog_classification_mappings", "canonical_id")]
     if entity_type == "team": tables += [("canonical_event_participants", "team_id")]
     if entity_type == "league": tables += [("teams", "league_id"), ("canonical_events", "league_id"), ("catalog_recurring_events", "league_id")]
     if entity_type == "sport": tables += [("leagues", "sport_id"), ("teams", "sport_id"), ("canonical_events", "sport_id"), ("catalog_recurring_events", "sport_id")]
