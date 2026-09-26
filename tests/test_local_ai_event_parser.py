@@ -176,6 +176,8 @@ class LocalAIEventParserTests(unittest.TestCase):
     def test_prompt_requires_clean_team_names(self):
         request = _request_payload("local", {"title": "#1 Capitals vs #23 Rangers 2026-10-11"})
         system = request["messages"][0]["content"]
+        self.assertIn("Provider titles and candidate names may include rankings/seeds such as #12", system)
+        self.assertIn("Treat those as context, not part of a team name", system)
         self.assertIn("never include a leading ranking/seed such as #1 or #23", system)
         self.assertIn("never append a date or date-like suffix after the team name", system)
 

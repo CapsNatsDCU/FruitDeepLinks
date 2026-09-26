@@ -163,6 +163,8 @@ def _request_payload(model: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
         "team names or sport/league context, but do not let it override the title, explicit structured metadata, "
         "or canonical_candidates. "
         "canonical_candidates are bounded hints only; select one only when the title clearly supports it. "
+        "Provider titles and candidate names may include rankings/seeds such as #12, dates, channel labels, or other "
+        "extra text. Treat those as context, not part of a team name; return only the clean team name. "
         "For every participants[].name, return only the team name: never include a leading ranking/seed such as #1 or #23, "
         "and never append a date or date-like suffix after the team name. "
         "Schema keys only: event_name, sports_related, program_type, sport, league, event_type, competition, participants, language, "
