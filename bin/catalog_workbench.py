@@ -486,7 +486,8 @@ def detach_merge_relationship(conn: sqlite3.Connection, *, merge_id: int, relati
     return len(selected)
 
 
-def merge_entities(conn: sqlite3.Connection, *, entity_type: str, survivor_id: str, source_id: str) -> int:
+def merge_entities(conn: sqlite3.Connection, *, entity_type: str, survivor_id: str, source_id: str,
+                   _cascade_scope: bool = False) -> int:
     if entity_type not in ENTITY_TYPES or survivor_id == source_id: raise ValueError("same-type distinct entities required")
     if not _row(conn, entity_type, survivor_id) or not _row(conn, entity_type, source_id): raise ValueError("merge entity not found")
     if entity_state(conn, entity_type, survivor_id)["archived"] or entity_state(conn, entity_type, source_id)["archived"]: raise ValueError("archived entities cannot be merged")
@@ -494,20 +495,46 @@ def merge_entities(conn: sqlite3.Connection, *, entity_type: str, survivor_id: s
     # an MLB team into an NCAA or USL team would silently make later resolver
     # matches incorrect, so reject it at the write boundary as well as in the
     # multi-select UI.
-    if entity_type == "team":
+    if entity_type == "team" and not _cascade_scope:
         survivor_scope = conn.execute("SELECT sport_id,league_id FROM teams WHERE id=?", (survivor_id,)).fetchone()
         source_scope = conn.execute("SELECT sport_id,league_id FROM teams WHERE id=?", (source_id,)).fetchone()
         if not survivor_scope or not source_scope or tuple(survivor_scope) != tuple(source_scope):
             raise ValueError("teams must be in the same sport and league to merge")
-    # Do not smuggle child merges into a parent merge.  Identically named
-    # descendants are identity conflicts which need their own operator choice.
+    # Parent identities can carry an exact same-name descendant from a second
+    # provider taxonomy (for example, two "NHL" leagues below two "Hockey"
+    # sports).  Cascade only those exact scoped matches.  The child merge has
+    # its own snapshot and is linked from this parent snapshot, preserving a
+    # complete, reversible audit trail.  `_cascade_scope` is internal-only: it
+    # temporarily permits the matching teams to be merged while their parent
+    # leagues are being reconciled; direct team merges remain scope-bound.
+    cascade_merge_ids: list[int] = []
     if entity_type == "sport":
-        collision = conn.execute("SELECT 1 FROM leagues a JOIN leagues b ON a.normalized_name=b.normalized_name WHERE a.sport_id=? AND b.sport_id=?", (survivor_id, source_id)).fetchone()
-        if collision: raise ValueError("merge child leagues first")
+        matching_leagues = conn.execute(
+            "SELECT a.id,b.id FROM leagues a JOIN leagues b ON a.normalized_name=b.normalized_name "
+            "WHERE a.sport_id=? AND b.sport_id=? ORDER BY a.id,b.id",
+            (survivor_id, source_id),
+        ).fetchall()
+        for survivor_child_id, source_child_id in matching_leagues:
+            cascade_merge_ids.append(merge_entities(
+                conn, entity_type="league", survivor_id=str(survivor_child_id),
+                source_id=str(source_child_id), _cascade_scope=True,
+            ))
     if entity_type == "league":
-        collision = conn.execute("SELECT 1 FROM teams a JOIN teams b ON a.normalized_name=b.normalized_name WHERE a.league_id=? AND b.league_id=?", (survivor_id, source_id)).fetchone()
-        if collision: raise ValueError("merge child teams first")
-    snapshot: dict[str, Any] = {"source_state": entity_state(conn, entity_type, source_id), "moved": {}}
+        matching_teams = conn.execute(
+            "SELECT a.id,b.id FROM teams a JOIN teams b ON a.normalized_name=b.normalized_name "
+            "WHERE a.league_id=? AND b.league_id=? ORDER BY a.id,b.id",
+            (survivor_id, source_id),
+        ).fetchall()
+        for survivor_child_id, source_child_id in matching_teams:
+            cascade_merge_ids.append(merge_entities(
+                conn, entity_type="team", survivor_id=str(survivor_child_id),
+                source_id=str(source_child_id), _cascade_scope=True,
+            ))
+    snapshot: dict[str, Any] = {
+        "source_state": entity_state(conn, entity_type, source_id),
+        "moved": {},
+        "cascade_merge_ids": cascade_merge_ids,
+    }
     tables = [("catalog_aliases", "fruit_id"), ("catalog_entity_provenance", "fruit_id"),
               ("source_entity_mappings", "canonical_id"), ("catalog_classification_mappings", "canonical_id")]
     if entity_type == "team": tables += [("canonical_event_participants", "team_id")]
@@ -522,9 +549,18 @@ def merge_entities(conn: sqlite3.Connection, *, entity_type: str, survivor_id: s
                  "AND keep.fruit_id=? AND keep.normalized_alias=catalog_aliases.normalized_alias AND keep.source=catalog_aliases.source)",
                  (entity_type, source_id, survivor_id))
     for table, column in tables:
-        rows = conn.execute(f"SELECT rowid,* FROM {table} WHERE {column}=?", (source_id,)).fetchall()
+        where_clause = f"{column}=?"
+        # A cascade has already archived exact duplicate children.  Do not
+        # reparent them beside the child survivor: that would violate the
+        # scoped uniqueness constraint, and their archived source parent keeps
+        # the complete undo path intact.
+        if table == "leagues" and entity_type == "sport":
+            where_clause += " AND NOT EXISTS (SELECT 1 FROM catalog_entity_state state WHERE state.entity_type='league' AND state.fruit_id=leagues.id AND state.archived=1)"
+        if table == "teams" and entity_type in {"league", "sport"}:
+            where_clause += " AND NOT EXISTS (SELECT 1 FROM catalog_entity_state state WHERE state.entity_type='team' AND state.fruit_id=teams.id AND state.archived=1)"
+        rows = conn.execute(f"SELECT rowid,* FROM {table} WHERE {where_clause}", (source_id,)).fetchall()
         snapshot["moved"][f"{table}.{column}"] = [list(row) for row in rows]
-        conn.execute(f"UPDATE {table} SET {column}=? WHERE {column}=?", (survivor_id, source_id))
+        conn.execute(f"UPDATE {table} SET {column}=? WHERE {where_clause}", (survivor_id, source_id))
     rule_type = "competition" if entity_type == "racing_event" else entity_type
     snapshot["rules"] = [list(row) for row in conn.execute("SELECT rowid,* FROM sports_rules WHERE target_type=? AND target_id=?", (rule_type, source_id)).fetchall()]
     conn.execute("UPDATE sports_rules SET target_id=?,updated_utc=? WHERE target_type=? AND target_id=?", (survivor_id, utc_now(), rule_type, source_id))
@@ -534,7 +570,9 @@ def merge_entities(conn: sqlite3.Connection, *, entity_type: str, survivor_id: s
                  (entity_type, source_id, 1, survivor_id, json.dumps(state["operator_fields"], sort_keys=True), utc_now()))
     cursor = conn.execute("INSERT INTO catalog_merge_groups(entity_type,survivor_id,source_id,snapshot_json,created_utc) VALUES(?,?,?,?,?)",
                           (entity_type, survivor_id, source_id, json.dumps(snapshot), utc_now()))
-    merge_id = int(cursor.lastrowid); _audit(conn, "merge", entity_type, source_id, {"merge_id": merge_id, "survivor_id": survivor_id})
+    merge_id = int(cursor.lastrowid); _audit(conn, "merge", entity_type, source_id,
+                                               {"merge_id": merge_id, "survivor_id": survivor_id,
+                                                "cascade_merge_ids": cascade_merge_ids})
     return merge_id
 
 
@@ -581,8 +619,17 @@ def undo_merge(conn: sqlite3.Connection, merge_id: int) -> None:
     conn.execute("INSERT INTO catalog_entity_state(entity_type,fruit_id,archived,merged_into_id,operator_fields_json,updated_utc) VALUES(?,?,?,?,?,?) "
                  "ON CONFLICT(entity_type,fruit_id) DO UPDATE SET archived=excluded.archived,merged_into_id=NULL,operator_fields_json=excluded.operator_fields_json,updated_utc=excluded.updated_utc",
                  (entity_type, source_id, int(bool(source_state.get("archived"))), None, json.dumps(source_state.get("operator_fields") or {}, sort_keys=True), utc_now()))
+    # Restore the parent scopes before reversing the scoped child identities.
+    # A child merge may itself have cascaded to teams, so undo recursively and
+    # in reverse order to preserve the original hierarchy.
+    cascade_merge_ids = snapshot.get("cascade_merge_ids") or []
+    for child_merge_id in reversed(cascade_merge_ids):
+        child = conn.execute("SELECT status FROM catalog_merge_groups WHERE id=?", (child_merge_id,)).fetchone()
+        if child and child[0] == "active":
+            undo_merge(conn, int(child_merge_id))
     conn.execute("UPDATE catalog_merge_groups SET status='undone',undone_utc=? WHERE id=?", (utc_now(), merge_id))
-    _audit(conn, "undo_merge", entity_type, source_id, {"merge_id": merge_id, "survivor_id": survivor_id})
+    _audit(conn, "undo_merge", entity_type, source_id,
+           {"merge_id": merge_id, "survivor_id": survivor_id, "cascade_merge_ids": cascade_merge_ids})
 
 
 def apply_proposal(conn: sqlite3.Connection, proposal_id: int, *, reject: bool = False) -> dict[str, Any]:

@@ -62,6 +62,36 @@ class CatalogWorkbenchTests(unittest.TestCase):
         self.assertTrue(entity_state(self.conn, "team", self.second)["archived"])
         self.assertTrue(entity_state(self.conn, "team", reserve)["archived"])
 
+    def test_parent_merge_cascades_exact_child_matches_and_undoes_together(self):
+        apply_catalog_records(self.conn, [
+            {"entity_type": "team", "name": "Exact Stars", "sport": "Hockey Unified", "league": "NHL", "source": "manual", "operator_confirmed": True},
+            {"entity_type": "team", "name": "Exact Stars", "sport": "Hockey Legacy", "league": "NHL", "source": "manual", "operator_confirmed": True},
+        ], dry_run=False)
+        survivor_sport = self.conn.execute("SELECT id FROM sports WHERE name='Hockey Unified'").fetchone()[0]
+        source_sport = self.conn.execute("SELECT id FROM sports WHERE name='Hockey Legacy'").fetchone()[0]
+        survivor_league = self.conn.execute("SELECT id FROM leagues WHERE sport_id=? AND name='NHL'", (survivor_sport,)).fetchone()[0]
+        source_league = self.conn.execute("SELECT id FROM leagues WHERE sport_id=? AND name='NHL'", (source_sport,)).fetchone()[0]
+        survivor_team = self.conn.execute("SELECT id FROM teams WHERE league_id=? AND name='Exact Stars'", (survivor_league,)).fetchone()[0]
+        source_team = self.conn.execute("SELECT id FROM teams WHERE league_id=? AND name='Exact Stars'", (source_league,)).fetchone()[0]
+
+        merge_id = merge_entities(self.conn, entity_type="sport", survivor_id=survivor_sport, source_id=source_sport)
+        parent_details = merge_details(self.conn, merge_id)
+        self.assertEqual(1, len(parent_details["snapshot"]["cascade_merge_ids"]))
+        league_merge_id = parent_details["snapshot"]["cascade_merge_ids"][0]
+        league_details = merge_details(self.conn, league_merge_id)
+        self.assertEqual(1, len(league_details["snapshot"]["cascade_merge_ids"]))
+        self.assertTrue(entity_state(self.conn, "sport", source_sport)["archived"])
+        self.assertTrue(entity_state(self.conn, "league", source_league)["archived"])
+        self.assertTrue(entity_state(self.conn, "team", source_team)["archived"])
+
+        undo_merge(self.conn, merge_id)
+        self.assertFalse(entity_state(self.conn, "sport", source_sport)["archived"])
+        self.assertFalse(entity_state(self.conn, "league", source_league)["archived"])
+        self.assertFalse(entity_state(self.conn, "team", source_team)["archived"])
+        self.assertEqual(source_sport, self.conn.execute("SELECT sport_id FROM leagues WHERE id=?", (source_league,)).fetchone()[0])
+        self.assertEqual((source_sport, source_league), tuple(self.conn.execute("SELECT sport_id,league_id FROM teams WHERE id=?", (source_team,)).fetchone()))
+        self.assertEqual((survivor_sport, survivor_league), tuple(self.conn.execute("SELECT sport_id,league_id FROM teams WHERE id=?", (survivor_team,)).fetchone()))
+
     def test_apply_all_accepts_safe_alias_and_marks_bad_merge_conflict(self):
         add_proposal(self.conn, run_id=None, entity_type="team", action="alias", target_id=self.first,
                      payload={"alias": "Stars FC"}, evidence={}, confidence=.99)
