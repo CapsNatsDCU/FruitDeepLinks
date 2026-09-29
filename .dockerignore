@@ -1,0 +1,11 @@
+.git
+.env
+.env.*
+secrets
+xtream-accounts.json
+data
+out
+logs
+__pycache__
+**/__pycache__
+.pytest_cache

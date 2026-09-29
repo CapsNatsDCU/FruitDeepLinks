@@ -122,7 +122,7 @@ class SportsGetSafetyTests(unittest.TestCase):
             self.assertEqual([], coverage(conn, days=90))
             self.assertEqual(1, conn.execute("SELECT COUNT(*) FROM canonical_events").fetchone()[0])
 
-    def test_identity_filters_hide_hidden_by_default_but_direct_search_reveals_it(self):
+    def test_identity_filters_require_explicit_hidden_filter_even_when_searching(self):
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             league_id = conn.execute("SELECT league_id FROM canonical_events WHERE id=?", (self.event["canonical_event_id"],)).fetchone()[0]
@@ -131,7 +131,9 @@ class SportsGetSafetyTests(unittest.TestCase):
         default_items = self.client.get("/api/sports/catalog/identities?types=league").get_json()["items"]
         self.assertFalse(any(item["id"] == league_id for item in default_items))
         searched = self.client.get("/api/sports/catalog/identities?q=NHL&types=league").get_json()["items"]
-        self.assertTrue(any(item["id"] == league_id and item["effective_visibility"]["visibility"] == "hidden" for item in searched))
+        self.assertFalse(any(item["id"] == league_id for item in searched))
+        hidden = self.client.get("/api/sports/catalog/identities?q=NHL&types=league&include_hidden=true").get_json()["items"]
+        self.assertTrue(any(item["id"] == league_id and item["effective_visibility"]["visibility"] == "hidden" for item in hidden))
 
     def test_identity_filters_read_pre_visibility_database_without_writing_schema(self):
         with sqlite3.connect(self.db_path) as conn:

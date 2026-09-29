@@ -51,13 +51,19 @@ services:
       # Scraper behavior
       - HEADLESS=${HEADLESS:-true}
       - NO_NETWORK=${NO_NETWORK:-false}
-      # Xtream IPTV (optional). Username/password remain environment-only and
+      # Xtream IPTV (optional). Credentials remain in deployment secrets and
       # are never persisted by the application.
       - XTREAM_ONLY=${XTREAM_ONLY:-true}
       - XTREAM_ENABLED=${XTREAM_ENABLED:-false}
       - XTREAM_SERVER_URL=${XTREAM_SERVER_URL:-}
       - XTREAM_USERNAME=${XTREAM_USERNAME:-}
       - XTREAM_PASSWORD=${XTREAM_PASSWORD:-}
+      # Use one secret file OR JSON; legacy credentials remain a fallback.
+      - XTREAM_ACCOUNTS_FILE=${XTREAM_ACCOUNTS_FILE:-}
+      - XTREAM_ACCOUNTS_JSON=${XTREAM_ACCOUNTS_JSON:-}
+      - XTREAM_CAPACITY_OVERRIDE=${XTREAM_CAPACITY_OVERRIDE:-}
+      # Inactivity between media reads, never a maximum recording duration.
+      - XTREAM_STREAM_IDLE_TIMEOUT=${XTREAM_STREAM_IDLE_TIMEOUT:-60}
       - XTREAM_CATEGORY_IDS=${XTREAM_CATEGORY_IDS:-}
       - XTREAM_TIMEZONE=${XTREAM_TIMEZONE:-UTC}
       - XTREAM_DEFAULT_DURATION_MINUTES=${XTREAM_DEFAULT_DURATION_MINUTES:-180}
@@ -68,6 +74,7 @@ services:
       - ./data:/app/data
       - ./out:/app/out
       - ./logs:/app/logs
+      - ./secrets:/run/secrets:ro
       # Mount DVR path for CDVR detector (optional - only if using detector feature)
       # The HOST path from CDVR_DVR_PATH is mounted to /mnt/dvr inside container
       # Container writes streamlink files to /mnt/dvr/Imports/fruitdeeplinks/

@@ -30,6 +30,7 @@ from server.services.xtream_persistent import (  # noqa: E402
     render_xmltv,
     update_channel,
 )
+from tests.xtream_test_helpers import mocked_provider
 from xtream_ingest import (  # noqa: E402
     XtreamConfig,
     ensure_schema as ensure_ingest_schema,
@@ -188,6 +189,13 @@ class PersistentChannelServiceTest(unittest.TestCase):
         self.assertEqual(1, result["persistent_available"])
         self.assertEqual(1, self.conn.execute("SELECT COUNT(*) FROM playables WHERE provider='peacock'").fetchone()[0])
 
+    def test_absent_category_snapshot_is_not_authoritative_channel_removal(self):
+        channel = self.add()
+        reconcile_channels(self.conn, {})
+        self.assertEqual('available', get_channel(self.conn, channel['id'])['availability_status'])
+        reconcile_channels(self.conn, {'410': []})
+        self.assertEqual('unavailable', get_channel(self.conn, channel['id'])['availability_status'])
+
 
 class FakeXtreamClient:
     def __init__(self, *args, **kwargs):
@@ -305,14 +313,14 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
             self.assertNotIn("demo user", output)
             self.assertNotIn("secret", output)
 
-        tuned = self.client.get(f"/xtream/channel/{channel['id']}/stream")
-        self.assertEqual(302, tuned.status_code)
-        self.assertEqual(
-            "http://provider.example:8080/live/demo%20user/secret%2Fpass/1904224.ts",
-            tuned.headers["Location"],
-        )
+        with mocked_provider() as upstream:
+            tuned = self.client.get(f"/xtream/channel/{channel['id']}/stream")
+            self.assertEqual(200, tuned.status_code)
+            self.assertNotIn("Location", tuned.headers)
+            self.assertEqual("http://provider.example:8080/live/demo%20user/secret%2Fpass/1904224.ts", upstream.get.call_args.args[0])
+            tuned.close()
         self.assertEqual("no-store", tuned.headers["Cache-Control"])
-        self.assertEqual(302, self.client.head(f"/xtream/channel/{channel['id']}/stream").status_code)
+        self.assertEqual(200, self.client.head(f"/xtream/channel/{channel['id']}/stream").status_code)
 
         logs = "\n".join(line for _, line in get_recent_logs(count=200))
         self.assertNotIn("demo user", logs)

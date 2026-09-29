@@ -126,6 +126,35 @@ REALISTIC_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 )
 
+
+def _chromium_launch_options() -> dict:
+    """Use the installed system Chromium when one is available.
+
+    The Docker image already installs Debian Chromium for Selenium. Reusing it
+    here avoids downloading and shipping a second Playwright-managed browser.
+    Local development still falls back to Playwright's managed browser when no
+    system executable is present.
+    """
+    options = {
+        "headless": True,
+        "args": [
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+            "--disable-blink-features=AutomationControlled",
+        ],
+    }
+    configured = os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", "").strip()
+    candidates = [configured] if configured else [
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            options["executable_path"] = candidate
+            break
+    return options
+
 STEALTH_INIT_SCRIPT = """
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 Object.defineProperty(navigator, 'platform', {get: () => 'Linux x86_64'});
@@ -1284,14 +1313,7 @@ async def run(
                 LOG.info("Launching Playwright Chromium (headless=True) on first fallback")
                 for launch_attempt in range(3):
                     try:
-                        browser = await p.chromium.launch(
-                            headless=True,
-                            args=[
-                                "--disable-dev-shm-usage",
-                                "--no-sandbox",
-                                "--disable-blink-features=AutomationControlled",
-                            ],
-                        )
+                        browser = await p.chromium.launch(**_chromium_launch_options())
                         return browser
                     except Exception as e:
                         last_launch_err = e

@@ -64,6 +64,9 @@ bin/fruitdeeplinks_server.backup.py
 *.db
 *.db-*
 .env.old
+# Deployment-only Xtream account secrets
+secrets/
+xtream-accounts.json
 bin/*_backup.py
 bin/*_hybrid.py
 bin/mac testing/

@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 
 from flask import Flask
+
+from server.config import cfg
 try:
     from flask_cors import CORS
 except ImportError:
@@ -36,7 +38,7 @@ def create_app() -> Flask:
     template_dir = _find_template_dir()
     app = Flask(__name__, template_folder=str(template_dir),
                 static_folder=str(template_dir), static_url_path="/static")
-    app.config["TEMPLATES_AUTO_RELOAD"] = True
+    app.config["TEMPLATES_AUTO_RELOAD"] = cfg.TEMPLATES_AUTO_RELOAD
 
     if CORS is not None:
         CORS(app)

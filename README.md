@@ -171,7 +171,7 @@ Visit `/settings` to configure the server without editing environment variables:
 
 Changes take effect immediately and persist across container restarts.
 
-Xtream username and password are intentionally environment-only: they are not
+Xtream credentials stay in deployment environment variables or a read-only secret file: they are not
 returned by the settings API or stored in SQLite. The server URL and non-secret
 ingestion controls can be managed on the Settings page. Xtream entries are
 imported only when their metadata or name contains a reliable start date and
@@ -248,9 +248,25 @@ Add the persistent source to Channels DVR with:
 Playlist entries point to
 `/xtream/channel/<persistent-channel-id>/stream`; they never contain provider
 credentials. At tune time FruitDeepLinks reads `XTREAM_USERNAME` and
-`XTREAM_PASSWORD` from the environment, reconstructs the provider URL, and
-returns a non-cacheable redirect. Persistent XMLTV includes channel records
-only when no schedule is available; it does not invent programmes.
+`XTREAM_PASSWORD` for a legacy deployment, or selects an available pooled account,
+and proxies the provider media. Persistent XMLTV includes cached provider
+programmes when available and channel definitions without invented schedules otherwise.
+
+### Direct Channels DVR and multiple Xtream accounts
+
+Use `http://your-server-ip:6655/m3u/channels` and
+`http://your-server-ip:6655/xmltv/channels` for one combined persistent-channel
+and Fruit-lane source. Select **MPEG-TS** in Channels. Configure any number of
+accounts using `XTREAM_ACCOUNTS_FILE` or `XTREAM_ACCOUNTS_JSON`; existing single-account
+variables remain supported. Settings → **Xtream Account Pool** shows capacity,
+health, active streams and account controls. Persistent and dynamic Xtream tunes
+use the same atomic allocator; unavailable capacity returns 503.
+
+The [Channels DVR middleware guide](docs/CHANNELS_DVR_MIDDLEWARE.md) includes the
+account configuration example, migration, Docker/TrueNAS update commands, proxy
+behavior, tests, limitations, and the parallel testing checklist for safely
+retiring Threadfin. Keep the existing Threadfin source until real recordings
+and guide refreshes pass those checks.
 
 During each enabled Xtream refresh, persistent channels are checked against
 their saved category. A missing stream ID is automatically replaced only when

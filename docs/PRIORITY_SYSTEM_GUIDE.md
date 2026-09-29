@@ -138,7 +138,7 @@ playables = get_filtered_playables(
 # 3. System priorities (fallback)
 ```
 
-### 2. fruitdeeplinks_server.py
+### 2. Modular server (`fruitdeeplinks_v2.py` and `server/`)
 **Added:**
 - `@app.route("/api/filters/priorities")` - GET/POST for priority management
 - `@app.route("/api/filters/selection-examples")` - Shows example selections

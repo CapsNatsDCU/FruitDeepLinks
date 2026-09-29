@@ -721,8 +721,13 @@ def main(argv=None):
     ]):
         return 1
     
-    # Step 5b: Ensure espn_graph_id column exists in playables table
-    # (Non-fatal migration that enables ESPN enrichment to store FireTV deeplinks)
+    # Add the account pool and persistent guide without replacing existing data.
+    if not run_step("4xp", total_steps, "Ensuring Xtream account pool and guide schema", [
+        "python3", "migrate_add_xtream_pool.py", "--db", str(DB_PATH),
+    ]):
+        return 1
+
+    # Step 5b: Non-fatal migration enabling ESPN FireTV deeplinks.
     run_step("5b", total_steps, "Ensuring database schema (espn_graph_id column)", [
         "python3", "migrate_add_espn_graph_id_column.py",
         "--db", str(DB_PATH),

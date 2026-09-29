@@ -19,6 +19,7 @@ from fruit_build_lanes import (  # noqa: E402
 from fruit_export_lanes import build_lanes_m3u, build_lanes_xmltv  # noqa: E402
 from server.app import create_app  # noqa: E402
 from server.services.lanes import get_lane_direct_stream  # noqa: E402
+from tests.xtream_test_helpers import mocked_provider
 from xtream_ingest import XtreamConfig, ingest_payload  # noqa: E402
 from catalog_workbench import set_visibility_override  # noqa: E402
 
@@ -109,10 +110,8 @@ class XtreamLanePipelineTest(unittest.TestCase):
                 self.conn, 1, self.now.isoformat(timespec="seconds")
             )
         self.assertEqual(playable["provider"], "xtream")
-        self.assertEqual(
-            playable["stream_url"],
-            "http://provider.example:8080/live/demo%20user/secret%2Fpass/500.ts",
-        )
+        self.assertIsNone(playable["stream_url"])
+        self.assertEqual("500", playable["stream_id"])
 
     def test_placeholder_provider_name_with_epg_reaches_real_lane(self):
         conn = sqlite3.connect(":memory:")
@@ -186,19 +185,21 @@ class XtreamLanePipelineTest(unittest.TestCase):
         self.assertNotIn("secret", content)
         self.assertNotIn("/live/", content)
 
-    def test_flask_lane_endpoint_redirects_selected_xtream_stream(self):
+    def test_flask_lane_endpoint_proxies_selected_xtream_stream(self):
         env = dict(self.tune_env)
         env["FRUIT_DB_PATH"] = str(self.db_path)
-        with patch.dict(os.environ, env, clear=False):
+        with patch.dict(os.environ, env, clear=False), mocked_provider() as upstream:
             app = create_app()
             client = app.test_client()
             response = client.get(
                 "/lane/1/stream.m3u8",
                 query_string={"at": self.now.isoformat(timespec="seconds")},
             )
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("Location", response.headers)
+        response.close()
         self.assertEqual(
-            response.headers["Location"],
+            upstream.get.call_args.args[0],
             "http://provider.example:8080/live/demo%20user/secret%2Fpass/500.ts",
         )
         self.assertEqual(response.headers["Cache-Control"], "no-store")
@@ -229,14 +230,16 @@ class XtreamLanePipelineTest(unittest.TestCase):
 
         env = dict(self.tune_env)
         env["FRUIT_DB_PATH"] = str(self.db_path)
-        with patch.dict(os.environ, env, clear=False):
+        with patch.dict(os.environ, env, clear=False), mocked_provider() as upstream:
             response = create_app().test_client().get(
                 "/lane/1/stream.m3u8",
                 query_string={"at": self.now.isoformat(timespec="seconds")},
             )
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("Location", response.headers)
+        response.close()
         self.assertEqual(
-            response.headers["Location"],
+            upstream.get.call_args.args[0],
             "http://provider.example:8080/live/demo%20user/secret%2Fpass/500.ts",
         )
 

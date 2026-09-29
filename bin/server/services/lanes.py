@@ -2,7 +2,7 @@
 """
 server/services/lanes.py - Provider lane and ADB configuration business logic
 
-Extracted from fruitdeeplinks_server.py to eliminate inline route handler code.
+Lane scheduling and stream-selection services used by the modular server.
 """
 
 import json
@@ -398,8 +398,8 @@ def get_lane_direct_stream(
     """Resolve the direct stream selected for the active lane slot.
 
     Direct streams are deliberately resolved separately from app deeplinks.
-    Xtream rows store only a stream identity; credentials are read from the
-    process environment and used to reconstruct the URL at tune time.
+    Xtream rows return only a stream identity. The shared proxy allocates an
+    account and constructs its URL after resolving the lane.
     """
     try:
         cur = conn.cursor()
@@ -440,6 +440,14 @@ def get_lane_direct_stream(
         if xtream_only and provider != "xtream":
             return None
 
+        if provider == "xtream":
+            from xtream_ingest import _load_legacy_config
+            if not playable.get("stream_id") or not _load_legacy_config(conn, environ).enabled:
+                return None
+            # Historical direct URLs must never bypass the account pool.
+            playable["stream_url"] = None
+            return playable
+
         direct_url = str(playable.get("stream_url") or "").strip()
         if direct_url:
             if direct_url.startswith(("http://", "https://")):
@@ -447,21 +455,7 @@ def get_lane_direct_stream(
                 return playable
             return None
 
-        if provider != "xtream":
-            return None
-        if not playable.get("stream_id"):
-            return None
-
-        from xtream_ingest import build_stream_url, load_config
-        config = load_config(conn, environ)
-        if not config.enabled:
-            return None
-        playable["stream_url"] = build_stream_url(
-            config,
-            playable["stream_id"],
-            playable.get("stream_extension") or "ts",
-        )
-        return playable
+        return None
     except Exception:
         # Fail closed without surfacing requests/configuration values.
         return None

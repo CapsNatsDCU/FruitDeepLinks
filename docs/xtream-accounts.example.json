@@ -1,0 +1,28 @@
+{
+  "accounts": [
+    {
+      "id": "account_a",
+      "label": "Account A",
+      "enabled": true,
+      "server_url": "https://provider.example:8443",
+      "username": "FAKE_USERNAME_A",
+      "password": "FAKE_PASSWORD_A"
+    },
+    {
+      "id": "account_b",
+      "label": "Account B",
+      "enabled": true,
+      "server_url": "https://provider.example:8443",
+      "username": "FAKE_USERNAME_B",
+      "password": "FAKE_PASSWORD_B"
+    },
+    {
+      "id": "account_c",
+      "label": "Account C",
+      "enabled": true,
+      "server_url": "https://provider.example:8443",
+      "username": "FAKE_USERNAME_C",
+      "password": "FAKE_PASSWORD_C"
+    }
+  ]
+}

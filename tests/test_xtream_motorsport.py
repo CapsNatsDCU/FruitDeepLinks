@@ -22,6 +22,7 @@ from fruit_build_lanes import (  # noqa: E402
 )
 from fruit_export_lanes import build_lanes_m3u, build_lanes_xmltv  # noqa: E402
 from server.app import create_app  # noqa: E402
+from tests.xtream_test_helpers import mocked_provider
 from xtream_ingest import (  # noqa: E402
     XtreamConfig,
     ingest_payload,
@@ -251,14 +252,16 @@ class XtreamF1LanePipelineTest(unittest.TestCase):
         lane = self.conn.execute(
             "SELECT lane_id FROM lane_events WHERE event_id=?", (italy_id,)
         ).fetchone()["lane_id"]
-        with patch.dict(os.environ, self.tune_env, clear=False):
+        with patch.dict(os.environ, self.tune_env, clear=False), mocked_provider() as upstream:
             response = create_app().test_client().get(
                 f"/lane/{lane}/stream.m3u8", query_string={"at": "2026-09-06T12:00:00Z"}
             )
-        self.assertEqual(302, response.status_code)
+        self.assertEqual(200, response.status_code)
+        self.assertNotIn("Location", response.headers)
+        response.close()
         self.assertEqual(
             "http://provider.example:8080/live/demo%20user/secret%2Fpass/3001.ts",
-            response.headers["Location"],
+            upstream.get.call_args.args[0],
         )
 
 

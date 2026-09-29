@@ -117,6 +117,23 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
   <div id="favorite-list" class="favorite-list" aria-live="polite"><span class="status-muted">Loading favorite teams…</span></div>
 </section>
 
+<section class="card" style="margin-bottom:16px" aria-labelledby="xtream-pool-title">
+  <h2 id="xtream-pool-title">Xtream Account Pool</h2>
+  <p class="persistent-intro">Persistent channels and Fruit lanes share these accounts. Credentials are supplied through deployment secrets. Account labels, availability and capacity overrides can be managed here.</p>
+  <div class="persistent-links"><a href="/m3u/channels">Channels DVR M3U</a><a href="/xmltv/channels">Channels DVR XMLTV</a></div>
+  <div class="persistent-toolbar">
+    <button class="btn" type="button" onclick="checkXtreamPool(this)">Test All Accounts</button>
+    <button class="btn btn-secondary" type="button" onclick="loadXtreamPool()">Refresh Status</button>
+    <button class="btn btn-secondary" type="button" onclick="refreshPersistentEpg(this)">Refresh Persistent Guide</button>
+  </div>
+  <div id="xtream-pool-error" class="favorite-alert" role="alert"></div>
+  <p id="xtream-pool-summary" aria-live="polite">Loading account pool…</p>
+  <div id="xtream-pool-accounts" class="persistent-list"></div>
+  <h3 style="font-size:14px;margin-top:16px">Active Streams</h3>
+  <div id="xtream-pool-leases" aria-live="polite"></div>
+  <details style="margin-top:12px"><summary>Recent stream outcomes and guide status</summary><div id="xtream-pool-history"></div><div id="xtream-epg-status"></div></details>
+</section>
+
 <section class="card xtream-categories" aria-labelledby="xtream-categories-title">
   <h2 id="xtream-categories-title">Xtream Event Categories</h2>
   <p class="persistent-intro">Choose only the provider categories FruitDeepLinks should ingest. The provider connection and credentials remain server-side; saving does not start a refresh.</p>
@@ -132,7 +149,7 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
 
 <section class="card" style="margin-bottom:16px" aria-labelledby="persistent-title">
   <h2 id="persistent-title">Persistent Channels</h2>
-  <p class="persistent-intro">Add Xtream channels that stay available even when they do not contain scheduled event names. Only categories listed in Xtream settings can be browsed; provider credentials remain environment-only.</p>
+  <p class="persistent-intro">Add Xtream channels that stay available even when they do not contain scheduled event names. Only categories listed in Xtream settings can be browsed; provider credentials remain in deployment secrets.</p>
   <div class="persistent-links">
     <a href="/m3u/persistent">Persistent M3U</a>
     <a href="/xmltv/persistent">Persistent XMLTV</a>
@@ -169,6 +186,7 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
 
 <div class="save-bar">
   <button class="btn" onclick="saveSettings()" id="btn-save">Save Settings</button>
+  <button class="btn btn-secondary" onclick="saveSettings(true)" id="btn-save-rebuild" type="button">Save &amp; Rebuild Lanes</button>
   <button class="btn btn-secondary" onclick="loadSettings()" type="button">Discard Changes</button>
   <span id="save-status" style="font-size:13px;color:var(--text-muted)"></span>
 </div>
@@ -185,6 +203,68 @@ const GROUPS = {
   'Xtream IPTV': ['xtream_enabled', 'xtream_server_url', 'xtream_timezone', 'xtream_default_duration_minutes'],
   'Optional Local AI Event Parsing': ['local_ai_event_parsing_enabled', 'local_ai_event_interpretation_strategy', 'local_ai_event_parsing_base_url', 'local_ai_event_parsing_model', 'local_ai_event_parsing_timeout_seconds', 'local_ai_event_parsing_min_confidence', 'local_ai_event_parsing_max_requests_per_refresh'],
 };
+
+function poolError(message = '') {
+  const box = document.getElementById('xtream-pool-error');
+  box.textContent = message;
+  box.style.display = message ? 'block' : 'none';
+}
+
+async function loadXtreamPool() {
+  try {
+    const data = await persistentRequest('/api/xtream/pool');
+    document.getElementById('xtream-pool-summary').textContent = `${data.enabled ? 'Enabled' : 'Disabled'} · Total capacity: ${data.capacity} · Active: ${data.active} · Available: ${data.available}`;
+    document.getElementById('xtream-pool-accounts').innerHTML = data.accounts.length ? data.accounts.map(account => `
+      <form class="persistent-browser" style="margin:8px 0" data-account-id="${escHtml(account.id)}" onsubmit="event.preventDefault();saveXtreamAccount(this)">
+        <div class="persistent-toolbar">
+          <label>Account label <input name="label" type="text" maxlength="100" value="${escHtml(account.label)}"></label>
+          <label><input name="enabled" type="checkbox" ${account.enabled ? 'checked' : ''}> Enabled</label>
+          <label>Capacity override <input name="capacity" type="number" min="1" max="10000" placeholder="Automatic" value="${account.configured_override ?? ''}" style="width:110px"></label>
+          <button class="btn" type="button" data-save-account onclick="saveXtreamAccount(this.form)">Save Account</button>
+          <button class="btn btn-secondary" type="button" onclick="checkXtreamPool(this,this.form.dataset.accountId)">Test Account</button>
+        </div>
+        <p>${escHtml(account.health)} · Discovered: ${account.discovered_capacity ?? 'Unknown'} · Effective: ${account.effective_capacity} · Active: ${account.active} · Available: ${account.available}${account.capacity_source === 'conservative_default' ? ' · Unknown limit: conservatively using 1; set an override if needed.' : ''}</p>
+        <p class="status-muted">Last successful check: ${account.last_success ? escHtml(new Date(account.last_success * 1000).toLocaleString()) : 'Not checked'}${account.last_error ? ' · ' + escHtml(account.last_error) : ''}</p>
+      </form>`).join('') : '<p>No accounts configured. Add Xtream accounts to your deployment secrets, then test the pool.</p>';
+    document.getElementById('xtream-pool-leases').innerHTML = data.leases.length ? data.leases.map(lease => `<p>${escHtml(lease.account_label)} · ${escHtml(lease.source)} · Stream ${escHtml(lease.stream_id)} · ${Math.floor(lease.age_seconds)} seconds</p>`).join('') : '<p class="status-muted">No active streams.</p>';
+    document.getElementById('xtream-pool-history').innerHTML = data.recent_streams.map(item => `<p>${escHtml(new Date(item.ended * 1000).toLocaleString())} · ${escHtml(item.source || '')} · ${escHtml(item.stream_id || '')} · ${escHtml(item.outcome.replaceAll('_', ' '))}</p>`).join('') || '<p>No recent streams.</p>';
+    const epg = await persistentRequest('/api/xtream/epg/status');
+    document.getElementById('xtream-epg-status').innerHTML = epg.channels.map(item => `<p>Persistent channel ${item.persistent_id} · ${item.programme_count} programmes · ${escHtml(item.last_error || ('Updated ' + item.checked_at))}</p>`).join('') || '<p>The persistent guide has not been refreshed yet.</p>';
+    poolError();
+  } catch (err) { poolError(err.message); }
+}
+
+async function checkXtreamPool(button, accountId = null) {
+  button.disabled = true;
+  try {
+    const url = accountId ? `/api/xtream/pool/accounts/${encodeURIComponent(accountId)}/check` : '/api/xtream/pool/check';
+    await persistentRequest(url, {method:'POST'});
+    await loadXtreamPool();
+  } catch (err) { poolError(err.message); }
+  finally { button.disabled = false; }
+}
+
+async function saveXtreamAccount(form) {
+  if (!form.reportValidity()) return;
+  const values = new FormData(form);
+  const button = form.querySelector('[data-save-account]');
+  button.disabled = true;
+  try {
+    await persistentRequest(`/api/xtream/pool/accounts/${encodeURIComponent(form.dataset.accountId)}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({label:values.get('label'), enabled:values.has('enabled'), capacity_override:values.get('capacity') ? Number(values.get('capacity')) : null})});
+    await loadXtreamPool();
+  } catch (err) { poolError(err.message); }
+  finally { button.disabled = false; }
+}
+
+async function refreshPersistentEpg(button) {
+  button.disabled = true;
+  try {
+    const result = await persistentRequest('/api/xtream/epg/refresh', {method:'POST'});
+    await loadXtreamPool();
+    showToast(`Guide refreshed: ${result.programmes} programmes; ${result.failed} channels need attention.`, result.failed ? 'warning' : 'success', 6000);
+  } catch (err) { poolError(err.message); }
+  finally { button.disabled = false; }
+}
 
 const ADVANCED = {
   'Channel Numbers': ['lane_start_ch', 'direct_start_ch'],
@@ -526,8 +606,13 @@ function renderInput(key, s, val) {
     </label>`;
   }
   if (s.type === 'int' || s.type === 'float') {
-    const numericOptions = s.type === 'float' ? ' step="0.01" min="0" max="1"' : '';
-    return `<input type="number" name="${key}" id="s_${key}" value="${val}"${numericOptions} style="width:140px">`;
+    const numericOptions = [
+      s.step != null ? `step="${s.step}"` : (s.type === 'float' ? 'step="0.01"' : ''),
+      s.min != null ? `min="${s.min}"` : (s.type === 'float' ? 'min="0"' : ''),
+      s.max != null ? `max="${s.max}"` : (s.type === 'float' ? 'max="1"' : ''),
+      s.min != null || s.max != null ? 'required' : '',
+    ].filter(Boolean).join(' ');
+    return `<input type="number" name="${key}" id="s_${key}" value="${val}" ${numericOptions} style="width:140px">`;
   }
   if (Array.isArray(s.options) && s.options.length) {
     return `<select name="${key}" id="s_${key}">${s.options.map(option => `<option value="${escHtml(option.value)}"${option.value===val?' selected':''}>${escHtml(option.label)}</option>`).join('')}</select>`;
@@ -867,10 +952,12 @@ function collectSettings() {
   return updates;
 }
 
-async function saveSettings() {
-  const btn = document.getElementById('btn-save');
+async function saveSettings(rebuildLanes = false) {
+  const form = document.getElementById('settings-form');
+  if (!form.reportValidity()) return;
+  const buttons = [document.getElementById('btn-save'), document.getElementById('btn-save-rebuild')];
   const status = document.getElementById('save-status');
-  btn.disabled = true;
+  buttons.forEach(button => { button.disabled = true; });
   status.textContent = 'Saving...';
   try {
     const updates = collectSettings();
@@ -881,10 +968,22 @@ async function saveSettings() {
     });
     const data = await res.json().catch(() => ({}));
     if (res.ok) {
-      showToast('Settings saved', 'success');
-      status.textContent = 'Saved at ' + new Date().toLocaleTimeString();
       _current = {..._current, ...updates};
       if (updates.app_primary_color) document.documentElement.setAttribute('data-primary-color', updates.app_primary_color);
+      if (rebuildLanes) {
+        const rebuild = await fetch('/api/apply-filters', {method:'POST'});
+        const rebuildData = await rebuild.json().catch(() => ({}));
+        if (!rebuild.ok) {
+          showToast(`Settings saved; ${rebuildData.error || 'lane rebuild could not start'}`, 'warning');
+          status.textContent = 'Saved; rebuild not started';
+          return;
+        }
+        showToast(`Settings saved; rebuilding ${updates.num_lanes} lanes`, 'success');
+        status.textContent = `Saved; rebuilding ${updates.num_lanes} lanes`;
+      } else {
+        showToast('Settings saved', 'success');
+        status.textContent = 'Saved at ' + new Date().toLocaleTimeString();
+      }
     } else {
       showToast(data.message || 'Save failed', 'error');
       status.textContent = 'Save failed';
@@ -893,7 +992,7 @@ async function saveSettings() {
     showToast('Error: ' + err.message, 'error');
     status.textContent = '';
   } finally {
-    btn.disabled = false;
+    buttons.forEach(button => { button.disabled = false; });
   }
 }
 
@@ -912,6 +1011,7 @@ loadSettings();
 loadFavoriteTeams();
 loadFavoriteTeamOptions();
 loadPersistentChannels();
+loadXtreamPool();
 loadXtreamCategories();
 </script>
 {% endblock %}

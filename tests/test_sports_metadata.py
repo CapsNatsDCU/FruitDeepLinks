@@ -2,7 +2,7 @@ import sqlite3
 import sys
 import unittest
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -50,7 +50,7 @@ class SportsMetadataTests(unittest.TestCase):
         self.assertEqual([], participants)
 
     def test_rules_are_specific_and_coverage_starts_from_canonical_events(self):
-        result = self.event("apple", "wanted")
+        result = self.event("apple", "wanted", start=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat())
         event = self.conn.execute("SELECT * FROM canonical_events WHERE id=?", (result["canonical_event_id"],)).fetchone()
         team_id = self.conn.execute("SELECT team_id FROM canonical_event_participants WHERE event_id=? LIMIT 1", (event["id"],)).fetchone()[0]
         save_rule(self.conn, target_type="league", target_id=event["league_id"], policy="PRIORITIZE")

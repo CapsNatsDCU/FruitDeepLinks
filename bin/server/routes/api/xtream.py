@@ -7,7 +7,7 @@ import os
 import json
 import sqlite3
 
-from flask import Blueprint, Response, jsonify, redirect, request
+from flask import Blueprint, Response, jsonify, request
 
 from db.connection import db_exists, get_conn, resolve_db_path
 from db.preferences import get_setting, save_settings
@@ -25,11 +25,100 @@ from server.services.xtream_persistent import (
     render_xmltv,
     update_channel,
 )
-from xtream_ingest import XtreamClient, XtreamError, build_stream_url, load_config
+from xtream_ingest import XtreamClient, XtreamError, load_config
 from sports_metadata import coverage, ensure_schema as ensure_sports_schema, utc_now
 
 
 bp = Blueprint("xtream_api", __name__)
+
+
+@bp.after_request
+def sanitize_xtream_json(response):
+    if response.is_json:
+        try:
+            from xtream_accounts import public_metadata
+            with get_conn() as conn:
+                response.set_data(json.dumps(public_metadata(response.get_json(), conn)))
+        except Exception:
+            response.set_data(json.dumps({"status": "error", "message": "Xtream configuration unavailable"}))
+            response.status_code = 503
+    return response
+
+
+@bp.route("/api/xtream/pool")
+def api_xtream_pool():
+    from xtream_pool import XtreamPool
+    try:
+        return jsonify(XtreamPool(resolve_db_path()).status())
+    except Exception as exc:
+        return _safe_error(exc)
+
+
+@bp.route("/api/xtream/pool/check", methods=["POST"])
+@bp.route("/api/xtream/pool/accounts/<account_id>/check", methods=["POST"])
+def api_xtream_pool_check(account_id=None):
+    from xtream_pool import XtreamPool
+    try:
+        return jsonify(XtreamPool(resolve_db_path()).check_accounts(account_id))
+    except Exception as exc:
+        return _safe_error(exc)
+
+
+@bp.route("/api/xtream/pool/accounts/<account_id>", methods=["PATCH"])
+def api_xtream_pool_update(account_id):
+    from xtream_pool import XtreamPool
+    try:
+        return jsonify(XtreamPool(resolve_db_path()).update(account_id, request.get_json(silent=True)))
+    except Exception as exc:
+        return _safe_error(exc)
+
+
+@bp.route("/api/xtream/epg/refresh", methods=["POST"])
+def api_xtream_epg_refresh():
+    from xtream_epg import refresh_epg
+    from xtream_pool import XtreamPool
+    try:
+        pool = XtreamPool(resolve_db_path())
+        pool.check_accounts()
+        with get_conn() as conn:
+            config, client = _configured_client(conn)
+            try:
+                result = refresh_epg(conn, client, pool.accounts)
+            finally:
+                client.session.close()
+        return jsonify({"status": "success", **result})
+    except Exception as exc:
+        return _safe_error(exc, 502)
+
+
+@bp.route("/api/xtream/epg/status")
+def api_xtream_epg_status():
+    if not db_exists():
+        return _read_database_error()
+    with get_conn() as conn:
+        try:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM xtream_epg_status ORDER BY persistent_id")]
+        except sqlite3.OperationalError:
+            rows = []
+    return jsonify({"status": "success", "channels": rows})
+
+
+@bp.route("/m3u/channels")
+@bp.route("/xmltv/channels")
+def channels_lineup():
+    from server.services import channels_lineup as exports
+    if not db_exists():
+        return _read_database_error()
+    try:
+        with get_conn() as conn:
+            if request.path.startswith("/m3u/"):
+                server_url = str(get_setting(conn, "server_url", request.url_root.rstrip("/")))
+                body, content_type = exports.m3u(conn, server_url), "audio/x-mpegurl; charset=utf-8"
+            else:
+                body, content_type = exports.xmltv(conn), "application/xml; charset=utf-8"
+        return Response(body, content_type=content_type, headers={"Cache-Control": "no-store"})
+    except Exception as exc:
+        return _safe_error(exc)
 
 
 def _ensure_database() -> None:
@@ -380,20 +469,8 @@ def xtream_persistent_stream(persistent_id):
                 return Response("", status=404)
             if channel["availability_status"] in {"unavailable", "needs_attention"}:
                 return Response("", status=503)
-            config = load_config(conn, os.environ)
-            target = build_stream_url(
-                config, channel["stream_id"], channel["stream_extension"]
-            )
-        # Never include target in logs; it contains the environment-only secrets.
-        log(
-            f"XTREAM_PERSISTENT_STREAM id={persistent_id} stream_id={channel['stream_id']} redirect",
-            "INFO",
-        )
-        response = redirect(target, code=302)
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
-        return response
+        from server.services.xtream_proxy import proxy_stream
+        return proxy_stream(channel["stream_id"], f"persistent:{persistent_id}", channel["stream_extension"])
     except (XtreamError, PersistentChannelError):
         return Response("", status=503)
     except Exception as exc:

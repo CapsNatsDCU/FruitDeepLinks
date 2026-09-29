@@ -32,6 +32,9 @@ class AppPrimaryColorPreferenceTests(unittest.TestCase):
         schema = next(item for item in get_settings_schema() if item["key"] == "app_primary_color")
         self.assertEqual(["blue", "red", "green", "purple", "orange"], [item["value"] for item in schema["options"]])
 
+    def test_template_auto_reload_is_disabled_for_normal_runtime(self):
+        self.assertFalse(create_app().config["TEMPLATES_AUTO_RELOAD"])
+
 
 class AppPrimaryColorRenderTests(unittest.TestCase):
     def setUp(self):

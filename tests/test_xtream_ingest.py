@@ -110,6 +110,9 @@ class XtreamParsingTest(unittest.TestCase):
         self.assertEqual(command[:5], ["curl", "-4", "-sS", "-L", "--max-time"])
         self.assertIn("category_id=10", command)
         self.assertNotIn("shell", kwargs)
+        self.assertNotIn("user name", repr(command))
+        self.assertNotIn("p@ss/word", repr(command))
+        self.assertIn('data-urlencode = "username=user name"', kwargs["input"])
 
     def test_unusable_requests_response_falls_back_to_curl(self):
         session = FakeSession({"user_info": {"auth": 1}})

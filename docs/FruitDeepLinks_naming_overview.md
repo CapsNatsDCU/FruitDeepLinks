@@ -32,8 +32,8 @@ Implementation scripts (what you should use going forward):
   - `out/multisource_lanes.m3u` (standard M3U)
   - `out/multisource_lanes_chrome.m3u` (Chrome Capture)
 
-- `fruitdeeplinks_server.py`  
-  Flask server / API that:
+- `fruitdeeplinks_v2.py` and `server/`
+  Modular Flask server / API that:
   - Serves the web UI
   - Exposes `/api/filters` + `/api/filters/preferences`
   - Can trigger refresh/apply‑filters flows using the scripts above.
@@ -63,7 +63,7 @@ Fallbacks:
 
 Used in:
 
-- `fruitdeeplinks_server.DB_PATH`
+- `server.config.cfg.DB_PATH`
 - `fruit_build_lanes.py --db` default
 - `fruit_export_hybrid.py --db` default
 - `fruit_export_lanes.py --db` default
@@ -93,7 +93,7 @@ Used in:
 - `fruit_build_lanes.py` top‑level constants (via `_get_int_env([...], default)`).
 - `fruit_build_lanes.py.main()` argument defaults.
 - `daily_refresh.py` (lane count for step 4).
-- `fruitdeeplinks_server.py` (UI defaults for lane count).
+- `server/config.py` and the database-backed Settings UI.
 
 ### What stayed out of `.env`
 
@@ -102,7 +102,7 @@ Filtering (enabled services, excluded sports/leagues) is **not** driven by env a
 - `filter_integration.py`
 - `logical_service_mapper.py`
 - `provider_utils.py`
-- UI/API endpoints in `fruitdeeplinks_server.py`.
+- UI/API endpoints in `server/routes/`.
 
 This keeps filters user‑friendly and web‑driven.
 
@@ -130,7 +130,7 @@ This keeps filters user‑friendly and web‑driven.
 4. **Build virtual lanes**
 
    - Calls:  
-     `fruit_build_lanes.py --db <DB_PATH> --lanes <FRUIT_LANES|PEACOCK_LANES|40>`
+     `fruit_build_lanes.py --db <DB_PATH> --lanes <FRUIT_LANES|PEACOCK_LANES|50>`
 
 5. **Export direct channels**
 
@@ -146,7 +146,7 @@ Optional: if `CHANNELS_DVR_IP` is set, `daily_refresh.py` triggers Channels DVR 
 
 ### Web UI “Apply filters” path
 
-Inside `fruitdeeplinks_server.py`, the `run_apply_filters()` helper does a **partial refresh**:
+Inside `server/refresh.py`, the `run_apply_filters()` helper does a **partial refresh**:
 
 - Skips scraping + import.
 - Runs only:

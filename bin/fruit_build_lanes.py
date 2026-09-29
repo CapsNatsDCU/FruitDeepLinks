@@ -49,6 +49,19 @@ LANE_START_CH_DEFAULT = _get_int_env(
     ["FRUIT_LANE_START_CH", "PEACOCK_LANE_START_CH"], 9000
 )
 LANE_COUNT_DEFAULT = _get_int_env(["FRUIT_LANES", "PEACOCK_LANES"], 10)
+MAX_LANE_COUNT = 750
+
+
+def lane_count_arg(value):
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("lane count must be an integer") from None
+    if not 1 <= count <= MAX_LANE_COUNT:
+        raise argparse.ArgumentTypeError(f"lane count must be between 1 and {MAX_LANE_COUNT}")
+    return count
+
+
 FAKE_CHANNELS = {"NBC Sports NOW", "NFL Channel", "Telemundo Deportes Ahora"}
 PROGRESS_PREFIX = "__FDL_PROGRESS__"
 
@@ -130,8 +143,8 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int, *, canonical_a
             conn, ai_mode=canonical_ai_mode,
             progress_callback=lambda **payload: emit_progress("event_resolution_pass", **payload),
         )
-        emit_progress("event_resolution_done", ai_mode=canonical_ai_mode, status="complete",
-                      finished_at=datetime.now(timezone.utc).isoformat(), **resolution)
+        emit_progress("event_resolution_done", **{**resolution, "ai_mode": canonical_ai_mode,
+                      "status": "complete", "finished_at": datetime.now(timezone.utc).isoformat()})
     except Exception as exc:
         # Canonical enrichment must never silently alter legacy availability.
         # Continue with the existing rows, but leave an actionable diagnostic.
@@ -572,6 +585,10 @@ def build_lanes_with_placeholders(
             "SELECT provider,max_concurrent FROM provider_capacities"
         )}
     decision_rows: List[Tuple[str, str, int, str, Optional[int]]] = []
+    from xtream_pool import scheduler_capacity
+    pooled_capacity = scheduler_capacity(conn)
+    if pooled_capacity is not None:
+        provider_capacities["xtream"] = pooled_capacity
     scheduled: List[Tuple[Event, int, Dict[str, Any]]] = []
     selected_playables: Dict[str, Dict[str, Any]] = {}
 
@@ -790,7 +807,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default=env_db or default_db)
     ap.add_argument(
-        "--lanes", type=int, default=int(env_lanes) if env_lanes else LANE_COUNT_DEFAULT
+        "--lanes", type=lane_count_arg, default=lane_count_arg(env_lanes) if env_lanes else lane_count_arg(LANE_COUNT_DEFAULT)
     )
     ap.add_argument(
         "--days-ahead", type=int, default=int(env_days) if env_days else 7

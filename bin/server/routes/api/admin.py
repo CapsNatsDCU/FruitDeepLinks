@@ -345,6 +345,11 @@ def api_settings():
         if not isinstance(updates, dict):
             return jsonify({"status": "error", "message": "Expected JSON object"}), 400
 
+        if "num_lanes" in updates:
+            lane_count = updates["num_lanes"]
+            if isinstance(lane_count, bool) or not isinstance(lane_count, int) or not 1 <= lane_count <= 750:
+                return jsonify({"status": "error", "message": "Number of lanes must be an integer from 1 to 750"}), 400
+
         if "favorite_teams" in updates:
             try:
                 updates["favorite_teams"] = validate_favorite_teams(

@@ -2,7 +2,7 @@
 """
 fruitdeeplinks_v2.py - Entrypoint for the v2 refactored server
 
-Replaces the monolithic fruitdeeplinks_server.py.
+Current modular server entrypoint.
 Run directly:  python3 fruitdeeplinks_v2.py
 Or via gunicorn: gunicorn 'fruitdeeplinks_v2:app'
 """

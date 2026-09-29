@@ -127,7 +127,7 @@ class XtreamOnlyModeTest(unittest.TestCase):
                 self.conn, 1, (self.now + timedelta(hours=1, minutes=15)).isoformat()
             )
         self.assertEqual("701", playable["stream_id"])
-        self.assertTrue(playable["stream_url"].endswith("/701.ts"))
+        self.assertIsNone(playable["stream_url"])
 
         m3u = Path(self.tmp.name) / "lanes.m3u"
         xml = Path(self.tmp.name) / "lanes.xml"

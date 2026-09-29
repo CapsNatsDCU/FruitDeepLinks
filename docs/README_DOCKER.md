@@ -2,6 +2,11 @@
 
 Multi-source sports event aggregator combining Apple TV and Peacock content into virtual TV channels.
 
+For direct Channels DVR with pooled Xtream accounts, follow
+[Channels DVR middleware deployment](CHANNELS_DVR_MIDDLEWARE.md#exact-docker--truenas-update-procedure).
+It covers additive migration, a read-only secret-file mount, FFmpeg for HLS
+remuxing, legacy single-account fallback, and parallel Threadfin acceptance tests.
+
 ## Quick Start
 
 ### 1. Initial Setup
@@ -46,8 +51,8 @@ docker exec fruitdeeplinks python3 /app/bin/daily_refresh.py --skip-scrape
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PEACOCK_LANES` | 40 | Number of virtual channels |
-| `PEACOCK_DAYS_AHEAD` | 7 | Days to plan ahead |
+| `FRUIT_LANES` | 50 | Number of virtual channels (1-750) |
+| `FRUIT_DAYS_AHEAD` | 7 | Days to plan ahead |
 | `SERVER_URL` | - | Your server URL for M3U export |
 | `CHANNELS_DVR_IP` | - | Auto-refresh Channels DVR (optional) |
 | `TZ` | America/New_York | Timezone for scheduling |
@@ -57,13 +62,10 @@ See `.env.example` for all configuration options.
 
 ## Scheduled Execution
 
-The container runs daily refresh at **3:00 AM** automatically via cron.
-
-To change the schedule, edit the crontab in `Dockerfile`:
-```dockerfile
-# Change "0 3" to desired hour
-RUN echo "0 3 * * * cd /app && /usr/local/bin/python /app/bin/daily_refresh.py >> /app/logs/cron.log 2>&1" | crontab -
-```
+The web process schedules the daily refresh with APScheduler. The default is
+**2:30 AM** in `TZ`. Change the time and enable/disable the job from the Admin
+dashboard, or set `AUTO_REFRESH_TIME` and `AUTO_REFRESH_ENABLED` before the
+first database-backed preference is saved.
 
 ## Output Files
 
@@ -104,11 +106,8 @@ sqlite3 /app/data/fruit_events.db "SELECT DISTINCT channel_name FROM events;"
 # Container logs
 docker-compose logs -f
 
-# Cron logs
-docker exec fruitdeeplinks cat /app/logs/cron.log
-
-# Check if cron is running
-docker exec fruitdeeplinks pgrep cron
+# Confirm the in-process schedule and next run
+curl -fsS http://localhost:6655/api/auto-refresh
 ```
 
 ### Rebuild Lanes Manually
@@ -196,5 +195,5 @@ Peacock Scraper → peacock_ingest_atom.py → fruit_events.db ← appletv_to_pe
 
 For issues or questions, check:
 - Container logs: `docker-compose logs`
-- Cron logs: `/app/logs/cron.log`
+- Scheduled refresh logs: container logs and `/app/logs/`
 - Database: `sqlite3 /app/data/fruit_events.db`

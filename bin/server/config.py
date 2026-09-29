@@ -56,6 +56,11 @@ class _Config:
 
     # Logging
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+    TEMPLATES_AUTO_RELOAD = os.getenv("TEMPLATES_AUTO_RELOAD", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
     # Scraper toggles (read by daily_refresh.py; referenced here for completeness)
     HEADLESS = os.getenv("HEADLESS", "true").lower() not in ("0", "false", "no")

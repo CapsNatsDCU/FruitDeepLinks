@@ -15,7 +15,7 @@ import os
 import re
 import sqlite3
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
@@ -107,9 +107,9 @@ def emit_progress(event: str, **fields: Any) -> None:
 @dataclass(frozen=True)
 class XtreamConfig:
     enabled: bool
-    server_url: str
-    username: str
-    password: str
+    server_url: str = field(repr=False)
+    username: str = field(repr=False)
+    password: str = field(repr=False)
     category_ids: tuple[str, ...]
     timezone_name: str = "UTC"
     default_duration_minutes: int = DEFAULT_DURATION_MINUTES
@@ -120,6 +120,8 @@ class XtreamConfig:
             raise XtreamError("Xtream ingestion is disabled")
         if not self.server_url:
             raise XtreamError("XTREAM_SERVER_URL is required")
+        from xtream_accounts import validate_server
+        validate_server(self.server_url)
         if not self.username:
             raise XtreamError("XTREAM_USERNAME is required")
         if not self.password:
@@ -173,12 +175,20 @@ def parse_category_ids(value: Any) -> tuple[str, ...]:
     return tuple(result)
 
 
-def load_config(conn: Optional[sqlite3.Connection] = None,
+def _load_legacy_config(conn: Optional[sqlite3.Connection] = None,
                 environ: Optional[Mapping[str, str]] = None) -> XtreamConfig:
     env = os.environ if environ is None else environ
 
     def setting(key: str, env_key: str, default: Any) -> Any:
         if conn is not None:
+            # Respect an explicitly supplied environment in tests/CLI callers,
+            # while preserving the saved-settings-first contract.
+            try:
+                row = conn.execute("SELECT value FROM user_preferences WHERE key=?", (f"setting:{key}",)).fetchone()
+            except sqlite3.OperationalError:
+                row = None
+            if not row and env_key in env:
+                return env[env_key]
             return get_setting(conn, key, default)
         return env.get(env_key, default)
 
@@ -215,6 +225,35 @@ def load_config(conn: Optional[sqlite3.Connection] = None,
     )
 
 
+def load_config(conn: Optional[sqlite3.Connection] = None,
+                environ: Optional[Mapping[str, str]] = None) -> XtreamConfig:
+    """Select a catalogue account; streaming allocation belongs to XtreamPool."""
+    from xtream_accounts import load_accounts
+    accounts = load_accounts(conn, environ)
+    candidates = []
+    for account in accounts:
+        enabled, health = account.enabled, "unknown"
+        if conn is not None:
+            try:
+                row = conn.execute("SELECT enabled_override,health,fingerprint FROM xtream_account_state WHERE account_id=?", (account.id,)).fetchone()
+                if row:
+                    enabled = enabled and row[0] != 0
+                    if row[2] == account.fingerprint:
+                        health = row[1]
+            except sqlite3.OperationalError:
+                pass
+        if enabled and health != "unhealthy":
+            candidates.append(({"healthy": 0, "degraded": 1, "unknown": 2, "unreachable": 3}.get(health, 4), account))
+    if candidates:
+        return min(candidates, key=lambda item: item[0])[1].config
+    if accounts:
+        raise XtreamError("No enabled usable Xtream accounts; test the pool in Settings")
+    env = os.environ if environ is None else environ
+    if env.get("XTREAM_ACCOUNTS_FILE", "").strip() or env.get("XTREAM_ACCOUNTS_JSON", "").strip():
+        raise XtreamError("No Xtream accounts are configured in deployment secrets")
+    return _load_legacy_config(conn, environ)
+
+
 def redact_credentials(text: Any, config: XtreamConfig) -> str:
     """Remove raw and URL-encoded credential values from diagnostic text."""
     redacted = str(text)
@@ -229,7 +268,7 @@ def redact_credentials(text: Any, config: XtreamConfig) -> str:
 def build_stream_url(config: XtreamConfig, stream_id: Any,
                      extension: Any = "ts") -> str:
     """Construct a standard Xtream live URL with encoded path segments."""
-    config.validate()
+    config.validate(require_categories=False)
     stream_id_text = str(stream_id).strip()
     if not stream_id_text:
         raise XtreamError("Xtream stream_id is required")
@@ -252,6 +291,8 @@ class XtreamClient:
         # normal validation path, which refuses an accidental full catalogue import.
         config.validate(require_categories=False)
         self.config = config
+        from xtream_logging import protect_http_logs
+        protect_http_logs(config)
         self.session = session or requests.Session()
         self.timeout = timeout
         self.subprocess_runner = subprocess_runner or subprocess.run
@@ -316,7 +357,7 @@ class XtreamClient:
                 timeout=self.timeout,
             )
             response.raise_for_status()
-            if action == "get_short_epg":
+            if action in {"get_short_epg", "get_simple_data_table"}:
                 # Empty EPG is authoritative and should not trigger a second
                 # request through curl for every stream in the category.
                 return self._usable_epg_payload(response.json())
@@ -331,9 +372,9 @@ class XtreamClient:
             # Do not propagate or log their text; curl gets one clean retry.
             return None
 
-    def _get_with_curl(self, action: str,
+    def _curl_payload(self, action: Optional[str],
                        category_id: Optional[str] = None,
-                       stream_id: Optional[str] = None) -> list[dict]:
+                       stream_id: Optional[str] = None) -> Any:
         command = [
             self.curl_binary,
             "-4",
@@ -343,13 +384,16 @@ class XtreamClient:
             str(self.timeout),
             "--get",
             f"{self.config.server_url}/player_api.php",
-            "--data-urlencode",
-            f"username={self.config.username}",
-            "--data-urlencode",
-            f"password={self.config.password}",
-            "--data-urlencode",
-            f"action={action}",
+            "--config", "-",
         ]
+        def config_quote(value):
+            return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+        # Keep secrets out of process arguments as well as logs. Curl's config
+        # is supplied through stdin and is never written to disk.
+        secret_input = "".join(f'data-urlencode = "{key}={config_quote(value)}"\n'
+                               for key, value in (("username", self.config.username), ("password", self.config.password)))
+        if action:
+            command.extend(("--data-urlencode", f"action={action}"))
         if category_id is not None:
             command.extend(("--data-urlencode", f"category_id={category_id}"))
         if stream_id is not None:
@@ -357,6 +401,7 @@ class XtreamClient:
         try:
             completed = self.subprocess_runner(
                 command,
+                input=secret_input,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout + 5,
@@ -381,7 +426,12 @@ class XtreamClient:
             raise XtreamError(
                 f"Xtream curl transport returned invalid JSON for action {action}"
             ) from None
-        if action == "get_short_epg":
+        return payload
+
+    def _get_with_curl(self, action: str, category_id: Optional[str] = None,
+                       stream_id: Optional[str] = None) -> list[dict]:
+        payload = self._curl_payload(action, category_id, stream_id)
+        if action in {"get_short_epg", "get_simple_data_table"}:
             rows = self._usable_epg_payload(payload)
         else:
             required_key = "category_id" if action == "get_live_categories" else "stream_id"
@@ -408,28 +458,63 @@ class XtreamClient:
     def get_short_epg(self, stream_id: str) -> list[dict]:
         return self._get("get_short_epg", stream_id=stream_id)
 
+    def get_epg(self, stream_id: str) -> list[dict]:
+        """Full provider schedule where supported, then the existing short EPG."""
+        try:
+            rows = self._get("get_simple_data_table", stream_id=stream_id)
+            if rows:
+                return rows
+        except XtreamError:
+            pass
+        return self.get_short_epg(stream_id)
+
     def get_account_max_connections(self) -> Optional[int]:
         """Read an optional provider limit without retaining authenticated data.
 
         Xtream's unactioned player API response commonly contains
-        ``user_info.max_connections``.  It is advisory: transport and schema
-        differences simply return ``None`` and never make streams unavailable.
+        ``user_info.max_connections``. The numeric limit remains optional;
+        last_account_check separately records authentication/transport health.
+        Use the same curl compatibility fallback as catalogue ingestion.
         """
+        self.last_account_check = {"health": "unreachable", "error": "Provider account check failed"}
         try:
-            response = self.session.get(
-                f"{self.config.server_url}/player_api.php",
-                params={"username": self.config.username, "password": self.config.password},
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            value = (payload.get("user_info") or {}).get("max_connections") if isinstance(payload, dict) else None
-            maximum = int(value)
-            return maximum if maximum > 0 else None
+            payload = None
+            try:
+                response = self.session.get(
+                    f"{self.config.server_url}/player_api.php",
+                    params={"username": self.config.username, "password": self.config.password},
+                    timeout=self.timeout,
+                )
+                if response.status_code in {401, 403}:
+                    self.last_account_check = {"health": "unhealthy", "error": "Account authentication rejected"}
+                    return None
+                response.raise_for_status()
+                payload = response.json()
+            except Exception:
+                pass
+            if not isinstance(payload, dict) or not isinstance(payload.get("user_info"), dict):
+                payload = self._curl_payload(None)
+            info = payload.get("user_info") if isinstance(payload, dict) else None
+            if not isinstance(info, dict):
+                self.last_account_check = {"health": "unreachable", "error": "Malformed provider account response"}
+                return None
+            status = str(info.get("status", "")).lower()
+            if str(info.get("auth", "1")) == "0" or status in {"expired", "disabled", "banned", "inactive"}:
+                self.last_account_check = {"health": "unhealthy", "error": "Account authentication or subscription rejected"}
+                return None
+            if str(info.get("auth", "")) != "1" and status != "active":
+                self.last_account_check = {"health": "unreachable", "error": "Provider did not confirm account authorization"}
+                return None
+            self.last_account_check = {"health": "healthy", "error": None}
+            try:
+                maximum = int(info.get("max_connections"))
+            except (ValueError, TypeError, OverflowError):
+                return None
+            return maximum if 0 < maximum <= 10000 else None
         except Exception:
             # Never surface exception text: an HTTP client can include the
             # authenticated request URL.  Unknown capacity is deliberately
-            # unconstrained rather than a guessed global limit.
+            # unknown; the pool applies an explicit conservative fallback.
             return None
 
 
@@ -1311,13 +1396,28 @@ def run(db_path: Path, environ: Optional[Mapping[str, str]] = None,
         client_factory=XtreamClient) -> dict[str, Any]:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
+    client = None
     try:
+        from xtream_pool import XtreamPool
+        from xtream_epg import refresh_epg
+        pool = XtreamPool(db_path, environ, client_factory=client_factory)
+        pool_status = pool.check_accounts()
         config = load_config(conn, environ)
-        config.validate()
+        config.validate(require_categories=False)
         client = client_factory(config)
         snapshot_diagnostics: dict[str, Any] = {}
-        categories, streams = fetch_snapshot(client, config, snapshot_diagnostics,
-                                             progress_reporter=emit_progress)
+        try:
+            categories, streams = (fetch_snapshot(client, config, snapshot_diagnostics,
+                                                  progress_reporter=emit_progress)
+                                   if config.category_ids else ([], {}))
+        except XtreamError:
+            # A failing dynamic category must not suppress a healthy static
+            # guide. Preserve old events and expose the failure explicitly.
+            categories, streams = [], {}
+            snapshot_diagnostics.update(fetched_category_ids=[], failed_category_ids=list(config.category_ids),
+                                        dynamic_error="Selected category refresh failed; previous events preserved")
+        from xtream_accounts import safe_value
+        categories, streams = safe_value(categories, pool.accounts), safe_value(streams, pool.accounts)
         fetched_category_ids = snapshot_diagnostics.get("fetched_category_ids", [])
         reconcile_scope = (
             None if set(fetched_category_ids) == set(config.category_ids)
@@ -1331,18 +1431,28 @@ def run(db_path: Path, environ: Optional[Mapping[str, str]] = None,
             emit_progress("xtream_category_update", **category, status="complete",
                           finished_at=datetime.now(timezone.utc).isoformat(), detail="Imported")
         result.update(snapshot_diagnostics)
-        maximum = client.get_account_max_connections()
-        if maximum:
-            # Do not overwrite an operator-managed capacity.  Only the numeric
-            # limit is stored; credentials remain solely in runtime config.
-            from sports_metadata import ensure_schema
-            ensure_schema(conn)
-            conn.execute("INSERT OR IGNORE INTO provider_capacities(provider,max_concurrent,updated_utc) VALUES('xtream',?,?)",
-                         (maximum, datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")))
-            conn.commit()
-            result["provider_capacity_discovered"] = maximum
+        # Persistent channels can belong to categories deliberately excluded
+        # from dynamic event ingestion. Reconcile only those configured static
+        # categories, never the full provider catalogue or failed snapshots.
+        from server.services.xtream_persistent import list_channels, reconcile_channels
+        static_categories = {c["category_id"] for c in list_channels(conn, enabled_only=True)} - set(streams)
+        static_snapshot = {}
+        for category_id in sorted(static_categories):
+            try:
+                static_snapshot[category_id] = safe_value(client.get_live_streams(category_id), pool.accounts)
+            except XtreamError:
+                continue
+        if static_snapshot:
+            result["persistent_extra_categories"] = reconcile_channels(conn, static_snapshot)
+        result["provider_capacity_discovered"] = pool_status["capacity"]
+        result["persistent_epg"] = refresh_epg(conn, client, pool.accounts)
         return result
     finally:
+        if client is not None and hasattr(client, "session"):
+            try:
+                client.session.close()
+            except Exception:
+                pass
         conn.close()
 
 

@@ -1,6 +1,8 @@
 import asyncio
 import importlib.util
+import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -172,6 +174,21 @@ class FakeBrowser:
 
 
 class Amazon2HelpersTest(unittest.TestCase):
+    def test_chromium_launch_options_reuse_configured_browser(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            browser = Path(tmpdir) / "chromium"
+            browser.touch()
+            with mock.patch.dict(
+                os.environ,
+                {"PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH": str(browser)},
+                clear=False,
+            ):
+                options = amazon2._chromium_launch_options()
+
+        self.assertEqual(options["executable_path"], str(browser))
+        self.assertTrue(options["headless"])
+        self.assertIn("--no-sandbox", options["args"])
+
     def test_parse_benefit_id_from_html_and_ignores_false_positive(self):
         html = """
         <a href="/gp/video/offers?benefitId=amzn1">bad</a>

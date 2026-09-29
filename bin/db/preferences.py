@@ -229,7 +229,7 @@ SETTINGS_DEFS: Dict[str, tuple] = {
     "num_lanes": (
         "FRUIT_LANES", "int", 50,
         "Number of Lanes",
-        "How many virtual channels (lanes) to generate.",
+        "How many virtual Channels DVR lanes to generate (1–750). Use Save & Rebuild Lanes to apply it immediately.",
     ),
     "expand_all_playables": (
         "EXPAND_ALL_PLAYABLES", "bool", False,
@@ -343,7 +343,7 @@ SETTINGS_DEFS: Dict[str, tuple] = {
     "xtream_enabled": (
         "XTREAM_ENABLED", "bool", False,
         "Xtream IPTV",
-        "Ingest sports events from the configured Xtream categories. Credentials remain environment-only.",
+        "Ingest sports events from the configured Xtream categories. Credentials remain in deployment secrets.",
     ),
     "xtream_server_url": (
         "XTREAM_SERVER_URL", "str", "",
@@ -421,14 +421,24 @@ SETTINGS_OPTIONS = {
     ],
 }
 
+SETTINGS_NUMERIC_LIMITS = {
+    "num_lanes": {"min": 1, "max": 750, "step": 1},
+}
+
 
 def _validated_option(key: str, value: Any, default: Any) -> Any:
-    """Keep enumerated appearance/resolution settings within known values."""
+    """Keep enumerated and bounded numeric settings within known values."""
     options = SETTINGS_OPTIONS.get(key)
-    if not options:
-        return value
-    allowed = {item["value"] for item in options}
-    return value if value in allowed else default
+    if options:
+        allowed = {item["value"] for item in options}
+        value = value if value in allowed else default
+    limits = SETTINGS_NUMERIC_LIMITS.get(key)
+    if limits:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return default
+        if value < limits["min"] or value > limits["max"]:
+            return default
+    return value
 
 _SETTING_KEY_PREFIX = "setting:"
 
@@ -543,6 +553,7 @@ def get_settings_schema() -> list[dict]:
             "default": default,
             "env_var": env_var,
             "options": SETTINGS_OPTIONS.get(key),
+            **SETTINGS_NUMERIC_LIMITS.get(key, {}),
         }
         for key, (env_var, type_hint, default, label, desc) in SETTINGS_DEFS.items()
     ]

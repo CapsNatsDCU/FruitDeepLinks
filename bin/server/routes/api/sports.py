@@ -606,11 +606,18 @@ def provider_capacities():
             _prepare_write(conn)
             body = request.get_json(silent=True) or {}
             provider = normalize_provider(body.get("provider"))
+            from xtream_pool import scheduler_capacity
+            if provider == "xtream" and scheduler_capacity(conn) is not None:
+                return jsonify({"ok": False, "error": "Xtream capacity is the sum of account capacities; edit overrides in Settings → Xtream Account Pool"}), 409
             try: maximum = int(body.get("max_concurrent"))
             except (TypeError, ValueError): maximum = 0
             if not provider or maximum < 1: return jsonify({"ok": False, "error": "provider and positive max_concurrent are required"}), 400
             conn.execute("INSERT INTO provider_capacities(provider,max_concurrent,updated_utc) VALUES(?,?,datetime('now')) ON CONFLICT(provider) DO UPDATE SET max_concurrent=excluded.max_concurrent,updated_utc=excluded.updated_utc", (provider, maximum)); conn.commit()
         rows = [dict(r) for r in conn.execute("SELECT * FROM provider_capacities ORDER BY provider")]
+        from xtream_pool import scheduler_capacity
+        pooled_capacity = scheduler_capacity(conn)
+        if pooled_capacity is not None:
+            rows = [r for r in rows if r["provider"] != "xtream"] + [{"provider": "xtream", "max_concurrent": pooled_capacity, "source": "account_pool"}]
     return jsonify({"ok": True, "capacities": rows})
 
 

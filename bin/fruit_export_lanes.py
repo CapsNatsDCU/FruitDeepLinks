@@ -107,8 +107,8 @@ def get_event_image_url(conn: sqlite3.Connection, event: Dict) -> Optional[str]:
     
     return None
 # -------------------- Lanes XMLTV --------------------
-def build_lanes_xmltv(conn: sqlite3.Connection, xml_path: str, epg_prefix: str = "lane."):
-    """Export lanes schedule to XMLTV"""
+def lanes_xmltv_tree(conn: sqlite3.Connection, epg_prefix: str = "lane."):
+    """Build the existing lane guide for both legacy and unified exports."""
     
     # Get all lanes
     cur = conn.cursor()
@@ -117,7 +117,7 @@ def build_lanes_xmltv(conn: sqlite3.Connection, xml_path: str, epg_prefix: str =
     
     if not lanes:
         print("No lanes found in database!")
-        return
+        return ET.Element("tv", {"generator-info-name": "FruitDeepLinks - Lanes"})
     
     print(f"Lanes XMLTV: {len(lanes)} virtual channels")
     
@@ -245,6 +245,11 @@ def build_lanes_xmltv(conn: sqlite3.Connection, xml_path: str, epg_prefix: str =
     
     print(f"Lanes XMLTV: {total_programmes} programmes scheduled")
     
+    return tv
+
+
+def build_lanes_xmltv(conn: sqlite3.Connection, xml_path: str, epg_prefix: str = "lane."):
+    tv = lanes_xmltv_tree(conn, epg_prefix)
     # Write file
     xml_str = minidom.parseString(ET.tostring(tv)).toprettyxml(indent="  ")
     Path(xml_path).parent.mkdir(parents=True, exist_ok=True)

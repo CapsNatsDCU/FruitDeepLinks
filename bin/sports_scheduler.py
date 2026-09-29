@@ -26,6 +26,10 @@ def simulate(conn: sqlite3.Connection, lane_count: int, days_ahead: int) -> dict
                     "rule": event.sports_rule, "reason": "lane_capacity"}
                    for event in events if event.event_id not in scheduled_ids]
         capacities = {row[0]: row[1] for row in copy.execute("SELECT provider,max_concurrent FROM provider_capacities")}
+        from xtream_pool import scheduler_capacity
+        pooled_capacity = scheduler_capacity(copy)
+        if pooled_capacity is not None:
+            capacities["xtream"] = pooled_capacity
         conflicts = []
         for provider, maximum in capacities.items():
             provider_rows = [row for row in scheduled if row.get("chosen_provider") == provider]

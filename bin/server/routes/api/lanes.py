@@ -152,6 +152,9 @@ def lane_direct_stream(lane_number):
             playable = get_lane_direct_stream(conn, lane_number, at_ts)
     except Exception:
         playable = None
+    if playable and str(playable.get("provider", "")).lower() == "xtream":
+        from server.services.xtream_proxy import proxy_stream
+        return proxy_stream(playable["stream_id"], f"lane:{lane_number}", playable.get("stream_extension"))
     if not playable or not playable.get("stream_url"):
         return Response("", mimetype="text/plain"), 404
 

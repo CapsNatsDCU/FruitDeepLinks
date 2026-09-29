@@ -38,7 +38,8 @@ bin/                    # Python scripts
 ├── appletv_to_peacock.py         # Apple TV scraper
 ├── peacock_export_hybrid.py      # Direct channels
 ├── peacock_export_lanes.py       # Lane channels
-├── fruitdeeplinks_server.py      # Web dashboard
+├── fruitdeeplinks_v2.py          # Web dashboard entrypoint
+├── server/                       # Modular Flask routes and services
 ├── filter_integration.py         # Filtering logic
 ├── logical_service_mapper.py     # Service mapping
 └── provider_utils.py             # Provider helpers

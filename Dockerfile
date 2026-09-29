@@ -6,16 +6,16 @@ FROM python:3.11-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
 # --- System deps ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     curl \
-    cron \
     sqlite3 \
-    wget \
     ca-certificates \
+    ffmpeg \
     fonts-liberation \
     fonts-dejavu \
     fonts-noto-color-emoji \
@@ -34,11 +34,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# --- Playwright browsers (Chromium) ---
-# NOTE: Playwright uses its own bundled browsers by default.
-RUN python3 -m playwright install-deps chromium \
- && python3 -m playwright install chromium
-
 # --- App code ---
 COPY bin ./bin
 COPY templates ./templates
@@ -48,17 +43,14 @@ COPY VERSION .
 # Ensure runtime dirs exist
 RUN mkdir -p /app/data /app/out /app/logs
 
-# Start script: run cron (if used) and the web server
+# Start the web server. APScheduler, configured from the dashboard, owns the
+# daily refresh schedule inside this process.
 RUN printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -e' \
   '' \
   '# Ensure runtime directories exist' \
   'mkdir -p /app/data /app/out /app/logs' \
-  '' \
-  '# Start cron in the background (if crontab is configured)' \
-  'cron || true' \
-  '' \
   '# Start FruitDeepLinks web server' \
   'cd /app' \
   'exec python3 -u /app/bin/fruitdeeplinks_v2.py' \
@@ -74,4 +66,3 @@ VOLUME ["/app/data", "/app/out", "/app/logs"]
 
 EXPOSE 6655
 CMD ["/app/start.sh"]
-

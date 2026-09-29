@@ -19,6 +19,8 @@
 # code, unaffected by anything here.
 services:
   fruitdeeplinks:
+    environment:
+      - TEMPLATES_AUTO_RELOAD=true
     volumes:
       - ./bin:/app/bin
       - ./templates:/app/templates

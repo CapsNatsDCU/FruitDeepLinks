@@ -112,12 +112,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "unavailable_reason": "TEXT",
         "last_checked_at": "TEXT",
         "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+        "epg_channel_id": "TEXT",
     }
     for column, declaration in additions.items():
         if column not in existing:
             conn.execute(
                 f"ALTER TABLE xtream_persistent_channels ADD COLUMN {column} {declaration}"
             )
+            if column == "epg_channel_id":
+                conn.execute("UPDATE xtream_persistent_channels SET epg_channel_id=guide_id")
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_xtream_persistent_stream "
         "ON xtream_persistent_channels(provider, category_id, stream_id)"
@@ -204,6 +207,15 @@ def get_channel(conn: sqlite3.Connection, channel_id: int) -> Optional[dict[str,
         conn.row_factory = previous_factory
 
 
+def _check_lane_number(conn, number):
+    try:
+        row = conn.execute("SELECT lane_id FROM channels_lane_numbers WHERE CAST(channel_number AS NUMERIC)=CAST(? AS NUMERIC)", (number,)).fetchone()
+    except sqlite3.OperationalError:
+        return
+    if row:
+        raise ChannelNumberConflict("That number is reserved by a Fruit lane in the Channels lineup")
+
+
 def create_channel(
     conn: sqlite3.Connection,
     stream: Mapping[str, Any],
@@ -220,6 +232,8 @@ def create_channel(
     enabled: bool = True,
 ) -> dict[str, Any]:
     ensure_schema(conn)
+    from xtream_accounts import public_metadata
+    stream = public_metadata(dict(stream), conn)
     stream_id = _clean_optional(stream.get("stream_id"), limit=255)
     original_name = _clean_optional(stream.get("name"), limit=1024)
     category_id_text = _clean_optional(category_id, limit=255)
@@ -227,6 +241,7 @@ def create_channel(
         raise PersistentChannelError("The selected stream is missing its name, stream ID, or category")
     display = _clean_optional(display_name, limit=1024) or original_name
     number = normalize_channel_number(channel_number)
+    _check_lane_number(conn, number)
     now = utc_now()
     epg_id = stream.get("epg_channel_id") or stream.get("epg_id")
     try:
@@ -262,6 +277,8 @@ def create_channel(
                 now,
             ),
         )
+        conn.execute("UPDATE xtream_persistent_channels SET epg_channel_id=? WHERE id=?",
+                     (_clean_optional(epg_id, limit=512), cursor.lastrowid))
         conn.commit()
     except sqlite3.IntegrityError as exc:
         conn.rollback()
@@ -291,6 +308,7 @@ def update_channel(conn: sqlite3.Connection, persistent_id: int,
             value = 1 if value in (True, 1, "1", "true", "True") else 0
         elif key == "channel_number":
             value = normalize_channel_number(value)
+            _check_lane_number(conn, value)
         elif key == "display_name":
             value = _clean_optional(value, limit=1024)
             if not value:
@@ -349,6 +367,10 @@ def reconcile_channels(
         conn.execute("BEGIN")
         for channel in channels:
             category_id = str(channel["category_id"])
+            # A missing/failed/unselected category is not an authoritative
+            # empty snapshot. Retain its last known availability.
+            if category_id not in streams_by_category:
+                continue
             rows = streams_by_category.get(category_id, [])
             current = [row for row in rows if str(row.get("stream_id")) == str(channel["stream_id"])]
             if current:
@@ -358,13 +380,15 @@ def reconcile_channels(
                     UPDATE xtream_persistent_channels
                        SET availability_status='available', unavailable_reason=NULL,
                            icon=COALESCE(?, icon), stream_extension=?, category_name=COALESCE(?, category_name),
-                           last_checked_at=?, updated_at=?
+                           epg_channel_id=COALESCE(?,epg_channel_id), last_checked_at=?, updated_at=?
                      WHERE id=?
                     """,
                     (
                         _clean_optional(row.get("stream_icon"), limit=2048),
                         normalize_extension(row.get("container_extension")),
-                        (category_names or {}).get(category_id), checked_at, checked_at, channel["id"],
+                        (category_names or {}).get(category_id),
+                        _clean_optional(row.get("epg_channel_id") or row.get("epg_id"), limit=512),
+                        checked_at, checked_at, channel["id"],
                     ),
                 )
                 counts["persistent_available"] += 1
@@ -382,13 +406,14 @@ def reconcile_channels(
                         UPDATE xtream_persistent_channels
                            SET stream_id=?, stream_extension=?, icon=COALESCE(?, icon),
                                availability_status='available', unavailable_reason=NULL,
-                               last_checked_at=?, updated_at=?
+                               epg_channel_id=?, last_checked_at=?, updated_at=?
                          WHERE id=?
                         """,
                         (
                             new_stream_id,
                             normalize_extension(replacement.get("container_extension")),
                             _clean_optional(replacement.get("stream_icon"), limit=2048),
+                            _clean_optional(replacement.get("epg_channel_id") or replacement.get("epg_id"), limit=512),
                             checked_at, checked_at, channel["id"],
                         ),
                     )
@@ -430,14 +455,16 @@ def reconcile_channels(
 
 
 def _attribute(value: Any) -> str:
-    return str(value or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+    return str(value or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("\r", " ")
 
 
-def render_m3u(conn: sqlite3.Connection, server_url: str) -> str:
+def render_m3u(conn: sqlite3.Connection, server_url: str, *, channels=None) -> str:
+    from xtream_accounts import public_metadata
     base = str(server_url or "").rstrip("/")
     lines = ["#EXTM3U"]
-    for channel in list_channels(conn, enabled_only=True):
+    for channel in public_metadata(channels if channels is not None else list_channels(conn, enabled_only=True), conn):
         attrs = [
+            f'channel-id="xtream.persistent.{channel["id"]}"',
             f'tvg-id="{_attribute(channel["effective_guide_id"])}"',
             f'tvg-name="{_attribute(channel["display_name"])}"',
             f'tvg-chno="{_attribute(channel["channel_number"])}"',
@@ -453,13 +480,39 @@ def render_m3u(conn: sqlite3.Connection, server_url: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_xmltv(conn: sqlite3.Connection) -> bytes:
+def xmltv_tree(conn: sqlite3.Connection, *, channels=None):
+    from xtream_accounts import load_accounts, safe_value
+    from xtream_epg import cached_programmes
+    accounts = load_accounts(conn)
     root = ET.Element("tv", {"generator-info-name": "FruitDeepLinks"})
-    for channel in list_channels(conn, enabled_only=True):
-        element = ET.SubElement(root, "channel", {"id": str(channel["effective_guide_id"])})
-        ET.SubElement(element, "display-name").text = str(channel["display_name"])
-        if channel.get("logo"):
-            ET.SubElement(element, "icon", {"src": str(channel["logo"])})
+    seen, seen_programmes, programmes = set(), set(), []
+    for channel in channels if channels is not None else list_channels(conn, enabled_only=True):
+        cached = cached_programmes(conn, channel)
+        channel = safe_value(channel, accounts)
+        if channel["effective_guide_id"] not in seen:
+            seen.add(channel["effective_guide_id"])
+            element = ET.SubElement(root, "channel", {"id": str(channel["effective_guide_id"])})
+            ET.SubElement(element, "display-name").text = str(channel["display_name"])
+            if channel.get("logo"):
+                ET.SubElement(element, "icon", {"src": str(channel["logo"])})
+        for programme in cached:
+            programme.set("channel", channel["effective_guide_id"])
+            for item in programme.iter():
+                if item.text:
+                    item.text = safe_value(item.text, accounts)
+                if item.tail:
+                    item.tail = safe_value(item.tail, accounts)
+                item.attrib.update(safe_value(item.attrib, accounts))
+            identity = (programme.get("channel"), programme.get("start"), programme.get("stop"))
+            if identity not in seen_programmes:
+                programmes.append(programme)
+                seen_programmes.add(identity)
+    root.extend(programmes)
+    return root
+
+
+def render_xmltv(conn: sqlite3.Connection) -> bytes:
+    root = xmltv_tree(conn)
     ET.indent(root, space="  ")
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
