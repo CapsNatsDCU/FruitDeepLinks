@@ -70,6 +70,9 @@ services:
       # Auto-refresh
       - AUTO_REFRESH_ENABLED=${AUTO_REFRESH_ENABLED:-true}
       - AUTO_REFRESH_TIME=${AUTO_REFRESH_TIME:-02:30}
+      # Optional SerpApi key for advisory major-league schedule coverage.
+      # The application never stores or returns this secret.
+      - SERPAPI_API_KEY=${SERPAPI_API_KEY:-}
     volumes:
       - ./data:/app/data
       - ./out:/app/out

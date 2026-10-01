@@ -41,7 +41,7 @@ class SportsGetSafetyTests(unittest.TestCase):
     def test_my_sports_gets_are_schema_and_sync_free(self):
         # A call to either helper would write/mutate, so make it an immediate
         # failure.  The catalog must be served from refresh-materialized rows.
-        urls = ["/api/sports/catalog", "/api/sports/rules", "/api/sports/coverage",
+        urls = ["/api/sports/catalog", "/api/sports/rules", "/api/sports/coverage", "/api/sports/schedule-audit",
                 f"/api/sports/events/{self.event['canonical_event_id']}",
                 "/api/sports/provider-capacities", "/api/sports/health"]
         with patch("server.routes.api.sports.ensure_schema", side_effect=AssertionError("GET wrote schema")):
@@ -50,7 +50,7 @@ class SportsGetSafetyTests(unittest.TestCase):
                 self.assertEqual(200, response.status_code, url)
 
     def test_repeated_my_sports_gets_preserve_materialized_rows(self):
-        urls = ["/api/sports/catalog", "/api/sports/rules", "/api/sports/coverage",
+        urls = ["/api/sports/catalog", "/api/sports/rules", "/api/sports/coverage", "/api/sports/schedule-audit",
                 f"/api/sports/events/{self.event['canonical_event_id']}",
                 "/api/sports/provider-capacities", "/api/sports/health"]
 
@@ -110,6 +110,19 @@ class SportsGetSafetyTests(unittest.TestCase):
         self.assertEqual("absolute_utc", coverage["timestamp_contract"])
         page = self.client.get("/my-sports")
         self.assertIn(b"formatUtc", page.data)
+        self.assertIn(b"Outside Schedule Coverage", page.data)
+
+    def test_schedule_audit_league_selection_is_operator_configurable(self):
+        saved = self.client.post("/api/sports/schedule-audit/config", json={
+            "enabled_keys": ["nfl", "formula-1"],
+        })
+        self.assertEqual(200, saved.status_code)
+        self.assertEqual(["nfl", "formula-1"], saved.get_json()["enabled_keys"])
+        audit = self.client.get("/api/sports/schedule-audit").get_json()
+        enabled = [row["key"] for row in audit["leagues"] if row["enabled"]]
+        self.assertEqual(["nfl", "formula-1"], enabled)
+        rejected = self.client.post("/api/sports/schedule-audit/config", json={"enabled_keys": ["unknown"]})
+        self.assertEqual(400, rejected.status_code)
 
     def test_quiet_league_stays_materialized_but_has_no_coverage_status(self):
         with sqlite3.connect(self.db_path) as conn:

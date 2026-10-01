@@ -583,12 +583,11 @@ def build_lanes_with_placeholders(
         from sports_metadata import normalize_provider
         provider_capacities = {normalize_provider(row[0]): int(row[1]) for row in conn.execute(
             "SELECT provider,max_concurrent FROM provider_capacities"
-        )}
+        ) if normalize_provider(row[0]) != "xtream"}
     decision_rows: List[Tuple[str, str, int, str, Optional[int]]] = []
-    from xtream_pool import scheduler_capacity
-    pooled_capacity = scheduler_capacity(conn)
-    if pooled_capacity is not None:
-        provider_capacities["xtream"] = pooled_capacity
+    # Xtream lanes are guide choices, not open connections. The shared account
+    # pool enforces the real connection limit when a viewer/recorder tunes in.
+    # Reserving capacity here hides otherwise valid games from the guide.
     scheduled: List[Tuple[Event, int, Dict[str, Any]]] = []
     selected_playables: Dict[str, Dict[str, Any]] = {}
 

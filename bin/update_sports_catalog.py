@@ -33,6 +33,7 @@ BOOTSTRAP = (
     ("Soccer", "UEFA Champions League"), ("Soccer", "English Premier League"),
     ("Soccer", "La Liga"), ("Soccer", "Bundesliga"), ("Soccer", "Serie A"),
     ("Soccer", "Ligue 1"), ("Soccer", "FIFA World Cup"),
+    ("American football", "NCAA FBS"), ("American football", "UFL"),
     ("Motorsport", "Formula 1"), ("Motorsport", "NASCAR Cup Series"),
     ("Motorsport", "IndyCar Series"), ("Motorsport", "IMSA SportsCar Championship"),
     ("Motorsport", "FIA World Endurance Championship"),

@@ -26,6 +26,26 @@ modes, its output is untrusted metadata that the local deterministic resolver
 must validate; it cannot create canonical authority, select a stream, or
 schedule a lane.
 
+## Outside schedule coverage
+
+The **My Sports → Outside Schedule Coverage** panel maintains an operator-
+selected list of leagues to compare with Fruit's observed events.  The default
+priority set is NFL, NHL, MLB, NBA, MLS, UEFA Champions League, English Premier
+League, Formula 1, NASCAR Cup, IndyCar, NCAA FBS, and UFL.  Each league can be
+enabled or disabled with a checkbox.
+
+Set `SERPAPI_API_KEY` in deployment secrets to check NFL, NHL, MLB, NBA, MLS,
+Champions League, Premier League, and NCAA FBS through SerpApi's structured
+Google Sports feed.  Formula 1, NASCAR Cup, IndyCar, and UFL use free ESPN
+schedule feeds and do not consume SerpApi searches.  The scheduled refresh
+runs this audit at most every 72 hours, reserves 25 of the free plan's 250
+monthly searches, and shows tracked usage in My Sports.
+
+External events live only in `sports_schedule_reference_events`.  They can
+report `missing_from_ingestion`, `no_playable`, `playable_found`, or
+`scheduled`, but they never create canonical events, select streams, or make an
+event scheduling-eligible.  **Check now** runs the same bounded audit on demand.
+
 ## Ownership and precedence
 
 Fruit-generated IDs remain the canonical IDs.  Upstream IDs (including a

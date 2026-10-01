@@ -120,7 +120,7 @@ class SportsSchedulerHardeningTests(unittest.TestCase):
         self.assertEqual({f"always-{index:02d}" for index in range(50)}, self._scheduled_ids())
         self._assert_lane_intervals_do_not_overlap()
 
-    def test_provider_capacity_uses_ranked_alternate_before_drop(self):
+    def test_xtream_guide_choices_do_not_spend_tune_time_capacity(self):
         self._reset_lanes(2)
         self.conn.execute("INSERT INTO provider_capacities(provider,max_concurrent,updated_utc) VALUES('xtream',1,'2026-01-01T00:00:00Z')")
         start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
@@ -139,9 +139,9 @@ class SportsSchedulerHardeningTests(unittest.TestCase):
             "SELECT event_id,chosen_provider FROM lane_events WHERE COALESCE(is_placeholder,0)=0"
         )}
         self.assertEqual({"first", "second"}, set(rows))
-        self.assertEqual("other", rows["second"])
+        self.assertEqual("xtream", rows["second"])
 
-    def test_provider_capacity_conflict_is_recorded_distinctly(self):
+    def test_xtream_pool_capacity_does_not_replace_lane_capacity_decision(self):
         self._reset_lanes(1)
         self.conn.execute("INSERT INTO provider_capacities(provider,max_concurrent,updated_utc) VALUES('xtream',1,'2026-01-01T00:00:00Z')")
         start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
@@ -151,7 +151,7 @@ class SportsSchedulerHardeningTests(unittest.TestCase):
         with patch("fruit_build_lanes.get_filtered_playables", side_effect=choices):
             build_lanes_with_placeholders(self.conn, [first, provider_blocked], 1)
         decision = self.conn.execute("SELECT decision FROM scheduling_decisions WHERE canonical_event_id='ce-blocked'").fetchone()[0]
-        self.assertEqual("provider_capacity_conflict", decision)
+        self.assertEqual("lane_capacity_conflict", decision)
 
     def test_lane_capacity_conflict_is_recorded_distinctly(self):
         self._reset_lanes(1)
@@ -230,7 +230,7 @@ class SportsSchedulerHardeningTests(unittest.TestCase):
             build_lanes_with_placeholders(self.conn, [first, merged], 2)
         self.assertEqual(["aaa-first", "apple-row", "xtream-row"], ranking_calls)
         selected = self.conn.execute("SELECT chosen_playable_id,chosen_provider FROM lane_events WHERE event_id='zzz-merged'").fetchone()
-        self.assertEqual(("xtream-alt", "alternate"), tuple(selected))
+        self.assertEqual(("apple-x", "xtream"), tuple(selected))
 
     def test_realistic_apple_import_to_canonical_lane_and_xmltv_keeps_utc_instant(self):
         ensure_events_schema(self.conn)

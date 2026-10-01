@@ -529,7 +529,7 @@ def main(argv=None):
     print("=" * 60)
 
     # Total steps in this pipeline (updated for beIN Sports)
-    total_steps = 17  # Includes local catalog seed before canonical lane planning
+    total_steps = 18  # Includes external schedule audit before canonical lane planning
     emit_progress(
         "refresh_start",
         total_steps=total_steps,
@@ -1138,6 +1138,15 @@ def main(argv=None):
         "python3", "update_sports_catalog.py", "--db", str(DB_PATH), "--source", "bootstrap", "--apply",
     ]):
         return 1
+
+    # External schedules are advisory reference rows.  This bounded, non-fatal
+    # check never materializes canonical events or grants scheduling authority.
+    # It runs at most every 72 hours even though the parent refresh is daily.
+    if not skip_scrape:
+        run_step("8e", total_steps, "Checking selected leagues against outside schedules", [
+            "python3", "sports_schedule_audit.py", "--db", str(DB_PATH),
+            "--days", "14", "--due-hours", "72",
+        ], allow_fail=True)
 
     # Overnight refreshes deliberately let catalog AI drain its entire review
     # backlog.  It only queues proposals; applying them is always an explicit

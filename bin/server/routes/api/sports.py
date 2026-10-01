@@ -12,6 +12,9 @@ from sports_metadata import (applicable_rule, coverage, ensure_schema, resolve_s
                              save_rule, normalize_provider)
 from local_ai_event_parser import clear_cache as clear_local_ai_cache
 from sports_catalog import apply_catalog_records
+from sports_schedule_audit import (refresh as refresh_schedule_audit,
+                                   save_enabled_keys as save_schedule_audit_leagues,
+                                   snapshot as schedule_audit_snapshot)
 from catalog_workbench import (add_alias, apply_all as apply_all_catalog_proposals,
                                apply_proposal as apply_catalog_proposal, entity_state,
                                cancel_run, merge_entities, merge_selected_entities, run_ai_review, set_archived,
@@ -29,6 +32,7 @@ except ImportError:
         return fallback
 
 bp = Blueprint("sports_api", __name__)
+_schedule_audit_lock = threading.Lock()
 
 
 def _prepare_write(conn):
@@ -481,6 +485,56 @@ def upcoming_coverage():
                "awaiting_source": sum(x["coverage_state"] == "awaiting_source" for x in items)}
     return jsonify({"ok": True, "days": days, "items": items, "summary": summary,
                     "display_timezone": display_timezone, "timestamp_contract": "absolute_utc"})
+
+
+@bp.route("/api/sports/schedule-audit")
+def external_schedule_audit():
+    """Read the materialized outside-schedule comparison without network I/O."""
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    days = min(max(request.args.get("days", 14, type=int), 1), 90)
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        result = schedule_audit_snapshot(conn, days=days)
+        display_timezone = get_setting(conn, "timezone") or os.getenv("FRUIT_TIMEZONE") or os.getenv("TZ") or "UTC"
+    return jsonify({"ok": True, "days": days, "serpapi_configured": bool(os.getenv("SERPAPI_API_KEY")),
+                    "display_timezone": display_timezone, "timestamp_contract": "absolute_utc", **result})
+
+
+@bp.route("/api/sports/schedule-audit/config", methods=["POST"])
+def configure_external_schedule_audit():
+    """Save the operator-selected coverage leagues; an empty selection disables checks."""
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    body = request.get_json(silent=True) or {}
+    keys = body.get("enabled_keys")
+    if not isinstance(keys, list):
+        return jsonify({"ok": False, "error": "enabled_keys must be an array"}), 400
+    try:
+        with get_conn() as conn:
+            selected = save_schedule_audit_leagues(conn, keys)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "enabled_keys": selected})
+
+
+@bp.route("/api/sports/schedule-audit/refresh", methods=["POST"])
+def refresh_external_schedule_audit():
+    """Run the bounded reference refresh on demand; it cannot schedule events."""
+    if not db_exists(): return jsonify({"ok": False, "error": "Database not found"}), 404
+    if not _schedule_audit_lock.acquire(blocking=False):
+        return jsonify({"ok": False, "error": "Schedule coverage check is already running"}), 409
+    try:
+        body = request.get_json(silent=True) or {}
+        try:
+            days = min(max(int(body.get("days", 14)), 1), 31)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "days must be an integer"}), 400
+        with get_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            result = refresh_schedule_audit(conn, api_key=os.getenv("SERPAPI_API_KEY"),
+                                            days=days, force=True)
+        return jsonify({"ok": True, **result})
+    finally:
+        _schedule_audit_lock.release()
 
 
 @bp.route("/api/sports/events/<canonical_event_id>")
