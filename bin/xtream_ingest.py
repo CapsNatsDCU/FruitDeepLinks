@@ -485,9 +485,6 @@ class XtreamClient:
                     params={"username": self.config.username, "password": self.config.password},
                     timeout=self.timeout,
                 )
-                if response.status_code in {401, 403}:
-                    self.last_account_check = {"health": "unhealthy", "error": "Account authentication rejected"}
-                    return None
                 response.raise_for_status()
                 payload = response.json()
             except Exception:

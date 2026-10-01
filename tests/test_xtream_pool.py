@@ -124,6 +124,22 @@ class AccountConfigTests(unittest.TestCase):
         self.assertNotIn(config.password, arguments)
         self.assertIn(config.password, runner.call_args.kwargs["input"])
 
+    def test_account_discovery_curl_fallback_after_requests_403(self):
+        config = load_accounts(environ=pool_environment())[0].config
+        session = Mock()
+        response = session.get.return_value
+        response.status_code = 403
+        response.raise_for_status.side_effect = RuntimeError("403")
+        runner = Mock(return_value=Mock(
+            returncode=0,
+            stdout='{"user_info":{"auth":1,"status":"Active","max_connections":"3"}}',
+        ))
+        client = XtreamClient(config, session=session, subprocess_runner=runner)
+
+        self.assertEqual(3, client.get_account_max_connections())
+        self.assertEqual("healthy", client.last_account_check["health"])
+        self.assertEqual(1, runner.call_count)
+
 
 class PoolTests(unittest.TestCase):
     def setUp(self):
