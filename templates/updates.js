@@ -11,7 +11,7 @@
     const busy = submitting || busyPhases.has(state.phase);
     el('update-version').textContent = `Running v${state.running_version} · ${(state.running_revision || 'unknown').slice(0, 12)}`
       + (state.branch ? ` · ${state.remote}/${state.branch}` : '');
-    el('update-status').textContent = !state.enabled ? 'Connect the host updater to enable in-app updates.'
+    el('update-status').textContent = !state.enabled ? 'One-time setup is required. Open the setup instructions below to enable updates and restarts here.'
       : !state.online ? 'The host updater is offline. Start it on your Docker host to continue.'
       : (state.message || 'Ready to check for updates.');
     el('update-check').disabled = busy || !state.online;

@@ -157,6 +157,21 @@ class Updater:
         write_json(path, literal(config))
         os.chmod(path, 0o600)
 
+    def backup_database(self, container_id, revision):
+        backup_name = f"before-{revision[:12]}-{time.time_ns()}.db"
+        code = (
+            "import os,sqlite3,pathlib; "
+            "p=pathlib.Path(os.getenv('FRUIT_DB_PATH','/app/data/fruit_events.db')).resolve(); "
+            "assert p.is_file(),'Database missing'; "
+            "d=p.parent/'update-backups'; d.mkdir(exist_ok=True); "
+            "s=sqlite3.connect(p.as_uri()+'?mode=ro',uri=True); "
+            f"t=sqlite3.connect(d/'{backup_name}'); "
+            "s.backup(t); t.close(); s.close()"
+        )
+        self.run(["docker", "exec", container_id, "python3", "-c", code], timeout=180,
+                 error="Database backup failed. The app has not been restarted.")
+        return backup_name
+
     def install(self, expected):
         # Fetch again so an old browser cannot unknowingly approve newer code.
         state = self.check(for_install=True)
@@ -193,18 +208,7 @@ class Updater:
         self.app_idle(old["Id"])
         # SQLite's online backup also handles WAL databases without copying an
         # inconsistent DB/WAL pair. Store it alongside the persisted database.
-        backup_name = f"before-{expected[:12]}-{time.time_ns()}.db"
-        backup_code = (
-            "import os,sqlite3,pathlib; "
-            "p=pathlib.Path(os.getenv('FRUIT_DB_PATH','/app/data/fruit_events.db')).resolve(); "
-            "assert p.is_file(),'Database missing'; "
-            "d=p.parent/'update-backups'; d.mkdir(exist_ok=True); "
-            "s=sqlite3.connect(p.as_uri()+'?mode=ro',uri=True); "
-            f"t=sqlite3.connect(d/'{backup_name}'); "
-            "s.backup(t); t.close(); s.close()"
-        )
-        self.run(["docker", "exec", old["Id"], "python3", "-c", backup_code], timeout=180,
-                 error="Database backup failed. The app has not been restarted.")
+        backup_name = self.backup_database(old["Id"], expected)
         self.save(phase="restarting", database_backup=backup_name,
                   message="Restarting the app and checking its health. Reconnecting shortly.")
         up = ["up", "-d", "--no-deps", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "120", SERVICE]

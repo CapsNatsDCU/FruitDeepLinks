@@ -4,16 +4,93 @@ Settings → **App Updates** can check the installation's current Git branch,
 show its pending commit summaries, and install a revision you explicitly approve.
 Updates are never installed on a timer. The default remote is `origin`, so this
 fork continues to update from your fork rather than the upstream project.
+After setup, updates do not require editing YAML, changing a commit hash, or
+running a rebuild command. The buttons perform the check, build and restart.
+
+## TrueNAS Custom App: one-time setup
+
+For an existing Docker-based TrueNAS Custom App (24.10 or newer), use
+`bin/xsort_truenas_updater.py`. It keeps the app managed by TrueNAS. It uses the
+NAS's preinstalled local API client and never places a NAS API key or Docker
+socket in the web container. API compatibility is based on the native
+[app configuration/update API](https://api.truenas.com/v25.04.1/api_methods_app.update.html)
+and [startup task API](https://api.truenas.com/v25.04.1/api_methods_initshutdownscript.create.html).
+
+Run the following **once in the TrueNAS shell**, after this code has been
+published to your branch. Use an unused checkout directory on your persistent
+Apps dataset. This example uses the existing app name `xsort`; adjust the name
+if yours differs. Finish any recordings and refresh before running setup.
+
+```bash
+sudo git clone --branch codex/xtream-ingestion --single-branch \
+  https://github.com/CapsNatsDCU/FruitDeepLinks.git /mnt/Apps/fruit-updater
+sudo /usr/bin/python3 /mnt/Apps/fruit-updater/bin/xsort_truenas_updater.py \
+  --app xsort --setup
+```
+
+Do not clone over an existing directory or use your data/secrets directory as
+the checkout. If you already have a clean dedicated checkout containing this
+script, run its setup command instead. The host process needs root access to
+the local TrueNAS API and Docker. The checkout must remain on the NAS.
+
+Setup reads the existing Custom App configuration, requires exactly one
+`fruitdeeplinks` service and persistent data/out/log mounts, and rejects active
+streams or refreshes. It builds the selected branch revision, backs up the
+database and old image, and adds the updater mailbox automatically. It preserves
+existing ports, credentials, secrets mounts, storage, networks and other app
+settings. It replaces the remote `build.context` with a locally built versioned
+image. TrueNAS's native `app.update` applies that image; the helper does not edit
+TrueNAS-generated files or run a second Compose project alongside the app.
+
+It also registers a named **POSTINIT** task in TrueNAS that starts the helper
+under a transient systemd service with restart enabled. No TrueNAS OS packages
+or API keys need to be installed. After each successful update, the helper
+restarts itself so its own updated code is loaded too.
+
+Open **Settings → App Updates**. From now on, use **Check for updates**, review
+the changes, then **Install update**. The helper follows the configured branch,
+builds the exact reviewed revision, and asks TrueNAS to restart this app. It
+waits for the image's health check and verifies the running revision. You do
+not replace `build.context` or paste commit hashes for subsequent updates.
+
+The checkout must be clean. Catalog apps, multi-service Custom Apps, development
+source mounts, and nonstandard Docker build options are not supported by this
+mode. An edit to the TrueNAS app during a build aborts installation rather than
+overwriting the newer settings. Only pushed branch revisions are available.
+
+If a new image fails, the helper asks TrueNAS to restore the retained old image
+with the saved app configuration. Database backups are retained separately;
+image rollback never silently rewinds data. Private app configuration backups
+may contain credentials and stay in `.xsort-updater/private/` with restricted
+permissions. Do not share those files.
+
+If automatic recovery fails, stop the helper and restore its saved image/config:
+
+```bash
+sudo systemctl stop xsort-updater-xsort.service
+sudo /usr/bin/python3 /mnt/Apps/fruit-updater/bin/xsort_truenas_updater.py \
+  --app xsort --recover
+```
+
+This does not restore the database. For diagnostics, use
+`sudo journalctl -u xsort-updater-xsort.service`. The TrueNAS POSTINIT task is
+named `Fruit updater: xsort`; disable it and stop the service to disconnect the
+helper. Do not delete its checkout or backups while it is in use.
+
+The automated tests exercise configuration preservation, repeat updates,
+branch checks, image health failures and recovery with simulated TrueNAS and
+Docker calls. They do not establish successful installation on a real NAS.
+
+## Docker Compose: one-time setup
 
 The web app communicates with a small Python helper running on the Docker host.
 The helper has no network listener; the web container receives only a file
 mailbox, not the Docker socket or the repository. The helper needs Python 3.10+,
 Git access to the configured remote, and Docker Compose v2 with `up --wait`.
-Only a source-build Compose installation using the standard Dockerfile is
-supported. Published-image, Portainer-managed, and development bind-mount
+This mode requires a source-build Compose installation using the standard
+Dockerfile. Published-image, Portainer-managed, and development bind-mount
 installations must first move to a host-managed source-build Compose checkout.
-
-## First-time setup
+TrueNAS Custom Apps use the separate setup above.
 
 Run these commands on the **Docker host**, in the clean deployment checkout
 containing this updater. Stop any other deployment automation for this service.

@@ -1,6 +1,6 @@
 <section class="card" id="app-updates" aria-labelledby="app-updates-title" style="margin-bottom:16px">
   <h2 id="app-updates-title">App Updates</h2>
-  <p class="favorite-intro">Check your current branch for updates, review the changes, and choose when to install.</p>
+  <p class="favorite-intro">Check for updates, review the changes, and choose when to install. After the one-time setup, updates and restarts happen here without editing YAML.</p>
   <p id="update-version" class="field-help"></p>
   <p id="update-status" role="status" aria-live="polite">Loading updater status…</p>
   <p id="update-error" class="favorite-alert" role="alert"></p>
@@ -14,9 +14,12 @@
     <ul id="update-commits" style="padding-left:24px;margin:12px 0;overflow-wrap:anywhere"></ul>
   </details>
   <details id="update-setup" hidden>
-    <summary>Connect the updater on your Docker host</summary>
+    <summary>One-time updater setup</summary>
+    <h3>TrueNAS Custom App</h3>
+    <p class="favorite-intro">Use the TrueNAS setup in <code>docs/UPDATER.md</code> once. It connects your existing app, preserves its settings and storage, and starts the updater automatically after NAS restarts. Future updates use the buttons above.</p>
+    <h3>Docker Compose</h3>
     <p class="favorite-intro">In your deployment checkout, include <code>docker-compose.updater.yml</code> when starting the app, then keep the host helper running:</p>
     <pre style="white-space:pre-wrap;overflow-wrap:anywhere">python3 bin/xsort_updater.py</pre>
-    <p class="field-help">The complete first-time setup and recovery instructions are in <code>docs/UPDATER.md</code> in your checkout. The helper uses the current branch on <code>origin</code>. Installations managed by Portainer or published images need a source-build Compose checkout first.</p>
+    <p class="field-help">The complete first-time setup and recovery instructions are in <code>docs/UPDATER.md</code> in your checkout. Updates use your configured repository and branch. Portainer installations need a host-managed source-build Compose checkout first.</p>
   </details>
 </section>
