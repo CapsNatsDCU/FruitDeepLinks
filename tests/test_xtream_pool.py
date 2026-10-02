@@ -140,6 +140,50 @@ class AccountConfigTests(unittest.TestCase):
         self.assertEqual("healthy", client.last_account_check["health"])
         self.assertEqual(1, runner.call_count)
 
+    def test_account_discovery_retries_json_rejection_and_unconfirmed_auth(self):
+        config = load_accounts(environ=pool_environment())[0].config
+        for info in ({"auth": 0}, {"auth": "0", "status": "Active"},
+                     {"status": "Expired"}, {"max_connections": "4"}):
+            with self.subTest(info=info):
+                session = Mock()
+                session.get.return_value.json.return_value = {"user_info": info}
+                runner = Mock(return_value=Mock(returncode=0, stdout=json.dumps({
+                    "user_info": {"auth": 1, "status": "Active", "max_connections": "3"},
+                })))
+                client = XtreamClient(config, session=session, subprocess_runner=runner)
+                self.assertEqual(3, client.get_account_max_connections())
+                self.assertEqual("healthy", client.last_account_check["health"])
+                self.assertEqual(1, runner.call_count)
+
+    def test_account_discovery_preserves_rejection_if_curl_cannot_authorize(self):
+        config = load_accounts(environ=pool_environment())[0].config
+        for completed in (
+            Mock(returncode=0, stdout='{"user_info":{"auth":0}}'),
+            Mock(returncode=0, stdout='{"user_info":{"max_connections":"4"}}'),
+            Mock(returncode=0, stdout='[]'),
+            Mock(returncode=0, stdout='invalid JSON private-password'),
+            Mock(returncode=28, stderr='private-password'),
+        ):
+            with self.subTest(completed=completed):
+                session = Mock()
+                session.get.return_value.json.return_value = {"user_info": {"auth": 0}}
+                runner = Mock(return_value=completed)
+                client = XtreamClient(config, session=session, subprocess_runner=runner)
+                self.assertIsNone(client.get_account_max_connections())
+                self.assertEqual("unhealthy", client.last_account_check["health"])
+                self.assertEqual(1, runner.call_count)
+                self.assertNotIn("private-password", json.dumps(client.last_account_check))
+
+    def test_account_discovery_success_does_not_retry_even_with_unknown_limit(self):
+        config = load_accounts(environ=pool_environment())[0].config
+        session = Mock()
+        session.get.return_value.json.return_value = {"user_info": {"auth": 1}}
+        runner = Mock()
+        client = XtreamClient(config, session=session, subprocess_runner=runner)
+        self.assertIsNone(client.get_account_max_connections())
+        self.assertEqual("healthy", client.last_account_check["health"])
+        runner.assert_not_called()
+
 
 class PoolTests(unittest.TestCase):
     def setUp(self):

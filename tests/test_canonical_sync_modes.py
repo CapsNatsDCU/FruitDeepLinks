@@ -77,12 +77,16 @@ class CanonicalSyncModesTests(unittest.TestCase):
 
     def test_timeout_configuration_accepts_sixty_seconds(self):
         conn = self.build(1)
+        reports = []
         try:
             with patch("local_ai_event_parser.urlopen", side_effect=TimeoutError) as request:
-                summary = sync_legacy_events(conn, ai_mode="unlimited")
+                summary = sync_legacy_events(conn, ai_mode="unlimited",
+                                             progress_callback=lambda **payload: reports.append(payload))
             self.assertEqual(2, request.call_count)
             self.assertEqual(1, summary["timeouts"])
             self.assertEqual(1, summary["transport_failures"])
+            self.assertEqual((1, 1), (reports[-1]["completed"], reports[-1]["records"]))
+            self.assertEqual(2, reports[-1]["requests"])
         finally:
             conn.close()
 
@@ -114,6 +118,42 @@ class CanonicalSyncModesTests(unittest.TestCase):
             self.assertEqual("complete", reports[-1]["status"])
             self.assertEqual(1, summary["deterministic_pass"]["resolved"])
             self.assertEqual(1, summary["ai_pass"]["requests"])
+        finally:
+            conn.close()
+
+    def test_ai_progress_is_published_before_the_next_request_and_counts_deferred_events(self):
+        conn = self.build(4)
+        reports = []
+        request_progress = []
+
+        def respond(*_args, **_kwargs):
+            latest = reports[-1]
+            self.assertEqual(("ai", "running"), (latest["pass_name"], latest["status"]))
+            request_progress.append((latest["completed"], latest["records"]))
+            return _Response()
+
+        try:
+            with patch("local_ai_event_parser.urlopen", side_effect=respond):
+                sync_legacy_events(conn, ai_mode="bounded",
+                                   progress_callback=lambda **payload: reports.append(payload))
+            self.assertEqual([(0, 4), (1, 4)], request_progress)
+            first_completed = next(item for item in reports
+                                   if item["pass_name"] == "ai" and item.get("completed") == 1)
+            self.assertEqual(1, first_completed["requests"])
+            self.assertEqual(1, first_completed["ai_interpretations_used"])
+            self.assertEqual((4, 4), (reports[-1]["completed"], reports[-1]["records"]))
+            self.assertEqual(2, reports[-1]["budget_exhausted"])
+        finally:
+            conn.close()
+
+    def test_empty_ai_pass_reports_zero_of_zero(self):
+        conn = self.build(0)
+        reports = []
+        try:
+            sync_legacy_events(conn, ai_mode="bounded",
+                               progress_callback=lambda **payload: reports.append(payload))
+            self.assertEqual(("ai", "complete"), (reports[-1]["pass_name"], reports[-1]["status"]))
+            self.assertEqual((0, 0), (reports[-1]["completed"], reports[-1]["records"]))
         finally:
             conn.close()
 

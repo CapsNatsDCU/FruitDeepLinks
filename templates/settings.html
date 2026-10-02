@@ -98,6 +98,7 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
 {% endblock %}
 
 {% block content %}
+{% include "updates_panel.html" %}
 <section class="card favorite-settings" aria-labelledby="favorite-settings-title">
   <h2 id="favorite-settings-title">Favorite Teams &amp; Broadcasters</h2>
   <p class="favorite-intro">When multiple streams are available for the same event, FruitDeepLinks can prefer feeds associated with your favorite team or broadcaster. Imported event and Xtream EPG metadata can pre-fill the team identity, sport, and league. These preferences affect ranking only; other streams remain available as fallbacks.</p>
@@ -193,6 +194,7 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
 {% endblock %}
 
 {% block extra_script %}
+<script src="{{ url_for('static', filename='updates.js') }}" defer></script>
 <script>
 const GROUPS = {
   'Server': ['server_url', 'channels_dvr_ip', 'channels_source_name', 'timezone', 'app_primary_color'],

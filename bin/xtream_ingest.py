@@ -468,6 +468,23 @@ class XtreamClient:
             pass
         return self.get_short_epg(stream_id)
 
+    @staticmethod
+    def _account_check_result(payload: Any) -> tuple[Optional[int], dict]:
+        info = payload.get("user_info") if isinstance(payload, dict) else None
+        if not isinstance(info, dict):
+            return None, {"health": "unreachable", "error": "Malformed provider account response"}
+        status = str(info.get("status", "")).lower()
+        if str(info.get("auth", "1")) == "0" or status in {"expired", "disabled", "banned", "inactive"}:
+            return None, {"health": "unhealthy", "error": "Account authentication or subscription rejected"}
+        if str(info.get("auth", "")) != "1" and status != "active":
+            return None, {"health": "unreachable", "error": "Provider did not confirm account authorization"}
+        check = {"health": "healthy", "error": None}
+        try:
+            maximum = int(info.get("max_connections"))
+        except (ValueError, TypeError, OverflowError):
+            return None, check
+        return (maximum if 0 < maximum <= 10000 else None), check
+
     def get_account_max_connections(self) -> Optional[int]:
         """Read an optional provider limit without retaining authenticated data.
 
@@ -476,43 +493,34 @@ class XtreamClient:
         last_account_check separately records authentication/transport health.
         Use the same curl compatibility fallback as catalogue ingestion.
         """
-        self.last_account_check = {"health": "unreachable", "error": "Provider account check failed"}
+        maximum = None
+        check = {"health": "unreachable", "error": "Provider account check failed"}
         try:
-            payload = None
+            response = self.session.get(
+                f"{self.config.server_url}/player_api.php",
+                params={"username": self.config.username, "password": self.config.password},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            maximum, check = self._account_check_result(response.json())
+        except Exception:
+            # HTTP errors may include the authenticated URL; never retain them.
+            pass
+        if check["health"] != "healthy":
+            # Some providers reject Python clients with HTTP 200 and auth=0.
+            # Give those responses the same single compatibility retry as an
+            # HTTP error. Capacity alone never confirms authorization.
             try:
-                response = self.session.get(
-                    f"{self.config.server_url}/player_api.php",
-                    params={"username": self.config.username, "password": self.config.password},
-                    timeout=self.timeout,
-                )
-                response.raise_for_status()
-                payload = response.json()
+                fallback_maximum, fallback_check = self._account_check_result(self._curl_payload(None))
+                # An inconclusive retry must not erase an explicit rejection:
+                # the pool may keep previously authorized accounts usable when
+                # metadata is temporarily unreachable.
+                if fallback_check["health"] != "unreachable" or check["health"] != "unhealthy":
+                    maximum, check = fallback_maximum, fallback_check
             except Exception:
                 pass
-            if not isinstance(payload, dict) or not isinstance(payload.get("user_info"), dict):
-                payload = self._curl_payload(None)
-            info = payload.get("user_info") if isinstance(payload, dict) else None
-            if not isinstance(info, dict):
-                self.last_account_check = {"health": "unreachable", "error": "Malformed provider account response"}
-                return None
-            status = str(info.get("status", "")).lower()
-            if str(info.get("auth", "1")) == "0" or status in {"expired", "disabled", "banned", "inactive"}:
-                self.last_account_check = {"health": "unhealthy", "error": "Account authentication or subscription rejected"}
-                return None
-            if str(info.get("auth", "")) != "1" and status != "active":
-                self.last_account_check = {"health": "unreachable", "error": "Provider did not confirm account authorization"}
-                return None
-            self.last_account_check = {"health": "healthy", "error": None}
-            try:
-                maximum = int(info.get("max_connections"))
-            except (ValueError, TypeError, OverflowError):
-                return None
-            return maximum if 0 < maximum <= 10000 else None
-        except Exception:
-            # Never surface exception text: an HTTP client can include the
-            # authenticated request URL.  Unknown capacity is deliberately
-            # unknown; the pool applies an explicit conservative fallback.
-            return None
+        self.last_account_check = check
+        return maximum
 
 
 def stable_event_id(category_id: Any, stream_id: Any) -> str:

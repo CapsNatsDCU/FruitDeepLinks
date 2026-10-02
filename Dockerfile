@@ -4,6 +4,10 @@
 
 FROM python:3.11-slim-bookworm
 
+ARG FDL_BUILD_REVISION=unknown
+ENV FDL_BUILD_REVISION=${FDL_BUILD_REVISION}
+LABEL org.opencontainers.image.revision=${FDL_BUILD_REVISION}
+
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PYTHONPATH=/app \

@@ -11,7 +11,7 @@ Usage:
 import sys
 from pathlib import Path
 
-from flask import Flask
+from flask import Flask, jsonify, request
 
 from server.config import cfg
 try:
@@ -43,6 +43,12 @@ def create_app() -> Flask:
     if CORS is not None:
         CORS(app)
 
+    @app.before_request
+    def pause_writes_during_update():
+        from update_protocol import installation_active
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"} and installation_active():
+            return jsonify(error="An app update is being installed. Try again after it finishes."), 503
+
     @app.context_processor
     def template_appearance():
         """Expose only a validated primary-color token to every template."""
@@ -73,6 +79,7 @@ def create_app() -> Flask:
     from server.routes.api.guide import bp as guide_bp
     from server.routes.api.xtream import bp as xtream_bp
     from server.routes.api.sports import bp as sports_bp
+    from server.routes.api.updates import bp as updates_bp
 
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(admin_bp)
@@ -82,5 +89,6 @@ def create_app() -> Flask:
     app.register_blueprint(guide_bp)
     app.register_blueprint(xtream_bp)
     app.register_blueprint(sports_bp)
+    app.register_blueprint(updates_bp)
 
     return app

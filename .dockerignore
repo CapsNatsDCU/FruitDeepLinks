@@ -1,4 +1,5 @@
 .git
+.xsort-updater
 .env
 .env.*
 secrets

@@ -17,6 +17,7 @@ from typing import Optional
 
 from server.config import cfg
 from server.logging_setup import append_log_line, log
+from update_protocol import installation_active
 
 REFRESH_PROGRESS_PREFIX = "__FDL_PROGRESS__"
 
@@ -171,7 +172,7 @@ def _consume_progress_marker(line: str) -> bool:
         if pass_name in {"deterministic", "ai"}:
             passes[pass_name] = {
                 key: payload[key] for key in (
-                    "status", "ai_mode", "records", "resolved", "skipped", "unchanged",
+                    "status", "ai_mode", "records", "completed", "resolved", "skipped", "unchanged",
                     "eligible", "requests", "cache_hits", "valid", "failures", "timeouts",
                     "transport_failures", "validation_failures", "budget_exhausted",
                     "resolved_without_ai", "ai_interpretations_used", "pending_local_ai", "duration",
@@ -218,6 +219,9 @@ def _update_progress_detail(line: str) -> None:
 
 def run_refresh(skip_scrape: bool = False, source: str = "manual") -> None:
     """Run daily_refresh.py in a thread, streaming output into the log buffer."""
+    if installation_active():
+        log("Refresh skipped while an app update is being installed", "WARNING")
+        return
     if refresh_status["running"]:
         log("Refresh requested but one is already running; skipping", "WARNING")
         return
@@ -284,6 +288,9 @@ def run_refresh(skip_scrape: bool = False, source: str = "manual") -> None:
 
 def run_apply_filters() -> None:
     """Re-run export scripts only (no scraping). Used by Apply Filters Now."""
+    if installation_active():
+        log("Filter rebuild skipped while an app update is being installed", "WARNING")
+        return
     if refresh_status["running"]:
         log("Apply filters requested but refresh already running", "WARNING")
         return
@@ -361,6 +368,9 @@ def run_apply_filters() -> None:
 
 def run_ai_failure_retry() -> None:
     """Retry only AI failures recorded by the optional metadata parser."""
+    if installation_active():
+        log("AI retry skipped while an app update is being installed", "WARNING")
+        return
     if refresh_status["running"]:
         log("AI failure retry requested while another operation is running; skipping", "WARNING")
         return
@@ -377,8 +387,12 @@ def run_ai_failure_retry() -> None:
         from db.connection import get_conn
         from sports_metadata import retry_failed_local_ai
         with get_conn() as conn:
-            result = retry_failed_local_ai(conn)
-        pass_keys = ("status", "ai_mode", "records", "resolved", "skipped", "unchanged", "eligible",
+            result = retry_failed_local_ai(
+                conn, progress_callback=lambda **payload: _consume_progress_marker(
+                    REFRESH_PROGRESS_PREFIX + json.dumps({"event": "event_resolution_pass", **payload})
+                ),
+            )
+        pass_keys = ("status", "ai_mode", "records", "completed", "resolved", "skipped", "unchanged", "eligible",
                      "requests", "cache_hits", "valid", "failures", "timeouts", "transport_failures",
                      "validation_failures", "budget_exhausted", "resolved_without_ai",
                      "ai_interpretations_used", "pending_local_ai", "duration", "retry_targets", "detail")

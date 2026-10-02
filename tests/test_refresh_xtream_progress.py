@@ -76,11 +76,19 @@ class RefreshXtreamProgressTest(unittest.TestCase):
             resolved=23, skipped=2, resolved_without_ai=23,
         ))
         refresh._consume_progress_marker(self.marker(
+            "event_resolution_pass", pass_name="ai", status="running", records=25, completed=7,
+            requests=2, cache_hits=1, ai_interpretations_used=2,
+        ))
+        ai_pass = refresh.refresh_status["progress"]["event_resolution"]["passes"]["ai"]
+        self.assertEqual(("running", 7, 25), (ai_pass["status"], ai_pass["completed"], ai_pass["records"]))
+        refresh._consume_progress_marker(self.marker(
             "event_resolution_pass", pass_name="ai", status="complete", records=25,
+            completed=25,
             requests=2, cache_hits=1, ai_interpretations_used=2,
         ))
         passes = refresh.refresh_status["progress"]["event_resolution"]["passes"]
         self.assertEqual(23, passes["deterministic"]["resolved"])
+        self.assertEqual((25, 25), (passes["ai"]["completed"], passes["ai"]["records"]))
         self.assertEqual((2, 1, 2), (passes["ai"]["requests"], passes["ai"]["cache_hits"],
                                        passes["ai"]["ai_interpretations_used"]))
 

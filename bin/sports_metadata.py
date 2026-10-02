@@ -1031,7 +1031,8 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
         progress_callback(pass_name=_pass, status="running", ai_mode=ai_mode)
     columns = {r[1] for r in conn.execute("PRAGMA table_info(events)")}
     if not {"id", "start_utc"}.issubset(columns):
-        result = {"resolved": 0, "skipped": 0, "status": "complete", "pass_name": _pass}
+        result = {"resolved": 0, "skipped": 0, "records": 0, "completed": 0,
+                  "status": "complete", "pass_name": _pass}
         if progress_callback:
             progress_callback(**result)
         return result
@@ -1065,7 +1066,8 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
                 filtered_rows.append(row)
         rows = filtered_rows
     if progress_callback:
-        progress_callback(pass_name=_pass, status="running", ai_mode=ai_mode, records=len(rows))
+        progress_callback(pass_name=_pass, status="running", ai_mode=ai_mode,
+                          records=len(rows), completed=0)
     # One bounded budget covers this incremental sync.  Cache hits are free,
     # while a large provider catalog cannot cause an unbounded model walk.
     ai_budget = (None if ai_mode == "unlimited" else
@@ -1077,7 +1079,8 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
                "budget_exhausted": 0, "resolved_without_ai": 0,
                "ai_interpretations_used": 0}
     started = time.monotonic()
-    for row in rows:
+    last_progress_at = started
+    for completed, row in enumerate(rows, start=1):
         # The production lane builder uses the default tuple row factory.
         # Normalize through the SELECT cursor rather than ever calling
         # dict(tuple), which would interpret event-id text as mapping pairs.
@@ -1113,6 +1116,16 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
         summary["failures"] += int(status in {"transport_failure", "parser_error", "invalid_schema", "invalid_confidence", "invalid_participants"})
         summary["budget_exhausted"] += int(status == "budget_exhausted")
         pending_ai += int(status == "budget_exhausted")
+        if progress_callback:
+            now = time.monotonic()
+            # Publish slow model work as it finishes without flooding progress
+            # output when deterministic checks or cache hits finish quickly.
+            if completed == 1 or completed == len(rows) or now - last_progress_at >= 1:
+                progress_callback(pass_name=_pass, status="running", ai_mode=ai_mode,
+                                  records=len(rows), completed=completed,
+                                  resolved=resolved, skipped=skipped, pending_local_ai=pending_ai,
+                                  duration=round(now - started, 3), **summary)
+                last_progress_at = now
     # A capped run is intentionally not marked complete.  On the next refresh
     # cache hits cost nothing and the next bounded slice can be interpreted.
     if not pending_ai:
@@ -1125,6 +1138,7 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
              summary["low_confidence"], summary["failures"], summary["duration"], summary["timeouts"],
              summary["transport_failures"], summary["validation_failures"], summary["budget_exhausted"])
     result = {"resolved": resolved, "skipped": skipped, "pending_local_ai": pending_ai,
+              "records": len(rows), "completed": len(rows), "ai_mode": ai_mode,
               "unchanged": 0, "status": "complete", "pass_name": _pass, **summary}
     if progress_callback:
         progress_callback(**result)

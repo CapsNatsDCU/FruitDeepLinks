@@ -168,8 +168,14 @@ Visit `/settings` to configure the server without editing environment variables:
 | **Scrapers** | Per-scraper on/off toggles |
 | **Xtream IPTV** | Enable, server URL, selected category IDs, event timezone, inferred duration |
 | **Advanced** | Lane/direct channel start numbers, headless mode, log level |
+| **App Updates** | Check the current branch, review changes, and install with a health check |
 
 Changes take effect immediately and persist across container restarts.
+
+App updates require the optional Docker-host helper. Follow the
+[in-app updater setup](docs/UPDATER.md) once, then use **Settings → App Updates**
+to check and install changes from your current branch. Installing restarts the app;
+saved data and settings remain in their persistent mounts.
 
 Xtream credentials stay in deployment environment variables or a read-only secret file: they are not
 returned by the settings API or stored in SQLite. The server URL and non-secret

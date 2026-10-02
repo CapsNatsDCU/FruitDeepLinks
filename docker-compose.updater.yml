@@ -1,0 +1,8 @@
+# Add this file to the Compose command used for this installation.
+# Run bin/xsort_updater.py on the Docker host; see docs/UPDATER.md.
+services:
+  fruitdeeplinks:
+    environment:
+      XSORT_UPDATE_DIR: /run/xsort-updater
+    volumes:
+      - ./.xsort-updater/control:/run/xsort-updater

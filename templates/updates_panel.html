@@ -1,0 +1,22 @@
+<section class="card" id="app-updates" aria-labelledby="app-updates-title" style="margin-bottom:16px">
+  <h2 id="app-updates-title">App Updates</h2>
+  <p class="favorite-intro">Check your current branch for updates, review the changes, and choose when to install.</p>
+  <p id="update-version" class="field-help"></p>
+  <p id="update-status" role="status" aria-live="polite">Loading updater status…</p>
+  <p id="update-error" class="favorite-alert" role="alert"></p>
+  <div class="favorite-toolbar">
+    <button id="update-check" class="btn btn-secondary" type="button" disabled>Check for updates</button>
+    <button id="update-install" class="btn" type="button" disabled>Install update</button>
+  </div>
+  <p id="update-checked" class="field-help"></p>
+  <details id="update-changes" hidden>
+    <summary>Changes in this update (up to 12 commits)</summary>
+    <ul id="update-commits" style="padding-left:24px;margin:12px 0;overflow-wrap:anywhere"></ul>
+  </details>
+  <details id="update-setup" hidden>
+    <summary>Connect the updater on your Docker host</summary>
+    <p class="favorite-intro">In your deployment checkout, include <code>docker-compose.updater.yml</code> when starting the app, then keep the host helper running:</p>
+    <pre style="white-space:pre-wrap;overflow-wrap:anywhere">python3 bin/xsort_updater.py</pre>
+    <p class="field-help">The complete first-time setup and recovery instructions are in <code>docs/UPDATER.md</code> in your checkout. The helper uses the current branch on <code>origin</code>. Installations managed by Portainer or published images need a source-build Compose checkout first.</p>
+  </details>
+</section>
