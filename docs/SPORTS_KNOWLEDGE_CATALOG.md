@@ -40,6 +40,12 @@ Google Sports feed.  Formula 1, NASCAR Cup, IndyCar, and UFL use free ESPN
 schedule feeds and do not consume SerpApi searches.  The scheduled refresh
 runs this audit at most every 72 hours, reserves 25 of the free plan's 250
 monthly searches, and shows tracked usage in My Sports.
+The My Sports count records successful searches made by this Xsort database;
+it is not the SerpApi account's billing counter. If the running app reports
+`serpapi_configured: false` or a league reports `key_required`, set the key in
+the deployed container environment and recreate that container before using
+**Check now**. A key in a separate local `.env` does not configure a remote
+stack.
 
 External events live only in `sports_schedule_reference_events`.  They can
 report `missing_from_ingestion`, `no_playable`, `playable_found`, or

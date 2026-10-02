@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote, quote_plus, urlsplit
 
+DEFAULT_ACCOUNTS_FILE = Path("/run/secrets/xtream-accounts.json")
+
 
 @dataclass(frozen=True)
 class Account:
@@ -61,6 +63,8 @@ def load_accounts(conn=None, environ: Mapping[str, str] | None = None) -> list[A
     raw = env.get("XTREAM_ACCOUNTS_JSON", "").strip()
     if path and raw:
         raise XtreamError("Configure only one of XTREAM_ACCOUNTS_FILE or XTREAM_ACCOUNTS_JSON")
+    if not path and not raw and DEFAULT_ACCOUNTS_FILE.is_file():
+        path = str(DEFAULT_ACCOUNTS_FILE)
     if path:
         try:
             raw = Path(path).read_text(encoding="utf-8")

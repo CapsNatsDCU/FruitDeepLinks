@@ -128,6 +128,17 @@ class XtreamParsingTest(unittest.TestCase):
         self.assertEqual(client.get_live_categories(), [{"category_id": "10"}])
         self.assertEqual(len(runner.calls), 1)
 
+    def test_category_curl_has_its_own_timeout(self):
+        session = FakeSession([])
+        runner = FakeRunner(FakeCompleted(stdout='[{"category_id":"10"}]'))
+        client = XtreamClient(config(), session=session, subprocess_runner=runner,
+                               timeout=20, catalog_timeout=90)
+        self.assertEqual(client.get_live_categories(), [{"category_id": "10"}])
+        command, kwargs = runner.calls[0]
+        self.assertEqual(command[command.index("--max-time") + 1], "90")
+        self.assertEqual(kwargs["timeout"], 95)
+        self.assertEqual(session.calls[0][2], 20)
+
     def test_short_epg_accepts_enveloped_rows_and_stream_id(self):
         session = FakeSession({
             "epg_listings": [{
@@ -206,7 +217,7 @@ class XtreamParsingTest(unittest.TestCase):
         with self.assertRaises(XtreamError) as caught:
             client.get_live_streams("10")
         message = str(caught.exception)
-        self.assertIn("exit code 28", message)
+        self.assertIn("timed out during get_live_streams after 20 seconds", message)
         for secret in ("user name", "p@ss/word", "user%20name", "p%40ss%2Fword"):
             self.assertNotIn(secret, message)
 

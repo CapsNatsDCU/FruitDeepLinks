@@ -822,6 +822,7 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
                 "provider": source,
                 "source_event_id": str(source_event_id),
                 "title": title_text,
+                "description": description_text,
                 "category": category_text,
                 "sport_hint": ai_sport_hint,
                 "league_hint": ai_league_hint,

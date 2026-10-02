@@ -64,6 +64,21 @@ class AccountConfigTests(unittest.TestCase):
             env["XTREAM_ACCOUNTS_FILE"] = str(secret)
             self.assertEqual(3, len(load_accounts(environ=env)))
 
+    def test_mounted_account_json_is_used_without_legacy_compose_credentials(self):
+        rows = account_rows((2, 1))
+        with tempfile.TemporaryDirectory() as directory:
+            secret = Path(directory) / "xtream-accounts.json"
+            secret.write_text(json.dumps({"accounts": rows}))
+            env = {"XTREAM_ENABLED": "true", "XTREAM_TIMEZONE": "UTC",
+                   "XTREAM_SERVER_URL": "http://legacy.example",
+                   "XTREAM_USERNAME": "legacy-user", "XTREAM_PASSWORD": "legacy-password"}
+            with patch("xtream_accounts.DEFAULT_ACCOUNTS_FILE", secret):
+                accounts = load_accounts(environ=env)
+                self.assertEqual(["account_0", "account_1"], [account.id for account in accounts])
+                self.assertEqual(rows[0]["username"], load_config(environ=env).username)
+                explicit = pool_environment(account_rows((1,)))
+                self.assertEqual(1, len(load_accounts(environ=explicit)))
+
     def test_invalid_configuration_fails_closed_without_legacy_fallback(self):
         for value in ("bad json private-password", "{}", '[{"id":"dup"}]', json.dumps(account_rows() * 2)):
             with self.subTest(value=value), self.assertRaises(XtreamError) as error:

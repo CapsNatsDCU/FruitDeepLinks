@@ -240,15 +240,17 @@ data volume. No deployment is performed by the implementation task.
 
    Edit that private file in your editor with the real provider/account values.
    Keep it out of Git and support bundles. Leave overrides absent to discover
-   account limits. Set in `.env`:
+   account limits. The standard `secrets/xtream-accounts.json` mount is detected
+   automatically, so `.env` only needs:
 
    ```dotenv
    XTREAM_ENABLED=true
-   XTREAM_ACCOUNTS_FILE=/run/secrets/xtream-accounts.json
-   XTREAM_ACCOUNTS_JSON=
    SERVER_URL=http://YOUR_TRUENAS_LAN_IP:6655
    XTREAM_STREAM_IDLE_TIMEOUT=60
    ```
+
+   If the account file uses another mounted path, set `XTREAM_ACCOUNTS_FILE`
+   to that path. Do not set `XTREAM_ACCOUNTS_JSON` at the same time.
 
    For a TrueNAS Custom App rather than CLI Compose, use the equivalent custom
    image, map existing data/out/log host paths to `/app/data`, `/app/out`,

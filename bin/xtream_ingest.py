@@ -35,6 +35,7 @@ PROVIDER = "xtream"
 LOGICAL_SERVICE = "xtream"
 PROGRESS_PREFIX = "__FDL_PROGRESS__"
 DEFAULT_TIMEOUT_SECONDS = 20
+DEFAULT_CATALOG_TIMEOUT_SECONDS = 90
 DEFAULT_DURATION_MINUTES = 180
 _SAFE_EXTENSION_RE = re.compile(r"^[A-Za-z0-9]{1,8}$")
 _PLACEHOLDER_LABELS = {
@@ -285,7 +286,8 @@ def build_stream_url(config: XtreamConfig, stream_id: Any,
 class XtreamClient:
     def __init__(self, config: XtreamConfig, session=None,
                  timeout: int = DEFAULT_TIMEOUT_SECONDS,
-                 subprocess_runner=None, curl_binary: str = "curl"):
+                 subprocess_runner=None, curl_binary: str = "curl",
+                 catalog_timeout: Optional[int] = None):
         # Category discovery is intentionally allowed before any categories have
         # been selected. Ingestion and tune-time URL construction still call the
         # normal validation path, which refuses an accidental full catalogue import.
@@ -295,6 +297,17 @@ class XtreamClient:
         protect_http_logs(config)
         self.session = session or requests.Session()
         self.timeout = timeout
+        if catalog_timeout is None:
+            raw_catalog_timeout = os.getenv(
+                "XTREAM_CATALOG_TIMEOUT_SECONDS", str(DEFAULT_CATALOG_TIMEOUT_SECONDS)
+            )
+            try:
+                catalog_timeout = int(raw_catalog_timeout)
+            except ValueError:
+                raise XtreamError("XTREAM_CATALOG_TIMEOUT_SECONDS must be an integer from 20 to 180") from None
+        if not 20 <= catalog_timeout <= 180:
+            raise XtreamError("XTREAM_CATALOG_TIMEOUT_SECONDS must be an integer from 20 to 180")
+        self.catalog_timeout = catalog_timeout
         self.subprocess_runner = subprocess_runner or subprocess.run
         self.curl_binary = curl_binary
 
@@ -375,13 +388,14 @@ class XtreamClient:
     def _curl_payload(self, action: Optional[str],
                        category_id: Optional[str] = None,
                        stream_id: Optional[str] = None) -> Any:
+        timeout = self.catalog_timeout if action == "get_live_categories" else self.timeout
         command = [
             self.curl_binary,
             "-4",
             "-sS",
             "-L",
             "--max-time",
-            str(self.timeout),
+            str(timeout),
             "--get",
             f"{self.config.server_url}/player_api.php",
             "--config", "-",
@@ -404,7 +418,7 @@ class XtreamClient:
                 input=secret_input,
                 capture_output=True,
                 text=True,
-                timeout=self.timeout + 5,
+                timeout=timeout + 5,
                 check=False,
             )
         except Exception:
@@ -416,6 +430,10 @@ class XtreamClient:
         if completed.returncode != 0:
             # curl stderr can include the requested URL, so only retain its
             # credential-free exit code.
+            if completed.returncode == 28:
+                raise XtreamError(
+                    f"Xtream provider timed out during {action} after {timeout} seconds"
+                )
             raise XtreamError(
                 f"Xtream curl transport failed for action {action} "
                 f"with exit code {completed.returncode}"
