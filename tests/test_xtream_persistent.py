@@ -25,9 +25,11 @@ from server.services.xtream_persistent import (  # noqa: E402
     get_channel,
     list_channels,
     page_streams,
+    quality_for_stream,
     reconcile_channels,
     render_m3u,
     render_xmltv,
+    save_stream_quality,
     update_channel,
 )
 from tests.xtream_test_helpers import mocked_provider
@@ -120,6 +122,18 @@ class PersistentChannelServiceTest(unittest.TestCase):
         self.assertEqual(1, page["total"])
         self.assertEqual("1904224", page["items"][0]["stream_id"])
         self.assertEqual("mlb.nationals", page["items"][0]["epg_channel_id"])
+
+    def test_quality_cache_is_keyed_by_category_and_stream(self):
+        measured = save_stream_quality(self.conn, "410", "1904224", {
+            "width": 1920, "height": 1080, "fps": 59.94, "codec": "h264",
+        })
+        self.assertEqual(1920, measured["width"])
+        self.assertIsNone(quality_for_stream(self.conn, "999", "1904224"))
+        channel = self.add()
+        self.assertEqual(1080, channel["measured_quality"]["height"])
+        self.assertIsNone(channel["advertised_quality"])
+        self.assertEqual("4K", page_streams([{"stream_id": 1, "name": "FOX 5 4K RAW"}])["items"][0]["advertised_quality"])
+        self.assertEqual("4K", page_streams([{"stream_id": 2, "name": "FOX 5 ⁴ᴷ RAW"}])["items"][0]["advertised_quality"])
 
     def test_m3u_and_xmltv_are_stable_and_never_contain_credentials(self):
         self.add(guide_id="mlb.nationals")
@@ -454,6 +468,23 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
         for params in ({"scope": "all"}, {"q": "Washington", "scope": "other"}):
             response = self.client.post("/api/xtream/persistent-channels/search", query_string=params)
             self.assertEqual(400, response.status_code)
+
+    def test_quality_endpoint_validates_provider_identity_and_persists_result(self):
+        with patch("server.services.xtream_quality.measure_stream_quality", return_value={
+            "width": 1280, "height": 720, "fps": 60.0, "codec": "h264",
+        }) as probe:
+            result = self.client.post("/api/xtream/persistent-channels/quality", json={
+                "category_id": "410", "stream_id": "1904224",
+            })
+        self.assertEqual(200, result.status_code, result.get_data(as_text=True))
+        self.assertEqual(720, result.get_json()["measured_quality"]["height"])
+        probe.assert_called_once_with("1904224", "ts")
+        search = self.client.post("/api/xtream/persistent-channels/search", query_string={"q": "Washington"})
+        self.assertEqual(720, search.get_json()["items"][0]["measured_quality"]["height"])
+        invalid = self.client.post("/api/xtream/persistent-channels/quality", json={
+            "category_id": "410", "stream_id": "unknown",
+        })
+        self.assertEqual(400, invalid.status_code)
 
     def test_unknown_provider_category_is_not_browsed_or_added(self):
         response = self.client.post("/api/xtream/categories/888/streams")

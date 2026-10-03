@@ -149,7 +149,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
 def advertised_quality(name: Any) -> Optional[str]:
     """Return only a resolution label explicitly present in the provider name."""
-    match = _QUALITY_LABEL_RE.search(str(name or ""))
+    match = _QUALITY_LABEL_RE.search(unicodedata.normalize("NFKC", str(name or "")))
     if not match:
         return None
     label = match.group().upper().replace(" ", "-")

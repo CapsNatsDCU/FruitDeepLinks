@@ -151,6 +151,7 @@ function renderPersistentChannels() {
       ${channel.unavailable_reason ? `<div class="persistent-row-meta" style="color:var(--warning)">${escHtml(channel.unavailable_reason)}</div>` : ''}
     </div>
     <div class="persistent-actions">
+      <button class="btn btn-secondary" type="button" onclick="detectConfiguredPersistentQuality(${channel.id}, this)">Detect quality</button>
       <button class="btn btn-secondary" type="button" onclick="showPersistentEdit(${channel.id})">Edit</button>
       <button class="btn btn-secondary" type="button" onclick="setPersistentEnabled(${channel.id}, ${channel.enabled ? 'false' : 'true'})">${channel.enabled ? 'Disable' : 'Enable'}</button>
       <button class="btn btn-danger" type="button" onclick="deletePersistentChannel(${channel.id})">Delete</button>
@@ -255,6 +256,11 @@ async function requestPersistentQuality(stream) {
     if (visible.category_id === stream.category_id && visible.stream_id === stream.stream_id)
       visible.measured_quality = data.measured_quality;
   }
+  for (const channel of _persistentChannels) {
+    if (channel.category_id === stream.category_id && channel.stream_id === stream.stream_id)
+      channel.measured_quality = data.measured_quality;
+  }
+  renderPersistentChannels();
   if (_persistentResults.length && !document.getElementById('persistent-browser').hidden)
     document.getElementById('persistent-results').innerHTML = persistentResultRows();
   return data.measured_quality;
@@ -270,6 +276,21 @@ async function detectPersistentQuality(index, button) {
     showToast(`Measured ${stream.name}`, 'success');
   } catch (err) {
     persistentError(`Could not measure ${stream.name}: ${err.message}`);
+    button.disabled = false;
+    button.textContent = 'Detect quality';
+  }
+}
+
+async function detectConfiguredPersistentQuality(id, button) {
+  const channel = _persistentChannels.find(item => item.id === id);
+  if (!channel) return;
+  button.disabled = true;
+  button.textContent = 'Measuring…';
+  try {
+    await requestPersistentQuality(channel);
+    showToast(`Measured ${channel.display_name}`, 'success');
+  } catch (err) {
+    persistentError(`Could not measure ${channel.display_name}: ${err.message}`);
     button.disabled = false;
     button.textContent = 'Detect quality';
   }

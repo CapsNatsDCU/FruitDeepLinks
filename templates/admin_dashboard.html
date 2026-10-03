@@ -337,7 +337,12 @@ async function loadStatus() {
     // Files
     const fileEl = document.getElementById('file-list');
     const files = Object.entries(data.files || {});
-    const endpointLinks = [['M3U lanes','/m3u/lanes'], ['XMLTV lanes','/xmltv/lanes'], ['M3U direct','/m3u/direct'], ['XMLTV direct','/xmltv/direct']];
+    const endpointLinks = [
+      ['Unified M3U · Lanes + Persistent Channels','/m3u/channels'],
+      ['Unified XMLTV · Lanes + Persistent Channels','/xmltv/channels'],
+      ['M3U lanes','/m3u/lanes'], ['XMLTV lanes','/xmltv/lanes'],
+      ['M3U direct','/m3u/direct'], ['XMLTV direct','/xmltv/direct'],
+    ];
     fileEl.innerHTML = '<ul class="file-list">' + endpointLinks.map(([name,url]) =>
       `<li class="file-item"><a href="${url}">${name}</a><button class="btn btn-secondary" style="padding:4px 8px;font-size:11px" onclick="navigator.clipboard?.writeText(location.origin+'${url}');showToast('Copied output URL','success')">Copy URL</button></li>`
     ).join('') + '</ul>' + (files.length

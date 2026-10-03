@@ -35,7 +35,7 @@ def _parse_probe_output(output: bytes) -> dict:
             codec = None
         return {"width": width, "height": height,
                 "fps": round(fps, 2) if fps is not None else None, "codec": codec}
-    except (ValueError, TypeError, KeyError, StopIteration, ZeroDivisionError, OverflowError):
+    except (ValueError, TypeError, KeyError, StopIteration, ZeroDivisionError, OverflowError, UnicodeError):
         raise XtreamError("Video resolution could not be measured from this stream") from None
 
 

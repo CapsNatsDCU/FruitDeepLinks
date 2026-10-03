@@ -18,6 +18,7 @@ from server.services.xtream_persistent import (
     PersistentChannelError,
     create_channel,
     delete_channel,
+    ensure_schema as ensure_persistent_schema,
     get_channel,
     list_channels,
     normalize_name,
@@ -88,7 +89,9 @@ def api_xtream_epg_refresh():
             try:
                 result = refresh_epg(conn, client, pool.accounts)
             finally:
-                client.session.close()
+                session = getattr(client, "session", None)
+                if session is not None:
+                    session.close()
         return jsonify({"status": "success", **result})
     except Exception as exc:
         return _safe_error(exc, 502)
@@ -453,6 +456,7 @@ def api_xtream_persistent_search():
             page_size=request.args.get("page_size", 25, type=int) or 25,
         )
         with get_conn() as conn:
+            ensure_persistent_schema(conn)
             for item in result["items"]:
                 item["measured_quality"] = quality_for_stream(
                     conn, item["category_id"], item["stream_id"])
@@ -485,7 +489,9 @@ def api_xtream_persistent_quality():
                 if stream is None:
                     raise PersistentChannelError("The selected stream is not currently available")
             finally:
-                client.session.close()
+                session = getattr(client, "session", None)
+                if session is not None:
+                    session.close()
         from server.services.xtream_quality import measure_stream_quality
         measured = measure_stream_quality(stream_id, stream.get("container_extension") or "ts")
         with get_conn() as conn:
