@@ -331,6 +331,32 @@ def api_xtream_categories():
         return _safe_error(exc, 502)
 
 
+@bp.route("/api/xtream/categories/live", methods=["POST"])
+def api_xtream_categories_live():
+    """Browse the current provider catalog without changing event selections."""
+    _ensure_database()
+    try:
+        with get_conn() as conn:
+            config, client = _configured_client(conn)
+            selected = set(config.category_ids)
+            upstream = client.get_live_categories()
+        categories = {}
+        for row in upstream:
+            category_id = str(row.get("category_id") or "").strip()
+            if not category_id:
+                continue
+            categories[category_id] = {
+                "category_id": category_id,
+                "category_name": str(row.get("category_name") or f"Category {category_id}"),
+                "selected": category_id in selected,
+            }
+        ordered = sorted(categories.values(), key=lambda row: (row["category_name"].casefold(), row["category_id"]))
+        return jsonify({"status": "success", "categories": ordered,
+                        "selected_category_ids": sorted(selected)})
+    except Exception as exc:
+        return _safe_error(exc, 502)
+
+
 @bp.route("/api/xtream/categories", methods=["POST"])
 def api_save_xtream_categories():
     """Persist an explicit category selection without ever handling secrets."""
@@ -360,11 +386,10 @@ def api_xtream_category_streams(category_id):
     _ensure_database()
     try:
         with get_conn() as conn:
-            config, client = _configured_client(conn)
-            if str(category_id) not in config.category_ids:
-                raise PersistentChannelError(
-                    "Only categories configured in Xtream settings can be browsed"
-                )
+            _, client = _configured_client(conn)
+            categories = {str(row.get("category_id")) for row in client.get_live_categories()}
+            if str(category_id) not in categories:
+                raise PersistentChannelError("The selected category is not currently available")
             streams = client.get_live_streams(str(category_id))
         result = page_streams(
             streams,
@@ -396,17 +421,13 @@ def api_xtream_persistent_channels():
         category_id = str(payload.get("category_id") or "").strip()
         stream_id = str(payload.get("stream_id") or "").strip()
         with get_conn() as conn:
-            config, client = _configured_client(conn)
-            if category_id not in config.category_ids:
-                raise PersistentChannelError(
-                    "Only streams from configured Xtream categories can be added"
-                )
+            _, client = _configured_client(conn)
             categories = client.get_live_categories()
             category = next(
                 (row for row in categories if str(row.get("category_id")) == category_id), None
             )
             if category is None:
-                raise PersistentChannelError("The configured category is not currently available")
+                raise PersistentChannelError("The selected category is not currently available")
             streams = client.get_live_streams(category_id)
             stream = next(
                 (row for row in streams if str(row.get("stream_id")) == stream_id), None

@@ -151,7 +151,7 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
 
 <section class="card" style="margin-bottom:16px" aria-labelledby="persistent-title">
   <h2 id="persistent-title">Persistent Channels</h2>
-  <p class="persistent-intro">Add Xtream channels that stay available even when they do not contain scheduled event names. Only categories listed in Xtream settings can be browsed; provider credentials remain in deployment secrets.</p>
+  <p class="persistent-intro">Add Xtream channels that stay available even when they do not contain scheduled event names. Browse every provider category or only categories enabled for event ingestion. Provider credentials remain in deployment secrets.</p>
   <div class="persistent-links">
     <a href="/m3u/persistent">Persistent M3U</a>
     <a href="/xmltv/persistent">Persistent XMLTV</a>
@@ -162,9 +162,13 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
   </div>
   <div id="persistent-error" class="favorite-alert" role="alert"></div>
   <div id="persistent-browser" class="persistent-browser" hidden>
+    <div class="persistent-toolbar" style="margin-top:0" role="group" aria-label="Category view">
+      <button class="btn btn-secondary" type="button" id="persistent-all-categories" aria-pressed="false" onclick="setPersistentCategoryView('all')">All Categories</button>
+      <button class="btn" type="button" id="persistent-active-categories" aria-pressed="true" onclick="setPersistentCategoryView('active')">All Active Categories</button>
+    </div>
     <div class="persistent-toolbar" style="margin-top:0">
-      <label>Configured category
-        <select id="persistent-category"></select>
+      <label>Category
+        <select id="persistent-category" onchange="clearPersistentBrowserResults()"></select>
       </label>
       <label>Search by stream name
         <input id="persistent-search" type="text" placeholder="Washington" onkeydown="if(event.key==='Enter'){event.preventDefault();searchPersistentStreams(1)}">
@@ -281,6 +285,7 @@ let _favoriteOptions = [];
 let _persistentChannels = [];
 let _persistentResults = [];
 let _persistentPage = 1;
+let _persistentCategoryView = 'active';
 let _xtreamCategories = [];
 let _xtreamSelected = new Set();
 
@@ -397,7 +402,7 @@ function persistentStatusLabel(channel) {
 function renderPersistentChannels() {
   const list = document.getElementById('persistent-list');
   if (!_persistentChannels.length) {
-    list.innerHTML = '<div class="favorite-empty"><strong>No persistent channels configured.</strong><br>Browse a configured Xtream category to add one.</div>';
+    list.innerHTML = '<div class="favorite-empty"><strong>No persistent channels configured.</strong><br>Browse an Xtream category to add one.</div>';
     return;
   }
   list.innerHTML = _persistentChannels.map(channel => `<article class="persistent-row">
@@ -417,22 +422,48 @@ function renderPersistentChannels() {
 }
 
 async function openPersistentBrowser() {
-  const browser = document.getElementById('persistent-browser');
-  browser.hidden = false;
-  document.getElementById('persistent-results').innerHTML = '<span class="status-muted">Loading configured categories…</span>';
+  document.getElementById('persistent-browser').hidden = false;
+  await setPersistentCategoryView('active');
+}
+
+function clearPersistentBrowserResults() {
+  _persistentResults = [];
+  _persistentPage = 1;
+  document.getElementById('persistent-results').innerHTML = '<span class="status-muted">Choose a category and search its channels.</span>';
+  document.getElementById('persistent-pagination').innerHTML = '';
+  document.getElementById('persistent-editor').innerHTML = '';
+}
+
+async function setPersistentCategoryView(view) {
+  const all = view === 'all';
+  const results = document.getElementById('persistent-results');
+  results.innerHTML = `<span class="status-muted">Loading ${all ? 'all provider' : 'active'} categories…</span>`;
+  persistentError('');
   try {
-    const data = await persistentRequest('/api/xtream/categories');
+    const data = all
+      ? await persistentRequest('/api/xtream/categories/live', {method:'POST'})
+      : await persistentRequest('/api/xtream/categories');
     const select = document.getElementById('persistent-category');
-    select.innerHTML = (data.categories || []).filter(category => category.selected).map(category => `<option value="${escHtml(category.category_id)}">${escHtml(category.category_name)}</option>`).join('');
+    const categories = (data.categories || []).filter(category => all || category.selected);
+    select.innerHTML = categories.map(category => `<option value="${escHtml(category.category_id)}">${escHtml(category.category_name)}</option>`).join('');
+    _persistentCategoryView = view;
+    for (const name of ['all', 'active']) {
+      const button = document.getElementById(`persistent-${name}-categories`);
+      const pressed = name === view;
+      button.setAttribute('aria-pressed', String(pressed));
+      button.classList.toggle('btn-secondary', !pressed);
+    }
+    clearPersistentBrowserResults();
     if (!select.options.length) {
-      document.getElementById('persistent-results').innerHTML = '<div class="favorite-empty">No Xtream categories are configured. Save category IDs in Xtream settings first.</div>';
+      results.innerHTML = all
+        ? '<div class="favorite-empty">The provider returned no categories. Check the Xtream account pool and try again.</div>'
+        : '<div class="favorite-empty">No event categories are active. Use All Categories to browse the provider catalog.</div>';
       return;
     }
-    document.getElementById('persistent-results').innerHTML = '<span class="status-muted">Enter a search or browse the selected category.</span>';
     document.getElementById('persistent-search').focus();
   } catch (err) {
     persistentError(`Could not browse Xtream categories: ${err.message}`);
-    document.getElementById('persistent-results').innerHTML = '<div class="favorite-empty">Category browsing is unavailable.</div>';
+    results.innerHTML = '<div class="favorite-empty">Category browsing is unavailable.</div>';
   }
 }
 

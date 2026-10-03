@@ -205,8 +205,8 @@ class FakeXtreamClient:
         return [FIXTURE["category"], {"category_id": "999", "category_name": "Not configured"}]
 
     def get_live_streams(self, category_id):
-        if str(category_id) != "410":
-            raise AssertionError("Only the explicitly opened category may be fetched")
+        if str(category_id) not in {"410", "999"}:
+            raise AssertionError("Only a provider category may be fetched")
         return list(FIXTURE["streams"])
 
 
@@ -254,6 +254,8 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
         settings_page = self.client.get("/settings").get_data(as_text=True)
         self.assertIn("Persistent Channels", settings_page)
         self.assertIn("Browse Xtream Channels", settings_page)
+        self.assertIn("All Categories", settings_page)
+        self.assertIn("All Active Categories", settings_page)
         self.assertNotIn("XTREAM_USERNAME", settings_page)
         self.assertNotIn("XTREAM_PASSWORD", settings_page)
 
@@ -361,10 +363,34 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
         self.assertEqual(200, self.client.delete(f"/api/xtream/persistent-channels/{channel_id}").status_code)
         self.assertEqual([], self.client.get("/api/xtream/persistent-channels").get_json()["channels"])
 
-    def test_unconfigured_category_is_not_browsed(self):
-        response = self.client.post("/api/xtream/categories/999/streams")
+    def test_unselected_provider_category_can_be_browsed_and_added(self):
+        live = self.client.post("/api/xtream/categories/live")
+        self.assertEqual(200, live.status_code)
+        categories = {row["category_id"]: row for row in live.get_json()["categories"]}
+        self.assertEqual({"410", "999"}, set(categories))
+        self.assertTrue(categories["410"]["selected"])
+        self.assertFalse(categories["999"]["selected"])
+
+        browse = self.client.post("/api/xtream/categories/999/streams", query_string={"q": "Washington"})
+        self.assertEqual(200, browse.status_code)
+        self.assertEqual("1904224", browse.get_json()["items"][0]["stream_id"])
+        added = self.client.post("/api/xtream/persistent-channels", json={
+            "category_id": "999", "stream_id": "1904224",
+            "display_name": "Washington Nationals", "channel_number": "22",
+        })
+        self.assertEqual(201, added.status_code, added.get_data(as_text=True))
+        self.assertEqual("999", added.get_json()["channel"]["category_id"])
+        self.assertEqual(["410"], self.client.get("/api/xtream/categories").get_json()["selected_category_ids"])
+
+    def test_unknown_provider_category_is_not_browsed_or_added(self):
+        response = self.client.post("/api/xtream/categories/888/streams")
         self.assertEqual(400, response.status_code)
-        self.assertIn("configured", response.get_json()["message"])
+        self.assertIn("not currently available", response.get_json()["message"])
+        added = self.client.post("/api/xtream/persistent-channels", json={
+            "category_id": "888", "stream_id": "1904224",
+            "display_name": "Washington Nationals", "channel_number": "22",
+        })
+        self.assertEqual(400, added.status_code)
 
     def test_cached_category_get_does_not_contact_or_expose_provider(self):
         class UnsafeClient(FakeXtreamClient):
