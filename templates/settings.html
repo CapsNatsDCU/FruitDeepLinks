@@ -285,7 +285,6 @@ let _favoriteOptions = [];
 let _persistentChannels = [];
 let _persistentResults = [];
 let _persistentPage = 1;
-let _persistentCategoryView = 'active';
 let _xtreamCategories = [];
 let _xtreamSelected = new Set();
 
@@ -446,7 +445,6 @@ async function setPersistentCategoryView(view) {
     const select = document.getElementById('persistent-category');
     const categories = (data.categories || []).filter(category => all || category.selected);
     select.innerHTML = categories.map(category => `<option value="${escHtml(category.category_id)}">${escHtml(category.category_name)}</option>`).join('');
-    _persistentCategoryView = view;
     for (const name of ['all', 'active']) {
       const button = document.getElementById(`persistent-${name}-categories`);
       const pressed = name === view;
