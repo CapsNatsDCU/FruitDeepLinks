@@ -22,8 +22,10 @@ from server.services.xtream_persistent import (
     list_channels,
     normalize_name,
     page_streams,
+    quality_for_stream,
     render_m3u,
     render_xmltv,
+    save_stream_quality,
     update_channel,
 )
 from xtream_ingest import XtreamClient, XtreamError, load_metadata_configs
@@ -450,8 +452,46 @@ def api_xtream_persistent_search():
             page=request.args.get("page", 1, type=int) or 1,
             page_size=request.args.get("page_size", 25, type=int) or 25,
         )
+        with get_conn() as conn:
+            for item in result["items"]:
+                item["measured_quality"] = quality_for_stream(
+                    conn, item["category_id"], item["stream_id"])
         return jsonify({"status": "success", "scope": scope,
                         "category_count": len(category_ids), **result})
+    except Exception as exc:
+        return _safe_error(exc, 502)
+
+
+@bp.route("/api/xtream/persistent-channels/quality", methods=["POST"])
+def api_xtream_persistent_quality():
+    """Measure one provider stream on demand and cache its observed video quality."""
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"status": "error", "message": "Expected a JSON object"}), 400
+    category_id = str(payload.get("category_id") or "").strip()
+    stream_id = str(payload.get("stream_id") or "").strip()
+    if not category_id or not stream_id or len(category_id) > 255 or len(stream_id) > 255:
+        return jsonify({"status": "error", "message": "Category and stream IDs are required"}), 400
+    _ensure_database()
+    try:
+        with get_conn() as conn:
+            _, client = _configured_client(conn)
+            try:
+                categories = client.get_live_categories()
+                if category_id not in {str(row.get("category_id")) for row in categories}:
+                    raise PersistentChannelError("The selected category is not currently available")
+                stream = next((row for row in client.get_live_streams(category_id)
+                               if str(row.get("stream_id")) == stream_id), None)
+                if stream is None:
+                    raise PersistentChannelError("The selected stream is not currently available")
+            finally:
+                client.session.close()
+        from server.services.xtream_quality import measure_stream_quality
+        measured = measure_stream_quality(stream_id, stream.get("container_extension") or "ts")
+        with get_conn() as conn:
+            saved = save_stream_quality(conn, category_id, stream_id, measured)
+        return jsonify({"status": "success", "category_id": category_id,
+                        "stream_id": stream_id, "measured_quality": saved})
     except Exception as exc:
         return _safe_error(exc, 502)
 

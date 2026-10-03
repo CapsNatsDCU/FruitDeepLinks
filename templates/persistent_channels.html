@@ -41,7 +41,7 @@
 {% block content %}
 <section class="card" style="margin-bottom:16px" aria-labelledby="persistent-title">
   <h2 id="persistent-title">Persistent Channels</h2>
-  <p class="persistent-intro">Search channels across every provider category or only categories enabled for event ingestion. Add channels that should stay available even without a scheduled event. Provider credentials remain in deployment secrets.</p>
+  <p class="persistent-intro">Search channels across every provider category or only categories enabled for event ingestion. Add channels that should stay available even without a scheduled event. The XMLTV guide refreshes when channels are saved and during the regular Xtream refresh. Provider credentials remain in deployment secrets.</p>
   <div class="persistent-links">
     <a href="/m3u/persistent">Persistent M3U</a>
     <a href="/xmltv/persistent">Persistent XMLTV</a>
@@ -62,8 +62,10 @@
         <input id="persistent-search" type="text" placeholder="Washington" onkeydown="if(event.key==='Enter'){event.preventDefault();searchPersistentStreams(1)}">
       </label>
       <button class="btn" type="button" onclick="searchPersistentStreams(1)">Search</button>
+      <button class="btn btn-secondary" type="button" id="persistent-detect-all" onclick="detectAllPersistentQuality()">Detect all search results</button>
       <button class="btn btn-secondary" type="button" onclick="closePersistentBrowser()">Close</button>
     </div>
+    <div id="persistent-quality-progress" class="status-muted" role="status" aria-live="polite"></div>
     <div id="persistent-results" class="persistent-results"><span class="status-muted">Enter a channel name to search all categories.</span></div>
     <div id="persistent-pagination" class="persistent-toolbar" style="margin-bottom:0"></div>
   </div>
@@ -80,6 +82,7 @@ let _persistentResults = [];
 let _persistentPage = 1;
 let _persistentSearchScope = 'all';
 let _persistentSearchSequence = 0;
+let _persistentQualityBatch = null;
 let _favoriteState = {teams:[]};
 
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -144,6 +147,7 @@ function renderPersistentChannels() {
       <strong>${escHtml(channel.channel_number)} | ${escHtml(channel.display_name)}</strong>
       <div style="margin-top:4px"><span class="persistent-status ${escHtml(channel.availability_status)}">${persistentStatusLabel(channel)}</span></div>
       <div class="persistent-row-meta">${escHtml(channel.category_name || channel.category_id)} · stream_id ${escHtml(channel.stream_id)}${channel.favorite_team ? ` · Team: ${escHtml(channel.favorite_team)}` : ''}</div>
+      <div class="persistent-row-meta">${persistentQualityText(channel)}</div>
       ${channel.unavailable_reason ? `<div class="persistent-row-meta" style="color:var(--warning)">${escHtml(channel.unavailable_reason)}</div>` : ''}
     </div>
     <div class="persistent-actions">
@@ -161,6 +165,7 @@ async function openPersistentBrowser() {
 }
 
 function clearPersistentBrowserResults() {
+  stopPersistentQualityBatch();
   _persistentSearchSequence++;
   _persistentResults = [];
   _persistentPage = 1;
@@ -183,6 +188,7 @@ function setPersistentCategoryView(view) {
 }
 
 function closePersistentBrowser() {
+  stopPersistentQualityBatch();
   _persistentSearchSequence++;
   document.getElementById('persistent-browser').hidden = true;
   document.getElementById('persistent-editor').innerHTML = '';
@@ -205,11 +211,7 @@ async function searchPersistentStreams(page = 1) {
     if (requestId !== _persistentSearchSequence) return;
     _persistentResults = Array.isArray(data.items) ? data.items : [];
     _persistentPage = data.page || 1;
-    results.innerHTML = _persistentResults.length ? _persistentResults.map((stream, index) => `<div class="persistent-row">
-      ${stream.stream_icon ? `<img src="${escHtml(String(stream.stream_icon))}" alt="">` : '<div aria-hidden="true"></div>'}
-      <div class="persistent-row-main"><strong>${escHtml(stream.name)}</strong><div class="persistent-row-meta">${escHtml(stream.category_name)} · category ${escHtml(stream.category_id)} · stream_id ${escHtml(stream.stream_id)}${stream.epg_channel_id ? ` · EPG ${escHtml(String(stream.epg_channel_id))}` : ''}</div></div>
-      <div class="persistent-actions"><button class="btn" type="button" onclick="showPersistentAdd(${index})">Add Channel</button></div>
-    </div>`).join('') : (data.category_count === 0
+    results.innerHTML = _persistentResults.length ? persistentResultRows() : (data.category_count === 0
       ? (data.scope === 'active'
         ? '<div class="favorite-empty">No active event categories are available. Select categories in Settings or try All Categories.</div>'
         : '<div class="favorite-empty">The provider returned no categories. Check the Xtream account pool in Settings.</div>')
@@ -222,6 +224,100 @@ async function searchPersistentStreams(page = 1) {
     if (requestId !== _persistentSearchSequence) return;
     persistentError(`Could not browse streams: ${err.message}`);
     results.innerHTML = '<div class="favorite-empty">Stream browsing is unavailable.</div>';
+  }
+}
+
+function persistentQualityText(stream) {
+  const advertised = stream.advertised_quality ? `Advertised: ${escHtml(stream.advertised_quality)}` : 'Advertised: not specified';
+  const quality = stream.measured_quality;
+  if (!quality) return `${advertised} · Actual: not measured`;
+  const fps = quality.fps ? ` · ${escHtml(quality.fps)} fps` : '';
+  return `Actual: ${escHtml(quality.width)} × ${escHtml(quality.height)}${fps} (measured ${escHtml(quality.measured_at)}) · ${advertised}`;
+}
+
+function persistentResultRows() {
+  return _persistentResults.map((stream, index) => `<div class="persistent-row">
+    ${stream.stream_icon ? `<img src="${escHtml(String(stream.stream_icon))}" alt="">` : '<div aria-hidden="true"></div>'}
+    <div class="persistent-row-main"><strong>${escHtml(stream.name)}</strong>
+      <div class="persistent-row-meta">${escHtml(stream.category_name)} · category ${escHtml(stream.category_id)} · stream_id ${escHtml(stream.stream_id)}${stream.epg_channel_id ? ` · EPG ${escHtml(String(stream.epg_channel_id))}` : ''}</div>
+      <div class="persistent-row-meta">${persistentQualityText(stream)}</div></div>
+    <div class="persistent-actions"><button class="btn btn-secondary" type="button" onclick="detectPersistentQuality(${index}, this)">Detect quality</button>
+      <button class="btn" type="button" onclick="showPersistentAdd(${index})">Add Channel</button></div>
+  </div>`).join('');
+}
+
+async function requestPersistentQuality(stream) {
+  const data = await persistentRequest('/api/xtream/persistent-channels/quality', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({category_id:stream.category_id, stream_id:stream.stream_id}),
+  });
+  for (const visible of _persistentResults) {
+    if (visible.category_id === stream.category_id && visible.stream_id === stream.stream_id)
+      visible.measured_quality = data.measured_quality;
+  }
+  if (_persistentResults.length && !document.getElementById('persistent-browser').hidden)
+    document.getElementById('persistent-results').innerHTML = persistentResultRows();
+  return data.measured_quality;
+}
+
+async function detectPersistentQuality(index, button) {
+  const stream = _persistentResults[index];
+  if (!stream) return;
+  button.disabled = true;
+  button.textContent = 'Measuring…';
+  try {
+    await requestPersistentQuality(stream);
+    showToast(`Measured ${stream.name}`, 'success');
+  } catch (err) {
+    persistentError(`Could not measure ${stream.name}: ${err.message}`);
+    button.disabled = false;
+    button.textContent = 'Detect quality';
+  }
+}
+
+function stopPersistentQualityBatch() {
+  if (_persistentQualityBatch) _persistentQualityBatch.stopped = true;
+}
+
+async function detectAllPersistentQuality() {
+  if (_persistentQualityBatch) {
+    _persistentQualityBatch.stopped = true;
+    return;
+  }
+  const query = document.getElementById('persistent-search').value.trim();
+  if (!query) {
+    persistentError('Enter a channel name before detecting quality for all results.');
+    return;
+  }
+  const scope = _persistentSearchScope;
+  const batch = {stopped:false};
+  _persistentQualityBatch = batch;
+  const button = document.getElementById('persistent-detect-all');
+  const progress = document.getElementById('persistent-quality-progress');
+  button.textContent = 'Stop detection';
+  let checked = 0, failed = 0, total = 0;
+  try {
+    for (let page = 1; !batch.stopped; page++) {
+      const params = new URLSearchParams({q:query, scope, page:String(page), page_size:'100'});
+      const data = await persistentRequest(`/api/xtream/persistent-channels/search?${params}`, {method:'POST'});
+      total = data.total || 0;
+      for (const stream of data.items || []) {
+        if (batch.stopped) break;
+        progress.textContent = `Measuring ${checked + 1} of ${total} search results… ${failed} failed.`;
+        try { await requestPersistentQuality(stream); } catch (_) { failed++; }
+        checked++;
+      }
+      if (page * 100 >= total || !(data.items || []).length) break;
+    }
+    progress.textContent = batch.stopped
+      ? `Stopped after ${checked} of ${total} results; ${failed} failed.`
+      : `Measured ${checked - failed} of ${total} results; ${failed} failed.`;
+  } catch (err) {
+    persistentError(`Quality detection stopped: ${err.message}`);
+    progress.textContent = `Stopped after ${checked} of ${total} results.`;
+  } finally {
+    _persistentQualityBatch = null;
+    button.textContent = 'Detect all search results';
   }
 }
 
@@ -300,6 +396,14 @@ async function savePersistentForm(mode, id) {
     document.getElementById('persistent-editor').innerHTML = '';
     await loadPersistentChannels();
     showToast(`${data.channel.display_name} saved`, 'success');
+    if (data.channel.enabled) {
+      try {
+        const guide = await persistentRequest('/api/xtream/epg/refresh', {method:'POST'});
+        showToast(`XMLTV guide updated: ${guide.programmes} programmes`, guide.failed ? 'warning' : 'success');
+      } catch (guideError) {
+        persistentError(`Channel saved, but its XMLTV guide could not refresh: ${guideError.message}`);
+      }
+    }
   } catch (err) { persistentError(err.message); showToast('Persistent channel was not saved', 'error'); }
 }
 
@@ -308,6 +412,7 @@ async function setPersistentEnabled(id, enabled) {
     await persistentRequest(`/api/xtream/persistent-channels/${id}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled})});
     await loadPersistentChannels();
     showToast(`Persistent channel ${enabled ? 'enabled' : 'disabled'}`, 'success');
+    if (enabled) await persistentRequest('/api/xtream/epg/refresh', {method:'POST'});
   } catch (err) { persistentError(err.message); }
 }
 

@@ -23,6 +23,7 @@ PROVIDER = "xtream"
 AVAILABILITY_VALUES = {"unknown", "available", "unavailable", "needs_attention"}
 _CHANNEL_NUMBER_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)?$")
 _EXTENSION_RE = re.compile(r"^[A-Za-z0-9]{1,8}$")
+_QUALITY_LABEL_RE = re.compile(r"(?<![A-Z0-9])(?:4K|UHD|FHD|FULL[ -]?HD|HD|SD|2160P|1080P|720P|480P)(?![A-Z0-9])", re.I)
 
 
 class PersistentChannelError(ValueError):
@@ -133,7 +134,50 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_xtream_persistent_enabled "
         "ON xtream_persistent_channels(enabled, availability_status)"
     )
+    conn.execute("""CREATE TABLE IF NOT EXISTS xtream_stream_quality (
+        category_id TEXT NOT NULL,
+        stream_id TEXT NOT NULL,
+        width INTEGER NOT NULL,
+        height INTEGER NOT NULL,
+        fps REAL,
+        codec TEXT,
+        measured_at TEXT NOT NULL,
+        PRIMARY KEY (category_id, stream_id)
+    )""")
     conn.commit()
+
+
+def advertised_quality(name: Any) -> Optional[str]:
+    """Return only a resolution label explicitly present in the provider name."""
+    match = _QUALITY_LABEL_RE.search(str(name or ""))
+    if not match:
+        return None
+    label = match.group().upper().replace(" ", "-")
+    return {"UHD": "4K", "FULL-HD": "FHD", "2160P": "4K"}.get(label, label)
+
+
+def quality_for_stream(conn: sqlite3.Connection, category_id: Any, stream_id: Any) -> Optional[dict[str, Any]]:
+    row = conn.execute(
+        "SELECT width,height,fps,codec,measured_at FROM xtream_stream_quality WHERE category_id=? AND stream_id=?",
+        (str(category_id), str(stream_id)),
+    ).fetchone()
+    return dict(zip(("width", "height", "fps", "codec", "measured_at"), row)) if row else None
+
+
+def save_stream_quality(conn: sqlite3.Connection, category_id: Any, stream_id: Any,
+                        measured: Mapping[str, Any]) -> dict[str, Any]:
+    ensure_schema(conn)
+    now = utc_now()
+    with conn:
+        conn.execute("""INSERT INTO xtream_stream_quality
+            (category_id,stream_id,width,height,fps,codec,measured_at) VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(category_id,stream_id) DO UPDATE SET
+            width=excluded.width,height=excluded.height,fps=excluded.fps,
+            codec=excluded.codec,measured_at=excluded.measured_at""",
+            (str(category_id), str(stream_id), measured["width"], measured["height"],
+             measured.get("fps"), measured.get("codec"), now),
+        )
+    return quality_for_stream(conn, category_id, stream_id)
 
 
 def _clean_optional(value: Any, *, limit: int = 2048) -> Optional[str]:
@@ -176,6 +220,7 @@ def _row_to_dict(row: sqlite3.Row | tuple, columns: Optional[list[str]] = None) 
     result["effective_guide_id"] = (
         result.get("guide_id") or result.get("channel_id") or f"xtream.persistent.{result.get('id')}"
     )
+    result["advertised_quality"] = advertised_quality(result.get("original_name"))
     return result
 
 
@@ -189,7 +234,10 @@ def list_channels(conn: sqlite3.Connection, *, enabled_only: bool = False) -> li
         if enabled_only:
             sql += " WHERE enabled = 1"
         sql += " ORDER BY CAST(channel_number AS REAL), channel_number, display_name"
-        return [_row_to_dict(row) for row in conn.execute(sql, params).fetchall()]
+        result = [_row_to_dict(row) for row in conn.execute(sql, params).fetchall()]
+        for channel in result:
+            channel["measured_quality"] = quality_for_stream(conn, channel["category_id"], channel["stream_id"])
+        return result
     finally:
         conn.row_factory = previous_factory
 
@@ -202,7 +250,11 @@ def get_channel(conn: sqlite3.Connection, channel_id: int) -> Optional[dict[str,
         row = conn.execute(
             "SELECT * FROM xtream_persistent_channels WHERE id = ?", (channel_id,)
         ).fetchone()
-        return _row_to_dict(row) if row else None
+        if not row:
+            return None
+        result = _row_to_dict(row)
+        result["measured_quality"] = quality_for_stream(conn, result["category_id"], result["stream_id"])
+        return result
     finally:
         conn.row_factory = previous_factory
 
@@ -540,6 +592,7 @@ def page_streams(streams: list[dict], query: str = "", page: int = 1,
             "stream_icon": stream.get("stream_icon") or None,
             "epg_channel_id": stream.get("epg_channel_id") or stream.get("epg_id") or None,
             "container_extension": normalize_extension(stream.get("container_extension")),
+            "advertised_quality": advertised_quality(stream.get("name")),
         }
         if stream.get("category_id") is not None:
             item["category_id"] = str(stream["category_id"])
