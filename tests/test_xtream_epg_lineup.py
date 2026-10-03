@@ -78,6 +78,21 @@ class EpgLineupTests(unittest.TestCase):
         self.assertTrue(self.client.session.get.call_args.kwargs['stream'])
         self.client.session.get.return_value.close.assert_called_once()
 
+    def test_xmltv_failure_uses_next_account_for_programmes(self):
+        self.client.metadata_configs = tuple(account.config for account in self.accounts[:2])
+        self.client.session.get.side_effect = OSError("private-password/0")
+        fallback = Mock()
+        response = Mock()
+        response.raw = io.BytesIO(('<tv>' + self.programme() + '</tv>').encode())
+        fallback.get.return_value = response
+        with patch('xtream_epg.requests.Session', return_value=fallback):
+            result = refresh_epg(self.conn, self.client, self.accounts)
+        self.assertEqual(1, result['programmes'])
+        self.assertEqual('Sports & News', ET.fromstring(render_xmltv(self.conn)).findtext('programme/title'))
+        self.assertEqual(self.accounts[1].config.username, fallback.get.call_args.kwargs['params']['username'])
+        response.close.assert_called_once()
+        fallback.close.assert_called_once()
+
     def test_guide_override_keeps_original_epg_source_id(self):
         update_channel(self.conn, self.channel['id'], {'guide_id': 'custom.espn'})
         self.refresh_xml()
@@ -215,6 +230,7 @@ class EpgLineupTests(unittest.TestCase):
                 metadata.get_live_streams.assert_called_once_with('10')
                 metadata.session.close.assert_called_once()
                 refresh.assert_called_once()
+                self.assertEqual(3, len(metadata.metadata_configs))
                 if selected:
                     self.assertIn('dynamic_error', result)
 

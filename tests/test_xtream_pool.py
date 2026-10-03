@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 from xtream_accounts import load_accounts
-from xtream_ingest import XtreamClient, XtreamConfig, XtreamError, build_stream_url, load_config
+from xtream_ingest import XtreamClient, XtreamConfig, XtreamError, build_stream_url, load_config, load_metadata_configs
 from xtream_pool import PoolUnavailable, XtreamPool, scheduler_capacity
 from tests.xtream_test_helpers import HealthyAccountClient
 
@@ -41,6 +41,19 @@ def hold_in_process(path, env, pipe):
 
 
 class AccountConfigTests(unittest.TestCase):
+    def test_metadata_candidates_include_degraded_and_try_unhealthy_last(self):
+        env = pool_environment()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fruit.db"
+            pool = XtreamPool(path, env, client_factory=HealthyAccountClient)
+            with pool.connection() as conn:
+                conn.execute("UPDATE xtream_account_state SET health='unhealthy' WHERE account_id='account_0'")
+                conn.execute("UPDATE xtream_account_state SET health='degraded' WHERE account_id='account_1'")
+                conn.execute("UPDATE xtream_account_state SET health='healthy' WHERE account_id='account_2'")
+                configs = load_metadata_configs(conn, env)
+            self.assertEqual(["private-user-2", "private-user-1", "private-user-0"],
+                             [config.username for config in configs])
+
     def test_legacy_and_encoding(self):
         env = {"XTREAM_ENABLED": "true", "XTREAM_SERVER_URL": "http://provider.example",
                "XTREAM_USERNAME": "private user?#", "XTREAM_PASSWORD": "secret/pass&"}

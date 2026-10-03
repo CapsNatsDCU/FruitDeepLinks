@@ -25,7 +25,7 @@ from server.services.xtream_persistent import (
     render_xmltv,
     update_channel,
 )
-from xtream_ingest import XtreamClient, XtreamError, load_config
+from xtream_ingest import XtreamClient, XtreamError, load_metadata_configs
 from sports_metadata import coverage, ensure_schema as ensure_sports_schema, utc_now
 
 
@@ -151,9 +151,12 @@ def _safe_error(exc: Exception, status: int = 400):
 
 
 def _configured_client(conn):
-    config = load_config(conn, os.environ)
+    configs = load_metadata_configs(conn, os.environ)
+    config = configs[0]
     config.validate(require_categories=False)
-    return config, XtreamClient(config)
+    client = XtreamClient(config)
+    client.metadata_configs = configs
+    return config, client
 
 
 def _catalog_rows(conn, query=""):

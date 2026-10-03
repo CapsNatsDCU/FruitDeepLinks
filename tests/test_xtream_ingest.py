@@ -4,6 +4,7 @@ import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
@@ -17,6 +18,7 @@ from xtream_ingest import (  # noqa: E402
     fetch_snapshot,
     ingest_payload,
     load_config,
+    load_metadata_configs,
     normalize_stream,
     parse_category_ids,
     parse_stop_from_name,
@@ -85,6 +87,53 @@ class FakeRunner:
 
 
 class XtreamParsingTest(unittest.TestCase):
+    def test_metadata_requests_try_next_account_and_keep_working_account_first(self):
+        first = config(username="first-user", password="first-secret")
+        second = config(username="second-user", password="second-secret")
+        primary = Mock()
+        primary.get.return_value = FakeResponse([], status_code=403)
+        runner = FakeRunner(FakeCompleted(returncode=22, stderr="first-secret"))
+        payloads = {
+            "get_live_categories": [{"category_id": "10", "category_name": "Sports"}],
+            "get_live_streams": [{"stream_id": "55", "name": "Sports feed"}],
+            "get_short_epg": {"epg_listings": [{"title": "Game", "start_timestamp": "1788375600"}]},
+        }
+        fallback_sessions = []
+
+        def fallback_session():
+            session = Mock()
+            session.get.side_effect = lambda url, params, timeout: FakeResponse(payloads[params["action"]])
+            fallback_sessions.append(session)
+            return session
+
+        client = XtreamClient(first, session=primary, subprocess_runner=runner)
+        client.metadata_configs = (first, second)
+        with patch("xtream_ingest.requests.Session", side_effect=fallback_session):
+            self.assertEqual("10", client.get_live_categories()[0]["category_id"])
+            self.assertEqual("55", client.get_live_streams("10")[0]["stream_id"])
+            self.assertEqual("Game", client.get_short_epg("55")[0]["title"])
+        primary.get.assert_called_once()
+        self.assertEqual(1, len(runner.calls))
+        self.assertEqual(3, len(fallback_sessions))
+        self.assertTrue(all(session.close.call_count == 1 for session in fallback_sessions))
+        self.assertEqual(second, client.metadata_configs[0])
+
+    def test_metadata_failure_after_all_accounts_has_no_credentials(self):
+        first = config(username="first-user", password="first-secret")
+        second = config(username="second-user", password="second-secret")
+        primary = Mock()
+        primary.get.return_value = FakeResponse([], status_code=403)
+        fallback = Mock()
+        fallback.get.return_value = FakeResponse([], status_code=403)
+        client = XtreamClient(first, session=primary,
+                              subprocess_runner=FakeRunner(FakeCompleted(returncode=22)))
+        client.metadata_configs = (first, second)
+        with patch("xtream_ingest.requests.Session", return_value=fallback), self.assertRaises(XtreamError) as caught:
+            client.get_live_categories()
+        self.assertIn("all enabled accounts", str(caught.exception))
+        for secret in ("first-user", "first-secret", "second-user", "second-secret"):
+            self.assertNotIn(secret, str(caught.exception))
+
     def test_api_response_parsing_and_request_shape(self):
         session = FakeSession([{"category_id": "10", "category_name": "Sports"}, "bad"])
         runner = FakeRunner(error=AssertionError("curl must not run on requests success"))

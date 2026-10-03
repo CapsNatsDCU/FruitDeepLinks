@@ -226,13 +226,13 @@ def _load_legacy_config(conn: Optional[sqlite3.Connection] = None,
     )
 
 
-def load_config(conn: Optional[sqlite3.Connection] = None,
-                environ: Optional[Mapping[str, str]] = None) -> XtreamConfig:
-    """Select a catalogue account; streaming allocation belongs to XtreamPool."""
+def _catalog_accounts(conn: Optional[sqlite3.Connection] = None,
+                      environ: Optional[Mapping[str, str]] = None):
+    """Order enabled accounts by their last known health, without network I/O."""
     from xtream_accounts import load_accounts
     accounts = load_accounts(conn, environ)
     candidates = []
-    for account in accounts:
+    for index, account in enumerate(accounts):
         enabled, health = account.enabled, "unknown"
         if conn is not None:
             try:
@@ -243,10 +243,34 @@ def load_config(conn: Optional[sqlite3.Connection] = None,
                         health = row[1]
             except sqlite3.OperationalError:
                 pass
-        if enabled and health != "unhealthy":
-            candidates.append(({"healthy": 0, "degraded": 1, "unknown": 2, "unreachable": 3}.get(health, 4), account))
+        if enabled:
+            rank = {"healthy": 0, "degraded": 1, "unknown": 2,
+                    "unreachable": 3, "unhealthy": 4}.get(health, 5)
+            candidates.append((rank, index, account))
+    return accounts, sorted(candidates)
+
+
+def load_metadata_configs(conn: Optional[sqlite3.Connection] = None,
+                          environ: Optional[Mapping[str, str]] = None) -> tuple[XtreamConfig, ...]:
+    """Try every enabled credential set for provider metadata, healthiest first."""
+    accounts, candidates = _catalog_accounts(conn, environ)
     if candidates:
-        return min(candidates, key=lambda item: item[0])[1].config
+        return tuple(account.config for _, _, account in candidates)
+    if accounts:
+        raise XtreamError("No enabled usable Xtream accounts; test the pool in Settings")
+    env = os.environ if environ is None else environ
+    if env.get("XTREAM_ACCOUNTS_FILE", "").strip() or env.get("XTREAM_ACCOUNTS_JSON", "").strip():
+        raise XtreamError("No Xtream accounts are configured in deployment secrets")
+    return (_load_legacy_config(conn, environ),)
+
+
+def load_config(conn: Optional[sqlite3.Connection] = None,
+                environ: Optional[Mapping[str, str]] = None) -> XtreamConfig:
+    """Select one catalogue account; streaming allocation belongs to XtreamPool."""
+    accounts, candidates = _catalog_accounts(conn, environ)
+    for rank, _, account in candidates:
+        if rank < 4:
+            return account.config
     if accounts:
         raise XtreamError("No enabled usable Xtream accounts; test the pool in Settings")
     env = os.environ if environ is None else environ
@@ -293,6 +317,7 @@ class XtreamClient:
         # normal validation path, which refuses an accidental full catalogue import.
         config.validate(require_categories=False)
         self.config = config
+        self.metadata_configs = (config,)
         from xtream_logging import protect_http_logs
         protect_http_logs(config)
         self.session = session or requests.Session()
@@ -353,19 +378,23 @@ class XtreamClient:
 
     def _get_with_requests(self, action: str,
                            category_id: Optional[str] = None,
-                           stream_id: Optional[str] = None) -> Optional[list[dict]]:
+                           stream_id: Optional[str] = None,
+                           config: Optional[XtreamConfig] = None) -> Optional[list[dict]]:
+        config = config or self.config
         params = {
-            "username": self.config.username,
-            "password": self.config.password,
+            "username": config.username,
+            "password": config.password,
             "action": action,
         }
         if category_id is not None:
             params["category_id"] = str(category_id)
         if stream_id is not None:
             params["stream_id"] = str(stream_id)
+        # A fallback account must not inherit cookies from the first account.
+        session = self.session if config is self.config else requests.Session()
         try:
-            response = self.session.get(
-                f"{self.config.server_url}/player_api.php",
+            response = session.get(
+                f"{config.server_url}/player_api.php",
                 params=params,
                 timeout=self.timeout,
             )
@@ -384,10 +413,15 @@ class XtreamClient:
             # requests exceptions can embed the fully-authenticated request URL.
             # Do not propagate or log their text; curl gets one clean retry.
             return None
+        finally:
+            if session is not self.session:
+                session.close()
 
     def _curl_payload(self, action: Optional[str],
                        category_id: Optional[str] = None,
-                       stream_id: Optional[str] = None) -> Any:
+                       stream_id: Optional[str] = None,
+                       config: Optional[XtreamConfig] = None) -> Any:
+        config = config or self.config
         timeout = self.catalog_timeout if action == "get_live_categories" else self.timeout
         command = [
             self.curl_binary,
@@ -397,7 +431,7 @@ class XtreamClient:
             "--max-time",
             str(timeout),
             "--get",
-            f"{self.config.server_url}/player_api.php",
+            f"{config.server_url}/player_api.php",
             "--config", "-",
         ]
         def config_quote(value):
@@ -405,7 +439,7 @@ class XtreamClient:
         # Keep secrets out of process arguments as well as logs. Curl's config
         # is supplied through stdin and is never written to disk.
         secret_input = "".join(f'data-urlencode = "{key}={config_quote(value)}"\n'
-                               for key, value in (("username", self.config.username), ("password", self.config.password)))
+                               for key, value in (("username", config.username), ("password", config.password)))
         if action:
             command.extend(("--data-urlencode", f"action={action}"))
         if category_id is not None:
@@ -447,8 +481,9 @@ class XtreamClient:
         return payload
 
     def _get_with_curl(self, action: str, category_id: Optional[str] = None,
-                       stream_id: Optional[str] = None) -> list[dict]:
-        payload = self._curl_payload(action, category_id, stream_id)
+                       stream_id: Optional[str] = None,
+                       config: Optional[XtreamConfig] = None) -> list[dict]:
+        payload = self._curl_payload(action, category_id, stream_id, config)
         if action in {"get_short_epg", "get_simple_data_table"}:
             rows = self._usable_epg_payload(payload)
         else:
@@ -462,10 +497,24 @@ class XtreamClient:
 
     def _get(self, action: str, category_id: Optional[str] = None,
              stream_id: Optional[str] = None) -> list[dict]:
-        rows = self._get_with_requests(action, category_id, stream_id)
-        if rows is not None:
-            return rows
-        return self._get_with_curl(action, category_id, stream_id)
+        configs = self.metadata_configs
+        for config in configs:
+            rows = self._get_with_requests(action, category_id, stream_id, config)
+            if rows is not None:
+                self._prefer_metadata_config(config)
+                return rows
+            try:
+                rows = self._get_with_curl(action, category_id, stream_id, config)
+                self._prefer_metadata_config(config)
+                return rows
+            except XtreamError:
+                if len(configs) == 1:
+                    raise
+        raise XtreamError(f"Xtream {action} failed for all enabled accounts")
+
+    def _prefer_metadata_config(self, config: XtreamConfig) -> None:
+        """Keep a working account first for the rest of this refresh/request."""
+        self.metadata_configs = (config, *(item for item in self.metadata_configs if item is not config))
 
     def get_live_categories(self) -> list[dict]:
         return self._get("get_live_categories")
@@ -1425,9 +1474,11 @@ def run(db_path: Path, environ: Optional[Mapping[str, str]] = None,
         from xtream_epg import refresh_epg
         pool = XtreamPool(db_path, environ, client_factory=client_factory)
         pool_status = pool.check_accounts()
-        config = load_config(conn, environ)
+        metadata_configs = load_metadata_configs(conn, environ)
+        config = metadata_configs[0]
         config.validate(require_categories=False)
         client = client_factory(config)
+        client.metadata_configs = metadata_configs
         snapshot_diagnostics: dict[str, Any] = {}
         try:
             categories, streams = (fetch_snapshot(client, config, snapshot_diagnostics,

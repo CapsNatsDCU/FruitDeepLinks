@@ -9,6 +9,7 @@ import base64
 import copy
 import re
 import sqlite3
+import requests
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree as ET
 
@@ -84,15 +85,14 @@ def api_programme(row, channel, zone):
     return programme
 
 
-def provider_xmltv(client, wanted):
-    """Parse a streamed XMLTV response, retaining only explicitly wanted IDs."""
+def _provider_xmltv_one(client, wanted, config):
+    """Parse one account's XMLTV response, retaining explicitly wanted IDs."""
     result = {guide: [] for guide in wanted}
-    if not wanted:
-        return result
     response = None
+    session = client.session if config is client.config else requests.Session()
     try:
-        response = client.session.get(f"{client.config.server_url}/xmltv.php",
-                                      params={"username": client.config.username, "password": client.config.password},
+        response = session.get(f"{config.server_url}/xmltv.php",
+                                      params={"username": config.username, "password": config.password},
                                       stream=True, timeout=(10, 60))
         response.raise_for_status()
         response.raw.decode_content = True
@@ -104,7 +104,7 @@ def provider_xmltv(client, wanted):
             if event == "end" and element.tag in {"programme", "channel"}:
                 guide = element.get("channel")
                 if element.tag == "programme" and guide in wanted:
-                    start, stop = xml_time(element.get("start"), client.config.timezone_name), xml_time(element.get("stop"), client.config.timezone_name)
+                    start, stop = xml_time(element.get("start"), config.timezone_name), xml_time(element.get("stop"), config.timezone_name)
                     now = datetime.now(timezone.utc)
                     if (element.findtext("title") and start and stop and stop > start and stop >= now - timedelta(days=1)
                             and start <= now + timedelta(days=31) and len(result[guide]) < 10000):
@@ -116,6 +116,27 @@ def provider_xmltv(client, wanted):
     finally:
         if response is not None:
             response.close()
+        if session is not client.session:
+            session.close()
+
+
+def provider_xmltv(client, wanted):
+    """Use the next enabled account if XMLTV transport or parsing fails."""
+    if not wanted:
+        return {}
+    configs = getattr(client, "metadata_configs", None)
+    if not isinstance(configs, (tuple, list)):
+        configs = (client.config,)
+    for config in configs:
+        try:
+            result = _provider_xmltv_one(client, wanted, config)
+            prefer = getattr(type(client), "_prefer_metadata_config", None)
+            if callable(prefer):
+                prefer(client, config)
+            return result
+        except XtreamError:
+            continue
+    raise XtreamError("Provider XMLTV unavailable or malformed for all enabled accounts")
 
 
 def clean_programme(programme, channel, accounts, zone):
