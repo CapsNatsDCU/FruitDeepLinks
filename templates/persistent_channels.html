@@ -183,6 +183,7 @@ function setPersistentCategoryView(view) {
 }
 
 function closePersistentBrowser() {
+  _persistentSearchSequence++;
   document.getElementById('persistent-browser').hidden = true;
   document.getElementById('persistent-editor').innerHTML = '';
 }
@@ -196,6 +197,7 @@ async function searchPersistentStreams(page = 1) {
   }
   const requestId = ++_persistentSearchSequence;
   document.getElementById('persistent-editor').innerHTML = '';
+  document.getElementById('persistent-pagination').innerHTML = '';
   results.innerHTML = '<span class="status-muted">Searching channels across categories…</span>';
   try {
     const params = new URLSearchParams({q:query, scope:_persistentSearchScope, page:String(page), page_size:'25'});
@@ -207,7 +209,11 @@ async function searchPersistentStreams(page = 1) {
       ${stream.stream_icon ? `<img src="${escHtml(String(stream.stream_icon))}" alt="">` : '<div aria-hidden="true"></div>'}
       <div class="persistent-row-main"><strong>${escHtml(stream.name)}</strong><div class="persistent-row-meta">${escHtml(stream.category_name)} · category ${escHtml(stream.category_id)} · stream_id ${escHtml(stream.stream_id)}${stream.epg_channel_id ? ` · EPG ${escHtml(String(stream.epg_channel_id))}` : ''}</div></div>
       <div class="persistent-actions"><button class="btn" type="button" onclick="showPersistentAdd(${index})">Add Channel</button></div>
-    </div>`).join('') : '<div class="favorite-empty">No matching channels in these categories.</div>';
+    </div>`).join('') : (data.category_count === 0
+      ? (data.scope === 'active'
+        ? '<div class="favorite-empty">No active event categories are available. Select categories in Settings or try All Categories.</div>'
+        : '<div class="favorite-empty">The provider returned no categories. Check the Xtream account pool in Settings.</div>')
+      : '<div class="favorite-empty">No matching channels in these categories.</div>');
     const pages = Math.max(1, Math.ceil((data.total || 0) / (data.page_size || 25)));
     document.getElementById('persistent-pagination').innerHTML = `<span class="status-muted">${data.total || 0} result${data.total === 1 ? '' : 's'} · page ${_persistentPage} of ${pages}</span>
       <button class="btn btn-secondary" type="button" ${_persistentPage <= 1 ? 'disabled' : ''} onclick="searchPersistentStreams(${_persistentPage - 1})">Previous</button>

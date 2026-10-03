@@ -450,7 +450,8 @@ def api_xtream_persistent_search():
             page=request.args.get("page", 1, type=int) or 1,
             page_size=request.args.get("page_size", 25, type=int) or 25,
         )
-        return jsonify({"status": "success", "scope": scope, **result})
+        return jsonify({"status": "success", "scope": scope,
+                        "category_count": len(category_ids), **result})
     except Exception as exc:
         return _safe_error(exc, 502)
 
