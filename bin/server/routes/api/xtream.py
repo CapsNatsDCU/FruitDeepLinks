@@ -20,6 +20,7 @@ from server.services.xtream_persistent import (
     delete_channel,
     get_channel,
     list_channels,
+    normalize_name,
     page_streams,
     render_m3u,
     render_xmltv,
@@ -398,6 +399,58 @@ def api_xtream_category_streams(category_id):
             page_size=request.args.get("page_size", 50, type=int) or 50,
         )
         return jsonify({"status": "success", "category_id": str(category_id), **result})
+    except Exception as exc:
+        return _safe_error(exc, 502)
+
+
+@bp.route("/api/xtream/persistent-channels/search", methods=["POST"])
+def api_xtream_persistent_search():
+    """Search the provider's live streams across every or selected category."""
+    query = request.args.get("q", "").strip()
+    scope = request.args.get("scope", "all")
+    if not query or len(query) > 100:
+        return jsonify({"status": "error", "message": "Enter a channel name of up to 100 characters"}), 400
+    if scope not in {"all", "active"}:
+        return jsonify({"status": "error", "message": "Unknown category search scope"}), 400
+    _ensure_database()
+    try:
+        with get_conn() as conn:
+            config, client = _configured_client(conn)
+            categories = {
+                str(row["category_id"]): str(row.get("category_name") or f"Category {row['category_id']}")
+                for row in client.get_live_categories() if row.get("category_id") is not None
+            }
+            category_ids = set(categories)
+            if scope == "active":
+                category_ids.intersection_update(config.category_ids)
+            try:
+                streams = client.get_all_live_streams() if category_ids else []
+            except XtreamError:
+                streams = []
+            needle = normalize_name(query)
+            # Some Xtream implementations omit category_id from their full
+            # stream response. Fetch each category only when that prevents an
+            # accurate match; never silently drop matching channels.
+            if category_ids and (not streams or any(
+                not str(row.get("category_id") or "").strip()
+                and needle in normalize_name(row.get("name")) for row in streams
+            )):
+                streams = [
+                    {**row, "category_id": category_id}
+                    for category_id in sorted(category_ids)
+                    for row in client.get_live_streams(category_id)
+                ]
+        scoped = [
+            {**row, "category_id": str(row["category_id"]),
+             "category_name": categories[str(row["category_id"])]}
+            for row in streams if str(row.get("category_id")) in category_ids
+        ]
+        result = page_streams(
+            scoped, query=query,
+            page=request.args.get("page", 1, type=int) or 1,
+            page_size=request.args.get("page_size", 25, type=int) or 25,
+        )
+        return jsonify({"status": "success", "scope": scope, **result})
     except Exception as exc:
         return _safe_error(exc, 502)
 

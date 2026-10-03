@@ -52,6 +52,11 @@ def settings_page():
     return _render("settings.html")
 
 
+@bp.route("/persistent-channels")
+def persistent_channels_page():
+    return _render("persistent_channels.html")
+
+
 @bp.route("/filters")
 def filters_page():
     return _render("filters.html")

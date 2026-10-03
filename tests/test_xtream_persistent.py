@@ -33,6 +33,7 @@ from server.services.xtream_persistent import (  # noqa: E402
 from tests.xtream_test_helpers import mocked_provider
 from xtream_ingest import (  # noqa: E402
     XtreamConfig,
+    XtreamError,
     ensure_schema as ensure_ingest_schema,
     ingest_payload,
     normalize_stream,
@@ -209,6 +210,13 @@ class FakeXtreamClient:
             raise AssertionError("Only a provider category may be fetched")
         return list(FIXTURE["streams"])
 
+    def get_all_live_streams(self):
+        return [
+            {**stream, "category_id": category_id}
+            for category_id in ("410", "999")
+            for stream in FIXTURE["streams"]
+        ]
+
 
 class PersistentChannelApiWorkflowTest(unittest.TestCase):
     def setUp(self):
@@ -252,12 +260,21 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
 
     def test_provider_to_browse_add_database_exports_and_tune(self):
         settings_page = self.client.get("/settings").get_data(as_text=True)
+        persistent_page = self.client.get("/persistent-channels").get_data(as_text=True)
         self.assertIn("Persistent Channels", settings_page)
-        self.assertIn("Browse Xtream Channels", settings_page)
-        self.assertIn("All Categories", settings_page)
-        self.assertIn("All Active Categories", settings_page)
-        self.assertNotIn("XTREAM_USERNAME", settings_page)
-        self.assertNotIn("XTREAM_PASSWORD", settings_page)
+        self.assertNotIn("Search Xtream Channels", settings_page)
+        self.assertIn('href="/persistent-channels"', settings_page)
+        self.assertIn("Search Xtream Channels", persistent_page)
+        self.assertIn("All Categories", persistent_page)
+        self.assertIn("All Active Categories", persistent_page)
+        self.assertNotIn('id="persistent-category"', persistent_page)
+        self.assertIn('editor.dataset.categoryId = stream.category_id', persistent_page)
+        self.assertIn("Refresh Persistent Guide", persistent_page)
+        self.assertNotIn("Refresh Persistent Guide", settings_page)
+        self.assertIn('href="/persistent-channels" class="topnav-link topnav-link-active"', persistent_page)
+        for page in (settings_page, persistent_page):
+            self.assertNotIn("XTREAM_USERNAME", page)
+            self.assertNotIn("XTREAM_PASSWORD", page)
 
         categories = self.client.get("/api/xtream/categories")
         self.assertEqual(200, categories.status_code)
@@ -381,6 +398,62 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
         self.assertEqual(201, added.status_code, added.get_data(as_text=True))
         self.assertEqual("999", added.get_json()["channel"]["category_id"])
         self.assertEqual(["410"], self.client.get("/api/xtream/categories").get_json()["selected_category_ids"])
+
+    def test_channel_search_spans_all_or_only_active_categories(self):
+        all_results = self.client.post(
+            "/api/xtream/persistent-channels/search",
+            query_string={"q": "Washington", "scope": "all", "page_size": 1},
+        )
+        self.assertEqual(200, all_results.status_code)
+        self.assertEqual(2, all_results.get_json()["total"])
+        first = all_results.get_json()["items"][0]
+        self.assertEqual("410", first["category_id"])
+        self.assertEqual("MLB TEAM PPV", first["category_name"])
+        second = self.client.post(
+            "/api/xtream/persistent-channels/search",
+            query_string={"q": "Washington", "scope": "all", "page": 2, "page_size": 1},
+        )
+        self.assertEqual("999", second.get_json()["items"][0]["category_id"])
+        active = self.client.post(
+            "/api/xtream/persistent-channels/search",
+            query_string={"q": "Washington", "scope": "active"},
+        )
+        self.assertEqual(200, active.status_code)
+        self.assertEqual(1, active.get_json()["total"])
+        self.assertEqual("410", active.get_json()["items"][0]["category_id"])
+        self.assertEqual(["410"], self.client.get("/api/xtream/categories").get_json()["selected_category_ids"])
+
+    def test_search_falls_back_when_full_stream_list_lacks_categories(self):
+        class CategorylessClient(FakeXtreamClient):
+            def get_all_live_streams(self):
+                return list(FIXTURE["streams"])
+
+        with patch("server.routes.api.xtream.XtreamClient", CategorylessClient):
+            response = self.client.post(
+                "/api/xtream/persistent-channels/search",
+                query_string={"q": "Washington", "scope": "all"},
+            )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"410", "999"}, {row["category_id"] for row in response.get_json()["items"]})
+
+    def test_search_falls_back_when_full_stream_request_is_unsupported(self):
+        class CategoryOnlyClient(FakeXtreamClient):
+            def get_all_live_streams(self):
+                raise XtreamError("Provider does not support full live stream lists")
+
+        with patch("server.routes.api.xtream.XtreamClient", CategoryOnlyClient):
+            response = self.client.post(
+                "/api/xtream/persistent-channels/search",
+                query_string={"q": "Washington", "scope": "active"},
+            )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(1, response.get_json()["total"])
+        self.assertEqual("410", response.get_json()["items"][0]["category_id"])
+
+    def test_search_requires_name_and_valid_scope(self):
+        for params in ({"scope": "all"}, {"q": "Washington", "scope": "other"}):
+            response = self.client.post("/api/xtream/persistent-channels/search", query_string=params)
+            self.assertEqual(400, response.status_code)
 
     def test_unknown_provider_category_is_not_browsed_or_added(self):
         response = self.client.post("/api/xtream/categories/888/streams")

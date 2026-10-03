@@ -524,17 +524,26 @@ def page_streams(streams: list[dict], query: str = "", page: int = 1,
         stream for stream in streams
         if not needle or needle in normalize_name(stream.get("name"))
     ]
-    filtered.sort(key=lambda row: normalize_name(row.get("name")))
+    filtered.sort(key=lambda row: (
+        normalize_name(row.get("name")),
+        str(row.get("category_id") or ""),
+        str(row.get("stream_id") or ""),
+    ))
     page = max(1, int(page))
     page_size = min(100, max(1, int(page_size)))
     start = (page - 1) * page_size
     items = []
     for stream in filtered[start:start + page_size]:
-        items.append({
+        item = {
             "stream_id": str(stream.get("stream_id")),
             "name": str(stream.get("name") or ""),
             "stream_icon": stream.get("stream_icon") or None,
             "epg_channel_id": stream.get("epg_channel_id") or stream.get("epg_id") or None,
             "container_extension": normalize_extension(stream.get("container_extension")),
-        })
+        }
+        if stream.get("category_id") is not None:
+            item["category_id"] = str(stream["category_id"])
+        if stream.get("category_name") is not None:
+            item["category_name"] = str(stream["category_name"])
+        items.append(item)
     return {"items": items, "total": len(filtered), "page": page, "page_size": page_size}

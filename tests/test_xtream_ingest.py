@@ -146,6 +146,17 @@ class XtreamParsingTest(unittest.TestCase):
         self.assertEqual(params["password"], "p@ss/word")
         self.assertEqual(runner.calls, [])
 
+    def test_full_live_stream_request_omits_category_filter(self):
+        session = FakeSession([{"stream_id": 55, "category_id": "10", "name": "Sports feed"}])
+        client = XtreamClient(config(), session=session,
+                              subprocess_runner=FakeRunner(error=AssertionError("curl must not run")))
+        rows = client.get_all_live_streams()
+        self.assertEqual("10", rows[0]["category_id"])
+        _, params, timeout = session.calls[0]
+        self.assertEqual("get_live_streams", params["action"])
+        self.assertNotIn("category_id", params)
+        self.assertEqual(client.timeout, timeout)
+
     def test_requests_failure_falls_back_to_curl(self):
         session = FakeSession([])
         session.get = lambda *args, **kwargs: FakeResponse([], status_code=503)

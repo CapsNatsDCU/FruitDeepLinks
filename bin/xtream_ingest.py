@@ -425,7 +425,8 @@ class XtreamClient:
                        stream_id: Optional[str] = None,
                        config: Optional[XtreamConfig] = None) -> Any:
         config = config or self.config
-        timeout = self.catalog_timeout if action == "get_live_categories" else self.timeout
+        timeout = (self.catalog_timeout if action == "get_live_categories"
+                   or (action == "get_live_streams" and category_id is None) else self.timeout)
         command = [
             self.curl_binary,
             "-4",
@@ -524,6 +525,10 @@ class XtreamClient:
 
     def get_live_streams(self, category_id: str) -> list[dict]:
         return self._get("get_live_streams", category_id=category_id)
+
+    def get_all_live_streams(self) -> list[dict]:
+        """Request the provider's full live catalog for cross-category search."""
+        return self._get("get_live_streams")
 
     def get_short_epg(self, stream_id: str) -> list[dict]:
         return self._get("get_short_epg", stream_id=stream_id)
