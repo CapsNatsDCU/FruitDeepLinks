@@ -15,6 +15,7 @@ import os
 import re
 import sqlite3
 import subprocess
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +38,7 @@ PROGRESS_PREFIX = "__FDL_PROGRESS__"
 DEFAULT_TIMEOUT_SECONDS = 20
 DEFAULT_CATALOG_TIMEOUT_SECONDS = 90
 DEFAULT_DURATION_MINUTES = 180
+MAX_CATEGORY_FETCH_WORKERS = 3
 _SAFE_EXTENSION_RE = re.compile(r"^[A-Za-z0-9]{1,8}$")
 _PLACEHOLDER_LABELS = {
     "NO EVENT",
@@ -519,6 +521,20 @@ class XtreamClient:
     def _prefer_metadata_config(self, config: XtreamConfig) -> None:
         """Keep a working account first for the rest of this refresh/request."""
         self.metadata_configs = (config, *(item for item in self.metadata_configs if item is not config))
+
+    def metadata_worker(self) -> "XtreamClient":
+        """Give a category request its own session and account fallback order."""
+        worker = XtreamClient(
+            self.metadata_configs[0], timeout=self.timeout, subprocess_runner=self.subprocess_runner,
+            curl_binary=self.curl_binary, catalog_timeout=self.catalog_timeout,
+        )
+        worker.metadata_configs = self.metadata_configs
+        # Some providers set a cookie during category discovery. Copy that
+        # account's session state, rather than sharing its mutable Session.
+        if worker.config is self.config and isinstance(self.session, requests.Session):
+            worker.session.cookies.update(self.session.cookies)
+            worker.session.headers.update(self.session.headers)
+        return worker
 
     def get_live_categories(self) -> list[dict]:
         return self._get("get_live_categories")
@@ -1195,7 +1211,8 @@ def _upsert(conn: sqlite3.Connection, table: str, columns: tuple[str, ...],
 def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
                    streams_by_category: Mapping[str, list[dict]], config: XtreamConfig,
                    now: Optional[datetime] = None,
-                   reconciled_category_ids: Optional[Iterable[str]] = None) -> dict[str, Any]:
+                   reconciled_category_ids: Optional[Iterable[str]] = None,
+                   progress_callback=None) -> dict[str, Any]:
     """Normalize and atomically upsert a fully-fetched Xtream snapshot."""
     ensure_schema(conn)
     selected = set(config.category_ids)
@@ -1231,6 +1248,9 @@ def ingest_payload(conn: sqlite3.Connection, categories: list[dict],
             if category_id not in reconciled:
                 continue
             category_stat = category_stats[category_id]
+            if progress_callback:
+                progress_callback(category_id, "normalizing", streams_fetched=category_stat["streams_fetched"],
+                                  detail="Importing events")
             for stream in streams_by_category.get(category_id, []):
                 stream_id = stream.get("stream_id")
                 if stream_id is not None:
@@ -1428,8 +1448,8 @@ def _enrich_streams_with_epg(client: XtreamClient,
             streams[index] = enriched
             enriched_count += 1
         if progress_callback:
-            progress_callback(category_id, "normalizing", streams_fetched=len(streams),
-                              epg_enriched=enriched_count, detail="Normalizing events")
+            progress_callback(category_id, "ready", streams_fetched=len(streams),
+                              epg_enriched=enriched_count, detail="EPG checked; awaiting import")
         if provider_failed:
             break
 
@@ -1458,26 +1478,70 @@ def fetch_snapshot(client: XtreamClient, config: XtreamConfig,
         raise XtreamError("None of the configured Xtream category IDs are currently available")
 
     streams: dict[str, list[dict]] = {}
-    failed: list[str] = []
-    for category_id in available_selected:
+    failed: set[str] = set()
+
+    def started_fetch(category_id: str) -> None:
         if progress_reporter:
             progress_reporter("xtream_category_update", category_id=category_id, status="fetching",
                               started_at=datetime.now(timezone.utc).isoformat())
-        try:
-            streams[category_id] = client.get_live_streams(category_id)
-            if progress_reporter:
-                progress_reporter("xtream_category_update", category_id=category_id, status="fetched",
-                                  streams_fetched=len(streams[category_id]), detail="Snapshot received")
-        except XtreamError:
-            # One transient or retired category must not suppress every other
-            # configured category. Its prior rows remain untouched because the
-            # ingest transaction receives only the successfully fetched IDs.
-            failed.append(category_id)
-            if progress_reporter:
-                progress_reporter("xtream_category_update", category_id=category_id, status="failed",
-                                  finished_at=datetime.now(timezone.utc).isoformat(), detail="Category request failed")
+
+    def fetched(category_id: str, rows: list[dict]) -> None:
+        streams[category_id] = rows
+        if progress_reporter:
+            progress_reporter("xtream_category_update", category_id=category_id, status="fetched",
+                              streams_fetched=len(rows), detail="Snapshot received")
+
+    def failed_fetch(category_id: str) -> None:
+        failed.add(category_id)
+        if progress_reporter:
+            progress_reporter("xtream_category_update", category_id=category_id, status="failed",
+                              finished_at=datetime.now(timezone.utc).isoformat(), detail="Category request failed")
+
+    if type(client) is XtreamClient and len(available_selected) > 1:
+        # The provider calls are network-bound. Never share a requests.Session
+        # or the mutable metadata account order between worker threads. Custom
+        # client implementations keep their existing sequential behavior.
+        def fetch_with_worker(category_id: str) -> list[dict]:
+            worker = client.metadata_worker()
+            try:
+                return worker.get_live_streams(category_id)
+            finally:
+                worker.session.close()
+
+        worker_count = min(MAX_CATEGORY_FETCH_WORKERS, len(available_selected))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            category_iter = iter(available_selected)
+            pending = {}
+
+            def submit_next() -> None:
+                category_id = next(category_iter, None)
+                if category_id is not None:
+                    started_fetch(category_id)
+                    pending[executor.submit(fetch_with_worker, category_id)] = category_id
+
+            for _ in range(worker_count):
+                submit_next()
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    category_id = pending.pop(future)
+                    try:
+                        fetched(category_id, future.result())
+                    except XtreamError:
+                        failed_fetch(category_id)
+                    submit_next()
+    else:
+        for category_id in available_selected:
+            started_fetch(category_id)
+            try:
+                fetched(category_id, client.get_live_streams(category_id))
+            except XtreamError:
+                failed_fetch(category_id)
     if not streams:
         raise XtreamError("Could not fetch any currently available configured Xtream categories")
+    # Reconciliation and diagnostics retain configured order, even when network
+    # requests complete in a different order.
+    streams = {category_id: streams[category_id] for category_id in available_selected if category_id in streams}
     _enrich_streams_with_epg(
         client, streams,
         progress_callback=(
@@ -1489,7 +1553,7 @@ def fetch_snapshot(client: XtreamClient, config: XtreamConfig,
     if diagnostics is not None:
         diagnostics.update({
             "missing_category_ids": missing,
-            "failed_category_ids": failed,
+            "failed_category_ids": [category_id for category_id in available_selected if category_id in failed],
             "fetched_category_ids": list(streams),
         })
     return categories, streams
@@ -1531,6 +1595,9 @@ def run(db_path: Path, environ: Optional[Mapping[str, str]] = None,
         result = ingest_payload(
             conn, categories, streams, config,
             reconciled_category_ids=reconcile_scope,
+            progress_callback=lambda category_id, status, **fields: emit_progress(
+                "xtream_category_update", category_id=category_id, status=status, **fields
+            ),
         )
         for category in result.get("category_results", []):
             emit_progress("xtream_category_update", **category, status="complete",

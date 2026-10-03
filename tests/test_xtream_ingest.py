@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import sys
+import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -237,10 +238,15 @@ class XtreamParsingTest(unittest.TestCase):
                 return [{"title": f"Team {stream_id} @ Home", "start_timestamp": "1788375600"}]
 
         client = Client()
-        _, streams = fetch_snapshot(client, config(category_ids=("10",)))
+        progress = []
+        _, streams = fetch_snapshot(
+            client, config(category_ids=("10",)),
+            progress_reporter=lambda event, **fields: progress.append((event, fields)),
+        )
         self.assertEqual(client.epg_calls, ["555", "556"])
         self.assertEqual(streams["10"][0]["epg_title"], "Team 555 @ Home")
         self.assertEqual(streams["10"][1]["epg_title"], "Team 556 @ Home")
+        self.assertEqual("ready", progress[-1][1]["status"])
 
     def test_invalid_curl_json_is_safe(self):
         session = FakeSession({"not": "a list"})
@@ -301,6 +307,99 @@ class XtreamParsingTest(unittest.TestCase):
         _, streams = fetch_snapshot(client, config())
         self.assertEqual(client.calls, ["10", "20"])
         self.assertEqual(set(streams), {"10", "20"})
+
+    def test_category_fetches_overlap_with_independent_clients(self):
+        barrier = threading.Barrier(2, timeout=2)
+        workers = []
+
+        class Worker:
+            def __init__(self):
+                self.session = Mock()
+
+            def get_live_streams(self, category_id):
+                barrier.wait()
+                if category_id == "20":
+                    raise XtreamError("Category request failed")
+                return [{"stream_id": "55", "name": "NHL game"}]
+
+        client = XtreamClient(config())
+        try:
+            client.get_live_categories = lambda: [
+                {"category_id": "10", "category_name": "One"},
+                {"category_id": "20", "category_name": "Two"},
+            ]
+            client.get_short_epg = lambda _stream_id: []
+
+            def make_worker():
+                worker = Worker()
+                workers.append(worker)
+                return worker
+
+            client.metadata_worker = make_worker
+            diagnostics = {}
+            _, streams = fetch_snapshot(client, config(), diagnostics)
+        finally:
+            client.session.close()
+
+        self.assertEqual(["10"], list(streams))
+        self.assertEqual(["20"], diagnostics["failed_category_ids"])
+        self.assertEqual(["10"], diagnostics["fetched_category_ids"])
+        self.assertEqual(2, len(workers))
+        for worker in workers:
+            worker.session.close.assert_called_once_with()
+
+    def test_metadata_worker_has_its_own_session_and_account_order(self):
+        client = XtreamClient(config())
+        client.session.cookies.set("session", "test-cookie")
+        alternate = config(username="fallback")
+        client.metadata_configs = (client.config, alternate)
+        worker = client.metadata_worker()
+        try:
+            self.assertIsNot(client.session, worker.session)
+            self.assertEqual(client.metadata_configs, worker.metadata_configs)
+            self.assertEqual("test-cookie", worker.session.cookies.get("session"))
+            worker.session.cookies.set("session", "worker-cookie")
+            self.assertEqual("test-cookie", client.session.cookies.get("session"))
+            worker._prefer_metadata_config(alternate)
+            self.assertEqual(client.config, client.metadata_configs[0])
+        finally:
+            worker.session.close()
+            client.session.close()
+
+    def test_parallel_category_results_keep_configured_order(self):
+        second_reported = threading.Event()
+
+        class Worker:
+            def __init__(self):
+                self.session = Mock()
+
+            def get_live_streams(self, category_id):
+                if category_id == "10":
+                    if not second_reported.wait(timeout=2):
+                        raise AssertionError("Category requests did not overlap")
+                return [{"stream_id": category_id}]
+
+        client = XtreamClient(config())
+        try:
+            client.get_live_categories = lambda: [
+                {"category_id": "10"}, {"category_id": "20"},
+            ]
+            client.get_short_epg = lambda _stream_id: []
+            client.metadata_worker = Worker
+            diagnostics = {}
+
+            def report(_event, **fields):
+                if fields.get("category_id") == "20" and fields.get("status") == "fetched":
+                    second_reported.set()
+
+            _, streams = fetch_snapshot(
+                client, config(), diagnostics, progress_reporter=report,
+            )
+        finally:
+            client.session.close()
+
+        self.assertEqual(["10", "20"], list(streams))
+        self.assertEqual(["10", "20"], diagnostics["fetched_category_ids"])
 
     def test_missing_configured_category_does_not_block_available_categories(self):
         calls = []
@@ -584,6 +683,7 @@ class XtreamStaleHandlingTest(unittest.TestCase):
 
     def test_category_results_expose_safe_per_category_counts(self):
         cfg = config(category_ids=("10", "20"), timezone_name="UTC")
+        progress = []
         result = ingest_payload(
             self.conn,
             [
@@ -596,8 +696,10 @@ class XtreamStaleHandlingTest(unittest.TestCase):
             },
             cfg,
             now=datetime(2026, 8, 29, tzinfo=timezone.utc),
+            progress_callback=lambda category_id, status, **_fields: progress.append((category_id, status)),
         )
 
+        self.assertEqual([("10", "normalizing"), ("20", "normalizing")], progress)
         self.assertEqual(result["category_results"], [
             {"category_id": "10", "category_name": "Hockey", "streams_fetched": 1,
              "events_recognized": 1, "skipped_placeholder": 0, "skipped_unparseable": 0},
