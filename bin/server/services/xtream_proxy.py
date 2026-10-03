@@ -97,6 +97,7 @@ def proxy_stream(stream_id, source, extension="ts", *, pool=None):
         excluded.add(lease.account.id)
         session, upstream = None, None
         authentication = False
+        validated_media = False
         outcome = "tune_failed"
         try:
             from xtream_logging import protect_http_logs
@@ -132,6 +133,7 @@ def proxy_stream(stream_id, source, extension="ts", *, pool=None):
             if not first or first[0] != 0x47 or (len(first) > 188 and first[188] != 0x47):
                 outcome = "unsupported_transport"
                 raise OSError("Upstream returned no playable media")
+            validated_media = True
             body = OwnedStream(lease, upstream, session, chunks, first)
             response = Response(body, content_type="video/mp2t", headers={
                 "Cache-Control": "no-store", "X-Accel-Buffering": "no"})
@@ -139,7 +141,13 @@ def proxy_stream(stream_id, source, extension="ts", *, pool=None):
             return response
         except Exception as error:
             last_status = 502
-            account_failure = isinstance(error, (requests.ConnectionError, requests.Timeout)) or getattr(upstream, "status_code", None) in {429, 500, 502, 503, 504}
+            # A failed curl retry after Python's 401/403 needs a cooldown;
+            # otherwise the next tune immediately reopens the same account.
+            account_failure = (
+                isinstance(error, (requests.ConnectionError, requests.Timeout, TimeoutError))
+                or getattr(upstream, "status_code", None) in {429, 500, 502, 503, 504}
+                or (authentication and not validated_media)
+            )
             # Close network/process resources BEFORE making capacity reusable.
             _close(upstream)
             _close(session)

@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 from server.services.xtream_quality import measure_stream_quality
 from tests.test_xtream_pool import pool_environment
 from tests.xtream_test_helpers import FakeMedia, HealthyAccountClient
+from xtream_ingest import XtreamError
 from xtream_pool import XtreamPool
 
 
@@ -60,6 +61,22 @@ class QualityProbeTest(unittest.TestCase):
         self.assertEqual(1, session.get.call_count)
         self.assertIn(".ts", fallback.call_args.args[0])
         curl.close.assert_called_once()
+
+    def test_failed_curl_retry_cools_down_account_and_releases_lease(self):
+        session = Mock()
+        session.get.return_value = FakeMedia(status=403)
+        curl = Mock()
+        curl.chunks.side_effect = OSError("Curl media transport failed")
+        with patch("server.services.xtream_quality.CurlStream", return_value=curl):
+            with self.assertRaises(XtreamError):
+                measure_stream_quality("437219", pool=self.pool,
+                                       session_factory=lambda: session)
+        state = self.pool.status()
+        self.assertEqual(0, state["active"])
+        self.assertTrue(all(account["health"] == "degraded" for account in state["accounts"]))
+        self.assertEqual(0, state["available"])
+        self.assertEqual(3, session.get.call_count)
+        curl.close.assert_called()
 
 
 if __name__ == "__main__":

@@ -73,6 +73,7 @@ def measure_stream_quality(stream_id, extension="ts", *, pool=None,
         outcome = "tune_failed"
         authentication = False
         account_failure = False
+        validated_media = False
         try:
             from xtream_logging import protect_http_logs
             protect_http_logs(lease.account.config)
@@ -106,6 +107,7 @@ def measure_stream_quality(stream_id, extension="ts", *, pool=None,
             if not first or first[0] != 0x47:
                 outcome = "unsupported_transport"
                 raise OSError("Provider returned no transport stream")
+            validated_media = True
             sample = bytearray(first[:MAX_SAMPLE_BYTES])
             deadline = time.monotonic() + MAX_SAMPLE_SECONDS
             for chunk in chunks:
@@ -116,7 +118,11 @@ def measure_stream_quality(stream_id, extension="ts", *, pool=None,
             outcome = "client_closed"
             return measured
         except Exception as error:
-            account_failure = account_failure or isinstance(error, (requests.ConnectionError, requests.Timeout, TimeoutError))
+            account_failure = (
+                account_failure
+                or isinstance(error, (requests.ConnectionError, requests.Timeout, TimeoutError))
+                or (authentication and not validated_media)
+            )
             if outcome == "tune_failed" and account_failure:
                 outcome = "upstream_timeout" if isinstance(error, (requests.Timeout, TimeoutError)) else "upstream_error"
         finally:

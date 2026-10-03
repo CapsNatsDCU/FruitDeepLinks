@@ -139,7 +139,9 @@ releases the kernel lock; the next tune/status read reclaims the stale row.
 Elapsed time alone never expires a live lease. Disabling an account or reducing
 its capacity prevents new allocations without interrupting existing recordings.
 An HLS remux child inherits the lease lock: a killed Python worker cannot release
-capacity while its FFmpeg child is still closing the upstream connection.
+capacity while its FFmpeg child is still closing the upstream connection. The
+pool also retains the lease row if a curl or FFmpeg child remains alive when
+the parent finishes, so active capacity still reflects that media process.
 
 Use one Fruit deployment with its database and `.xtream-locks` directory on the
 same **local** data filesystem. Workers on that host share reservations; separate

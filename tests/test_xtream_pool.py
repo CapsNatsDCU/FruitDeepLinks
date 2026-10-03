@@ -2,6 +2,7 @@ import json
 import multiprocessing
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -397,6 +398,26 @@ class PoolTests(unittest.TestCase):
             self.assertGreaterEqual(state["leases"][0]["age_seconds"], 86400)
         finally:
             lease.release()
+
+    def test_release_keeps_capacity_reserved_until_media_child_exits(self):
+        lease = self.pool.acquire("1", "recording")
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            pass_fds=(lease.fd,),
+        )
+        try:
+            lease.release()
+            self.assertEqual(1, self.pool.status()["active"])
+            other_accounts = {account.id for account in self.pool.accounts if account.id != lease.account.id}
+            with self.assertRaises(PoolUnavailable):
+                self.pool.acquire("2", "retry", excluded=other_accounts)
+            child.terminate()
+            child.wait(timeout=5)
+            self.assertEqual(0, self.pool.status()["active"])
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
 
     def test_renaming_account_id_during_live_stream_does_not_duplicate_capacity(self):
         lease = self.pool.acquire("1", "recording")

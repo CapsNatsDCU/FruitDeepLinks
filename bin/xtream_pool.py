@@ -62,13 +62,8 @@ class Lease:
         with self._lock:
             if self.fd < 0:
                 return
-            try:
-                self.pool.finish(self, outcome)
-            finally:
-                # If SQLite is temporarily unavailable, next allocation reaps
-                # the row after this kernel lock closes. No capacity is lost.
-                fd, self.fd = self.fd, -1
-                os.close(fd)
+            fd, self.fd = self.fd, -1
+            self.pool.finish(self, outcome, fd)
 
 
 class XtreamPool:
@@ -248,18 +243,40 @@ class XtreamPool:
                      (account_id, safe_value(stream_id, self.accounts), source, started, time.time(), outcome))
         conn.execute("DELETE FROM xtream_stream_history WHERE id NOT IN (SELECT id FROM xtream_stream_history ORDER BY id DESC LIMIT 100)")
 
-    def finish(self, lease, outcome):
+    def finish(self, lease, outcome, fd):
         allowed = {"client_closed", "upstream_eof", "upstream_error", "upstream_timeout", "tune_failed", "authentication_failed", "unsupported_transport"}
         outcome = outcome if outcome in allowed else "upstream_error"
+        child_holds_lock = False
         try:
             with self.connection() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                conn.execute("DELETE FROM xtream_leases WHERE lease_id=?", (lease.id,))
-                self._history(conn, lease.account.id, lease.stream_id, lease.source, lease.started, outcome)
-            self._lock_path(lease.id).unlink(missing_ok=True)
+                # Close the parent's lock while the database transaction still
+                # protects the row. Curl/FFmpeg may retain its inherited lock.
+                os.close(fd)
+                fd = -1
+                lock_fd = os.open(self._lock_path(lease.id), os.O_CREAT | os.O_RDWR, 0o600)
+                try:
+                    try:
+                        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        child_holds_lock = True
+                    else:
+                        conn.execute("DELETE FROM xtream_leases WHERE lease_id=?", (lease.id,))
+                        self._history(conn, lease.account.id, lease.stream_id, lease.source, lease.started, outcome)
+                        self._lock_path(lease.id).unlink(missing_ok=True)
+                finally:
+                    os.close(lock_fd)
         except sqlite3.Error:
             self._log("Lease database cleanup deferred until next allocation")
-        self._log(f'Released account "{safe_value(lease.account.label, self.accounts)}" from stream {safe_value(lease.stream_id, self.accounts)} ({outcome})')
+        finally:
+            # If SQLite failed before the transaction started, the next pool
+            # read will reclaim the row once this lock closes.
+            if fd >= 0:
+                os.close(fd)
+        if child_holds_lock:
+            self._log("Xtream media child still holds a stream reservation")
+        else:
+            self._log(f'Released account "{safe_value(lease.account.label, self.accounts)}" from stream {safe_value(lease.stream_id, self.accounts)} ({outcome})')
 
     def fail_account(self, account_id, *, authentication=False):
         now = time.time()

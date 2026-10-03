@@ -115,6 +115,22 @@ class StreamProxyTests(unittest.TestCase):
             response.close()
         curl.close.assert_called_once()
 
+    def test_failed_curl_retry_cools_down_account_and_releases_lease(self):
+        session = Mock()
+        session.get.return_value = FakeMedia(status=403)
+        curl = Mock()
+        curl.chunks.side_effect = OSError("Curl media transport failed")
+        with patch("server.services.xtream_proxy.requests.Session", return_value=session), \
+             patch("server.services.xtream_proxy.CurlStream", return_value=curl):
+            response = self.client.get('/stream')
+        self.assertEqual(502, response.status_code)
+        state = self.pool.status()
+        self.assertEqual(0, state["active"])
+        self.assertTrue(all(account["health"] == "degraded" for account in state["accounts"]))
+        self.assertEqual(0, state["available"])
+        self.assertEqual(3, session.get.call_count)
+        curl.close.assert_called()
+
     def test_session_constructor_failure_releases_and_channel_error_does_not_disable_accounts(self):
         with patch("server.services.xtream_proxy.requests.Session", side_effect=OSError("setup failed")):
             self.assertEqual(502, self.client.get('/stream').status_code)
