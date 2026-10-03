@@ -262,6 +262,17 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(0, self.pool.status()["active"])
         self.assertEqual([], list(self.pool.lock_dir.iterdir()))
 
+    def test_sequential_probes_rotate_least_recently_used_accounts(self):
+        selected = []
+        for stream_id in range(6):
+            lease = self.pool.acquire(str(stream_id), "quality_probe")
+            selected.append(lease.account.id)
+            lease.release("client_closed")
+        self.assertEqual(
+            ["account_0", "account_1", "account_2", "account_0", "account_1", "account_2"],
+            selected,
+        )
+
     def test_race_across_independent_pool_instances(self):
         barrier = threading.Barrier(20)
         def allocate(index):

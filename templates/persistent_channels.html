@@ -84,6 +84,7 @@ let _persistentSearchScope = 'all';
 let _persistentSearchSequence = 0;
 let _persistentQualityBatch = null;
 let _favoriteState = {teams:[]};
+const QUALITY_BATCH_DELAY_MS = 1500;
 
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -334,15 +335,17 @@ async function detectAllPersistentQuality() {
           await requestPersistentQuality(stream);
         } catch (err) {
           failed++;
-          checked++;
           if (err.code === 'capacity_unavailable') {
             batch.stopped = true;
             persistentError(`Quality detection paused: ${err.message}`);
             break;
           }
-          continue;
         }
         checked++;
+        if (!batch.stopped) {
+          progress.textContent = `Waiting briefly before the next provider check… ${checked} of ${total} results.`;
+          await new Promise(resolve => setTimeout(resolve, QUALITY_BATCH_DELAY_MS));
+        }
       }
       if (page * 100 >= total || !(data.items || []).length) break;
     }

@@ -213,13 +213,20 @@ class XtreamPool:
                 active = sum(row["account_id"] == account.id or row["fingerprint"] == account.fingerprint for row in live)
                 if (account.id not in excluded and state["enabled"] and state["health"] in {"healthy", "degraded"}
                         and state["retry_after"] <= time.time() and active < state["effective_capacity"]):
-                    candidates.append((active / state["effective_capacity"], account.id, account, state))
+                    # A sequential quality scan must not hammer the first
+                    # account alphabetically.  Reuse the least recently
+                    # released account after balancing active capacity.
+                    last_used = conn.execute(
+                        "SELECT COALESCE(MAX(ended), 0) FROM xtream_stream_history WHERE account_id=?",
+                        (account.id,),
+                    ).fetchone()[0]
+                    candidates.append((active / state["effective_capacity"], last_used, account.id, account, state))
             if not candidates:
                 self._history(conn, None, str(stream_id), source, None, "capacity_unavailable")
                 # Commit diagnostics before raising, rather than rolling back.
                 conn.commit()
                 raise PoolUnavailable("All Xtream capacity is occupied or unavailable")
-            _, _, account, state = min(candidates, key=lambda item: item[:2])
+            _, _, _, account, state = min(candidates, key=lambda item: item[:3])
             lease_id, started = uuid.uuid4().hex, time.time()
             fd = os.open(self._lock_path(lease_id), os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
             try:
