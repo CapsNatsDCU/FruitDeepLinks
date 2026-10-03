@@ -89,7 +89,7 @@ VICTORY_ENABLED=false
 GOTHAM_ENABLED=false
 ESPN_ENABLED=true          # ESPN Watch Graph enrichment
 
-# Optional Xtream IPTV ingestion. Never commit real credentials.
+# Optional legacy single-account Xtream IPTV ingestion. Never commit real credentials.
 XTREAM_ENABLED=false
 XTREAM_SERVER_URL=http://iptv-provider.example:8080
 XTREAM_USERNAME=your-username
@@ -263,8 +263,10 @@ programmes when available and channel definitions without invented schedules oth
 Use `http://your-server-ip:6655/m3u/channels` and
 `http://your-server-ip:6655/xmltv/channels` for one combined persistent-channel
 and Fruit-lane source. Select **MPEG-TS** in Channels. Configure any number of
-accounts using `XTREAM_ACCOUNTS_FILE` or `XTREAM_ACCOUNTS_JSON`; existing single-account
-variables remain supported. Settings → **Xtream Account Pool** shows capacity,
+accounts using `XTREAM_ACCOUNTS_FILE` or `XTREAM_ACCOUNTS_JSON`. Each account entry
+supplies its own `server_url`. The `XTREAM_SERVER_URL` environment variable remains
+supported only for legacy single-account deployments; there is no global Xtream
+Server URL setting in the UI. Settings → **Xtream Account Pool** shows capacity,
 health, active streams and account controls. Persistent and dynamic Xtream tunes
 use the same atomic allocator; unavailable capacity returns 503.
 

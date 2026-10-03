@@ -237,6 +237,7 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
         self.env = patch.dict(os.environ, {
             "FRUIT_DB_PATH": str(self.db_path),
             "XTREAM_ENABLED": "true",
+            "XTREAM_SERVER_URL": "http://provider.example:8080",
             "XTREAM_USERNAME": "demo user",
             "XTREAM_PASSWORD": "secret/pass",
         }, clear=False)
@@ -325,6 +326,13 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
         logs = "\n".join(line for _, line in get_recent_logs(count=200))
         self.assertNotIn("demo user", logs)
         self.assertNotIn("secret/pass", logs)
+
+    def test_catalog_scan_reports_database_contention(self):
+        with patch("server.routes.api.xtream.ensure_sports_schema",
+                   side_effect=sqlite3.OperationalError("database is locked")):
+            response = self.client.post("/api/xtream/discovery/scan")
+        self.assertEqual(503, response.status_code)
+        self.assertIn("busy", response.get_json()["message"])
 
     def test_duplicate_validation_edit_disable_and_delete(self):
         payload = {

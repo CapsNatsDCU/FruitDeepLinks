@@ -144,6 +144,10 @@ def _safe_error(exc: Exception, status: int = 400):
         return jsonify({"status": "error", "message": str(exc)}), status
     if isinstance(exc, KeyError):
         return jsonify({"status": "error", "message": str(exc).strip("'")}), 404
+    if isinstance(exc, sqlite3.OperationalError) and any(
+        marker in str(exc).lower() for marker in ("locked", "busy")
+    ):
+        return jsonify({"status": "error", "message": "Database is busy; retry after the current refresh finishes"}), 503
     # Do not stringify arbitrary transport exceptions: requests may include an
     # authenticated URL in their text.
     log(f"Persistent Xtream operation failed: {type(exc).__name__}", "ERROR")

@@ -141,7 +141,8 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
   <div class="xtream-category-toolbar">
     <input id="xtream-category-search" type="search" placeholder="Filter categories by name or ID" oninput="renderXtreamCategories()" autocomplete="off">
     <span id="xtream-category-count" class="xtream-category-count">Loading categories…</span>
-    <button class="btn btn-secondary" type="button" onclick="loadXtreamCategories()">Reload</button>
+    <button class="btn btn-secondary" type="button" onclick="loadXtreamCategories()">Reload saved list</button>
+    <button class="btn btn-secondary" type="button" onclick="scanXtreamCategories(this)">Scan provider categories</button>
     <button class="btn" type="button" id="xtream-category-save" onclick="saveXtreamCategories()" disabled>Save Categories</button>
   </div>
   <div id="xtream-category-error" class="favorite-alert" role="alert"></div>
@@ -202,7 +203,7 @@ const GROUPS = {
   'Pipeline': ['days_ahead', 'padding_minutes', 'max_event_minutes'],
   'Auto Refresh': ['auto_refresh_enabled', 'auto_refresh_time'],
   'Scrapers': ['kayo_enabled', 'fanatiz_enabled', 'bein_enabled', 'nesn_enabled', 'victory_enabled', 'gotham_enabled', 'espn_enabled'],
-  'Xtream IPTV': ['xtream_enabled', 'xtream_server_url', 'xtream_timezone', 'xtream_default_duration_minutes'],
+  'Xtream IPTV': ['xtream_enabled', 'xtream_timezone', 'xtream_default_duration_minutes'],
   'Optional Local AI Event Parsing': ['local_ai_event_parsing_enabled', 'local_ai_event_interpretation_strategy', 'local_ai_event_parsing_base_url', 'local_ai_event_parsing_model', 'local_ai_event_parsing_timeout_seconds', 'local_ai_event_parsing_min_confidence', 'local_ai_event_parsing_max_requests_per_refresh'],
 };
 
@@ -322,9 +323,29 @@ async function loadXtreamCategories() {
     xtreamCategoryError('');
     save.disabled = false;
     renderXtreamCategories();
+    return true;
   } catch (err) {
     xtreamCategoryError(`Could not retrieve Xtream categories: ${err.message}`);
     list.innerHTML = '<div class="favorite-empty">Categories are unavailable. Check the Xtream connection and enable the provider before retrying.</div>';
+    return false;
+  }
+}
+
+async function scanXtreamCategories(button) {
+  button.disabled = true;
+  xtreamCategoryError('');
+  document.getElementById('xtream-category-count').textContent = 'Scanning provider categories…';
+  try {
+    const scan = await persistentRequest('/api/xtream/discovery/scan', {method:'POST'});
+    if (await loadXtreamCategories()) {
+      const discovered = (scan.categories || []).filter(category => !category.disappeared_utc).length;
+      showToast(`Discovered ${discovered} Xtream categories. Saved selections were kept.`, 'success', 6000);
+    }
+  } catch (err) {
+    xtreamCategoryError(`Could not scan Xtream categories: ${err.message}`);
+    renderXtreamCategories();
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -402,7 +423,7 @@ async function openPersistentBrowser() {
   try {
     const data = await persistentRequest('/api/xtream/categories');
     const select = document.getElementById('persistent-category');
-    select.innerHTML = (data.categories || []).map(category => `<option value="${escHtml(category.category_id)}" ${category.available ? '' : 'disabled'}>${escHtml(category.category_name)}${category.available ? '' : ' (unavailable)'}</option>`).join('');
+    select.innerHTML = (data.categories || []).filter(category => category.selected).map(category => `<option value="${escHtml(category.category_id)}">${escHtml(category.category_name)}</option>`).join('');
     if (!select.options.length) {
       document.getElementById('persistent-results').innerHTML = '<div class="favorite-empty">No Xtream categories are configured. Save category IDs in Xtream settings first.</div>';
       return;

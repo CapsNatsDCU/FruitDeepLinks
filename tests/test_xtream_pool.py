@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 from xtream_accounts import load_accounts
+from db.preferences import get_settings_schema, load_all_settings
 from xtream_ingest import XtreamClient, XtreamConfig, XtreamError, build_stream_url, load_config, load_metadata_configs
 from xtream_pool import PoolUnavailable, XtreamPool, scheduler_capacity
 from tests.xtream_test_helpers import HealthyAccountClient
@@ -41,6 +42,23 @@ def hold_in_process(path, env, pipe):
 
 
 class AccountConfigTests(unittest.TestCase):
+    def test_account_urls_replace_removed_global_server_setting(self):
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.execute("CREATE TABLE user_preferences(key TEXT PRIMARY KEY,value TEXT)")
+        conn.execute("INSERT INTO user_preferences VALUES(?,?)",
+                     ("setting:xtream_server_url", json.dumps("http://stale.example")))
+        rows = account_rows((1, 1))
+        rows[1]["server_url"] = "http://second-provider.example:8080"
+        configs = load_metadata_configs(conn, pool_environment(rows))
+        self.assertEqual([row["server_url"] for row in rows],
+                         [config.server_url for config in configs])
+        self.assertNotIn("xtream_server_url", load_all_settings(conn))
+        self.assertNotIn("xtream_server_url", {item["key"] for item in get_settings_schema()})
+        legacy = {"XTREAM_ENABLED": "true", "XTREAM_SERVER_URL": "http://legacy-env.example",
+                  "XTREAM_USERNAME": "legacy-user", "XTREAM_PASSWORD": "legacy-secret"}
+        self.assertEqual("http://legacy-env.example", load_config(conn, legacy).server_url)
+
     def test_metadata_candidates_include_degraded_and_try_unhealthy_last(self):
         env = pool_environment()
         with tempfile.TemporaryDirectory() as directory:

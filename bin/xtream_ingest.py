@@ -214,7 +214,10 @@ def _load_legacy_config(conn: Optional[sqlite3.Connection] = None,
 
     return XtreamConfig(
         enabled=enabled,
-        server_url=str(setting("xtream_server_url", "XTREAM_SERVER_URL", "") or "").rstrip("/"),
+        # Per-account URLs come from the account secret. The environment value
+        # remains only for legacy single-account deployments; a saved global
+        # Settings value must not override either source.
+        server_url=str(env.get("XTREAM_SERVER_URL", "") or "").rstrip("/"),
         username=username,
         password=password,
         category_ids=parse_category_ids(

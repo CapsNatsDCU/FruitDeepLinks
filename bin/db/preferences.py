@@ -345,11 +345,6 @@ SETTINGS_DEFS: Dict[str, tuple] = {
         "Xtream IPTV",
         "Ingest sports events from the configured Xtream categories. Credentials remain in deployment secrets.",
     ),
-    "xtream_server_url": (
-        "XTREAM_SERVER_URL", "str", "",
-        "Xtream Server URL",
-        "Base URL of the Xtream-compatible provider. Do not include credentials.",
-    ),
     "xtream_category_ids": (
         "XTREAM_CATEGORY_IDS", "str", "",
         "Xtream Category IDs",
