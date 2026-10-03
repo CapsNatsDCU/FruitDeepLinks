@@ -40,6 +40,7 @@ from xtream_ingest import (  # noqa: E402
     ingest_payload,
     normalize_stream,
 )
+from xtream_pool import PoolUnavailable  # noqa: E402
 
 
 FIXTURE = json.loads(
@@ -485,6 +486,15 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
             "category_id": "410", "stream_id": "unknown",
         })
         self.assertEqual(400, invalid.status_code)
+
+    def test_quality_endpoint_reports_busy_pool_without_a_retry_storm(self):
+        with patch("server.services.xtream_quality.measure_stream_quality",
+                   side_effect=PoolUnavailable("All Xtream playback slots are occupied or unavailable")):
+            result = self.client.post("/api/xtream/persistent-channels/quality", json={
+                "category_id": "410", "stream_id": "1904224",
+            })
+        self.assertEqual(503, result.status_code)
+        self.assertEqual("capacity_unavailable", result.get_json()["code"])
 
     def test_unknown_provider_category_is_not_browsed_or_added(self):
         response = self.client.post("/api/xtream/categories/888/streams")

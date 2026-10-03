@@ -10,6 +10,7 @@ import requests
 
 from db.connection import resolve_db_path
 from server.services.xtream_proxy import _close
+from xtream_curl import CurlStream
 from xtream_hls import HLSStream
 from xtream_ingest import XtreamError, build_stream_url
 from xtream_pool import PoolUnavailable, XtreamPool
@@ -66,7 +67,7 @@ def measure_stream_quality(stream_id, extension="ts", *, pool=None,
         try:
             lease = pool.acquire(stream_id, "quality_probe", excluded=excluded)
         except PoolUnavailable:
-            raise XtreamError("All Xtream playback slots are occupied or unavailable") from None
+            raise PoolUnavailable("All Xtream playback slots are occupied or unavailable") from None
         excluded.add(lease.account.id)
         session = upstream = None
         outcome = "tune_failed"
@@ -76,18 +77,23 @@ def measure_stream_quality(stream_id, extension="ts", *, pool=None,
             from xtream_logging import protect_http_logs
             protect_http_logs(lease.account.config)
             session = session_factory()
+            url = build_stream_url(lease.account.config, stream_id, "ts")
             upstream = session.get(
-                build_stream_url(lease.account.config, stream_id, "ts"),
+                url,
                 stream=True, timeout=(5, 5), headers={"Accept-Encoding": "identity"},
                 allow_redirects=True,
             )
             authentication = upstream.status_code in {401, 403}
-            account_failure = authentication or upstream.status_code in {429, 500, 502, 503, 504}
+            account_failure = upstream.status_code in {429, 500, 502, 503, 504}
             if authentication:
-                outcome = "authentication_failed"
-                raise OSError("Provider authentication rejected")
-            use_hls = upstream.status_code in {404, 415} and str(extension).lower() == "m3u8"
-            if not use_hls:
+                _close(upstream)
+                upstream = CurlStream(url, 5, lease.fd)
+                chunks = iter(upstream.chunks())
+                first = next(chunks, b"")
+                use_hls = first.lstrip().startswith(b"#EXTM3U")
+            else:
+                use_hls = upstream.status_code in {404, 415} and str(extension).lower() == "m3u8"
+            if not authentication and not use_hls:
                 upstream.raise_for_status()
                 chunks = iter(upstream.iter_content(chunk_size=64 * 1024))
                 first = next(chunks, b"")
@@ -118,5 +124,5 @@ def measure_stream_quality(stream_id, extension="ts", *, pool=None,
             _close(session)
             lease.release(outcome)
         if account_failure:
-            pool.fail_account(lease.account.id, authentication=authentication)
+            pool.fail_account(lease.account.id)
     raise XtreamError("Video resolution could not be measured; check the stream and account pool")

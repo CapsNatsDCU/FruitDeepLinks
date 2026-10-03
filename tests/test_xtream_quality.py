@@ -41,20 +41,25 @@ class QualityProbeTest(unittest.TestCase):
         self.assertNotIn("private-password", " ".join(runner.call_args.args[0]))
         self.assertNotIn("provider", " ".join(runner.call_args.args[0]))
 
-    def test_auth_failure_tries_next_account_and_releases_both(self):
-        first, second = FakeMedia(status=401), FakeMedia([b"\x47" * 188])
+    def test_python_auth_rejection_retries_with_curl_and_preserves_account(self):
+        first = FakeMedia(status=401)
         session = Mock()
-        session.get.side_effect = [first, second]
+        session.get.return_value = first
+        curl = Mock()
+        curl.chunks.return_value = iter([b"\x47" * 188])
         runner = Mock(return_value=Mock(returncode=0, stdout=json.dumps({"streams": [
             {"codec_type": "video", "width": 1280, "height": 720},
         ]}).encode()))
-        result = measure_stream_quality("437219", pool=self.pool,
-                                        session_factory=lambda: session, runner=runner)
+        with patch("server.services.xtream_quality.CurlStream", return_value=curl) as fallback:
+            result = measure_stream_quality("437219", pool=self.pool,
+                                            session_factory=lambda: session, runner=runner)
         self.assertEqual(720, result["height"])
         self.assertTrue(first.closed)
-        self.assertTrue(second.closed)
         self.assertEqual(0, self.pool.status()["active"])
-        self.assertEqual(2, session.get.call_count)
+        self.assertEqual("healthy", self.pool.status()["accounts"][0]["health"])
+        self.assertEqual(1, session.get.call_count)
+        self.assertIn(".ts", fallback.call_args.args[0])
+        curl.close.assert_called_once()
 
 
 if __name__ == "__main__":

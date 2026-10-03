@@ -95,19 +95,25 @@ class StreamProxyTests(unittest.TestCase):
             self.assertEqual(0, self.pool.status()["active"])
             self.assertNotIn("private-password", response.get_data(as_text=True))
 
-    def test_auth_failure_fails_over_without_retaining_failed_lease(self):
-        responses = [FakeMedia(status=401), FakeMedia()]
+    def test_python_auth_rejection_retries_media_with_curl_without_disabling_account(self):
+        responses = [FakeMedia(status=401)]
         session = Mock()
         session.get.side_effect = responses
-        with patch("server.services.xtream_proxy.requests.Session", return_value=session):
+        curl = Mock()
+        curl.chunks.return_value = iter([b"\x47" * 188])
+        with patch("server.services.xtream_proxy.requests.Session", return_value=session), \
+             patch("server.services.xtream_proxy.CurlStream", return_value=curl) as fallback:
             response = self.client.get('/stream', buffered=False)
             state = self.pool.status()
             self.assertEqual(200, response.status_code)
             self.assertEqual(1, state["active"])
-            self.assertEqual("unhealthy", state["accounts"][0]["health"])
-            self.assertEqual("account_1", state["leases"][0]["account_id"])
+            self.assertEqual("healthy", state["accounts"][0]["health"])
+            self.assertEqual("account_0", state["leases"][0]["account_id"])
             self.assertTrue(responses[0].closed)
+            self.assertEqual(1, session.get.call_count)
+            self.assertIn(".ts", fallback.call_args.args[0])
             response.close()
+        curl.close.assert_called_once()
 
     def test_session_constructor_failure_releases_and_channel_error_does_not_disable_accounts(self):
         with patch("server.services.xtream_proxy.requests.Session", side_effect=OSError("setup failed")):

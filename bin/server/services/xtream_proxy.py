@@ -8,6 +8,7 @@ import requests
 from flask import Response, request
 
 from db.connection import resolve_db_path
+from xtream_curl import CurlStream
 from xtream_hls import HLSStream
 from xtream_ingest import build_stream_url
 from xtream_pool import PoolUnavailable, XtreamPool
@@ -108,10 +109,16 @@ def proxy_stream(stream_id, source, extension="ts", *, pool=None):
                                    headers={"Accept-Encoding": "identity"}, allow_redirects=True)
             authentication = upstream.status_code in {401, 403}
             if authentication:
-                outcome = "authentication_failed"
-                raise OSError("Upstream authentication rejected")
-            use_hls = upstream.status_code in {404, 415} and str(extension).lower() == "m3u8"
-            if not use_hls:
+                # Some providers accept these credentials through curl but
+                # reject Python's HTTP client for the same live URL.
+                _close(upstream)
+                upstream = CurlStream(url, _timeout(), lease.fd)
+                chunks = iter(upstream.chunks())
+                first = next(chunks, b"")
+                use_hls = first.lstrip().startswith(b"#EXTM3U")
+            else:
+                use_hls = upstream.status_code in {404, 415} and str(extension).lower() == "m3u8"
+            if not authentication and not use_hls:
                 upstream.raise_for_status()
                 chunks = iter(upstream.iter_content(chunk_size=188 * 64))
                 first = next(chunks, b"")
@@ -132,13 +139,13 @@ def proxy_stream(stream_id, source, extension="ts", *, pool=None):
             return response
         except Exception as error:
             last_status = 502
-            account_failure = authentication or isinstance(error, (requests.ConnectionError, requests.Timeout)) or getattr(upstream, "status_code", None) in {429, 500, 502, 503, 504}
+            account_failure = isinstance(error, (requests.ConnectionError, requests.Timeout)) or getattr(upstream, "status_code", None) in {429, 500, 502, 503, 504}
             # Close network/process resources BEFORE making capacity reusable.
             _close(upstream)
             _close(session)
             lease.release(outcome)
             if account_failure:
-                pool.fail_account(lease.account.id, authentication=authentication)
+                pool.fail_account(lease.account.id)
         except BaseException:
             _close(upstream)
             _close(session)

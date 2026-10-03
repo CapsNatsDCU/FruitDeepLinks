@@ -499,6 +499,10 @@ def api_xtream_persistent_quality():
         return jsonify({"status": "success", "category_id": category_id,
                         "stream_id": stream_id, "measured_quality": saved})
     except Exception as exc:
+        from xtream_pool import PoolUnavailable
+        if isinstance(exc, PoolUnavailable):
+            return jsonify({"status": "error", "message": str(exc),
+                            "code": "capacity_unavailable"}), 503
         return _safe_error(exc, 502)
 
 

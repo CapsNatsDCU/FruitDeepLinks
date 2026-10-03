@@ -114,7 +114,12 @@ function persistentError(message = '') {
 async function persistentRequest(url, options = {}) {
   const res = await fetch(url, options);
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.message || `Request failed (${res.status})`);
+  if (!res.ok) {
+    const error = new Error(data.message || `Request failed (${res.status})`);
+    error.status = res.status;
+    error.code = data.code;
+    throw error;
+  }
   return data;
 }
 
@@ -325,7 +330,18 @@ async function detectAllPersistentQuality() {
       for (const stream of data.items || []) {
         if (batch.stopped) break;
         progress.textContent = `Measuring ${checked + 1} of ${total} search results… ${failed} failed.`;
-        try { await requestPersistentQuality(stream); } catch (_) { failed++; }
+        try {
+          await requestPersistentQuality(stream);
+        } catch (err) {
+          failed++;
+          checked++;
+          if (err.code === 'capacity_unavailable') {
+            batch.stopped = true;
+            persistentError(`Quality detection paused: ${err.message}`);
+            break;
+          }
+          continue;
+        }
         checked++;
       }
       if (page * 100 >= total || !(data.items || []).length) break;
