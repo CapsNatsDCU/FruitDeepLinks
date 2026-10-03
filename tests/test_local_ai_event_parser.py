@@ -1,6 +1,8 @@
 import json
+import os
 import sqlite3
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from urllib.error import URLError
@@ -9,8 +11,9 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 from local_ai_event_parser import (LocalAIConfig, _request_payload, enrich,
-                                   recent_failures, sanitized_input)
+                                   clear_failure_log, recent_failures, sanitized_input)
 from sports_metadata import ensure_schema, resolve_source_event
+from server.app import create_app
 
 
 UTC_START = "2026-10-11T17:00:00Z"
@@ -151,6 +154,31 @@ class LocalAIEventParserTests(unittest.TestCase):
         self.assertEqual("[redacted-url]", failures[0]["input"]["title"].split()[-1])
         self.assertNotIn("secret", json.dumps(failures[0]["input"]))
         self.assertEqual("Live coverage password=[redacted] [redacted-url]", failures[0]["input"]["description"])
+
+    def test_clear_failure_log_does_not_clear_cache_or_reimport_old_failures(self):
+        enrich(self.conn, provider="xtream", source_event_id="failed", title="Offline game",
+               config=CONFIG, requester=lambda *_args: (_ for _ in ()).throw(RuntimeError("offline")))
+        self.assertEqual(1, len(recent_failures(self.conn)))
+        cached = self.conn.execute("SELECT COUNT(*) FROM local_ai_event_cache").fetchone()[0]
+        self.assertEqual(1, clear_failure_log(self.conn))
+        ensure_schema(self.conn)
+        self.assertEqual([], recent_failures(self.conn))
+        self.assertEqual(cached, self.conn.execute("SELECT COUNT(*) FROM local_ai_event_cache").fetchone()[0])
+
+    def test_clear_failure_log_endpoint_persists_deletion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sports.db"
+            with sqlite3.connect(path) as conn:
+                ensure_schema(conn)
+                enrich(conn, provider="xtream", source_event_id="failed", title="Offline game",
+                       config=CONFIG, requester=lambda *_args: (_ for _ in ()).throw(RuntimeError("offline")))
+                conn.commit()
+            with patch.dict(os.environ, {"FRUIT_DB_PATH": str(path)}):
+                response = create_app().test_client().post("/api/local-ai/failures/clear")
+            self.assertEqual(200, response.status_code)
+            self.assertEqual(1, response.json["cleared"])
+            with sqlite3.connect(path) as conn:
+                self.assertEqual([], recent_failures(conn))
 
     def test_cache_hit_and_title_change_reparse(self):
         calls = []

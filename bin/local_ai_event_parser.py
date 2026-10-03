@@ -72,6 +72,9 @@ def load_config(conn: sqlite3.Connection) -> LocalAIConfig:
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
+    had_failure_log = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_ai_failure_log'"
+    ).fetchone() is not None
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS local_ai_event_cache (
       cache_key TEXT PRIMARY KEY,
@@ -106,15 +109,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_local_ai_failure_log_active
       ON local_ai_failure_log(resolved_utc, last_failed_utc);
     """)
-    # Preserve retryability for failures cached before the review log existed.
-    # Historical rows deliberately have no input sample because raw provider
-    # payloads were never stored as diagnostic data.
-    conn.execute(
-        "INSERT OR IGNORE INTO local_ai_failure_log(cache_key,provider,source_event_id,model,parser_version,input_json,status,failure_kind,first_failed_utc,last_failed_utc,failure_count,resolved_utc) "
-        "SELECT cache_key,provider,source_event_id,model,parser_version,'{}',validation_status,failure_kind,parsed_utc,updated_utc,1,NULL "
-        "FROM local_ai_event_cache WHERE validation_status IN (?,?,?,?)",
-        tuple(sorted(RETRYABLE_FAILURE_STATUSES)),
-    )
+    # Import cached failures only when the review log is first created. Repeating
+    # this import would resurrect entries an operator explicitly cleared.
+    if not had_failure_log:
+        conn.execute(
+            "INSERT OR IGNORE INTO local_ai_failure_log(cache_key,provider,source_event_id,model,parser_version,input_json,status,failure_kind,first_failed_utc,last_failed_utc,failure_count,resolved_utc) "
+            "SELECT cache_key,provider,source_event_id,model,parser_version,'{}',validation_status,failure_kind,parsed_utc,updated_utc,1,NULL "
+            "FROM local_ai_event_cache WHERE validation_status IN (?,?,?,?)",
+            tuple(sorted(RETRYABLE_FAILURE_STATUSES)),
+        )
 
 
 def _text(value: Any, maximum: int) -> str | None:
@@ -333,6 +336,16 @@ def recent_failures(conn: sqlite3.Connection, *, limit: int = 100,
 
 def active_failures(conn: sqlite3.Connection, *, limit: int = 100) -> list[dict[str, Any]]:
     return recent_failures(conn, limit=limit, active_only=True)
+
+
+def clear_failure_log(conn: sqlite3.Connection) -> int:
+    """Remove recorded AI failures without changing cached interpretations."""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_ai_failure_log'"
+    ).fetchone()
+    if not exists:
+        return 0
+    return conn.execute("DELETE FROM local_ai_failure_log").rowcount
 
 
 def retryable_failure_targets(conn: sqlite3.Connection) -> set[tuple[str, str]]:

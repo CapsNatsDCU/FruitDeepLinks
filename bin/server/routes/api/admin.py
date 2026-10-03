@@ -208,6 +208,19 @@ def api_retry_local_ai_failures():
     return jsonify({"status": "started"}), 202
 
 
+@bp.route("/api/local-ai/failures/clear", methods=["POST"])
+def api_clear_local_ai_failures():
+    if not db_exists():
+        return jsonify({"error": "Database not found"}), 404
+    if refresh_status["running"]:
+        return jsonify({"error": "Another refresh operation is already running"}), 409
+    from local_ai_event_parser import clear_failure_log
+    with get_conn() as conn:
+        cleared = clear_failure_log(conn)
+        conn.commit()
+    return jsonify({"cleared": cleared})
+
+
 @bp.route("/api/auto-refresh", methods=["GET", "POST"])
 def api_auto_refresh():
     if request.method == "GET":

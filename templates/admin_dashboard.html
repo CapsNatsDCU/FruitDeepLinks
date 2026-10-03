@@ -299,10 +299,6 @@ function renderLocalAiFailures(failures, refreshRunning) {
   if (!panel) return;
   const items = Array.isArray(failures) ? failures : [];
   const active = items.filter(item => !item.resolved);
-  if (!items.length) {
-    panel.innerHTML = '<div class="status-muted" style="font-size:12px">No local-AI parsing failures recorded.</div>';
-    return;
-  }
   const rows = items.map(item => {
     const input = item.input || {};
     const label = input.title || 'Untitled provider item';
@@ -310,9 +306,10 @@ function renderLocalAiFailures(failures, refreshRunning) {
     const statusClass = item.resolved ? 'status-success' : 'status-failed';
     const sample = JSON.stringify(input, null, 2);
     return `<details class="progress-item"><summary class="progress-item-label"><strong>${_escapeHtml(label)}</strong> <span class="status-muted">(${_escapeHtml(item.provider || 'source')})</span><br><span class="small ${statusClass}">${_escapeHtml(state)} · ${Number(item.failure_count || 1)} attempt${Number(item.failure_count || 1) === 1 ? '' : 's'}</span></summary><pre class="progress-detail" style="margin:8px 0 0">${_escapeHtml(sample)}</pre></details>`;
-  }).join('');
+  }).join('') || '<div class="status-muted" style="font-size:12px">No local-AI parsing failures recorded.</div>';
   const retry = active.length ? `<button class="btn btn-secondary" onclick="retryLocalAiFailures()" ${refreshRunning ? 'disabled' : ''}>Retry ${active.length} failed AI item${active.length === 1 ? '' : 's'}</button>` : '';
-  panel.innerHTML = `<section class="resolution-progress"><h3>Local-AI failure log</h3><div class="progress-detail">Each failed item is retried once automatically. Only sanitized parser input is retained.</div><div class="refresh-actions" style="margin-top:8px">${retry}</div><div class="progress-list" style="margin-top:8px">${rows}</div></section>`;
+  const clear = `<button class="btn btn-secondary" onclick="clearLocalAiFailureLog(this)" ${refreshRunning || !items.length ? 'disabled' : ''}>Clear AI failure log</button>`;
+  panel.innerHTML = `<section class="resolution-progress"><h3>Local-AI failure log</h3><div class="progress-detail">Each failed item is retried once automatically. Only sanitized parser input is retained.</div><div class="refresh-actions" style="margin-top:8px">${retry}${clear}</div><div class="progress-list" style="margin-top:8px">${rows}</div></section>`;
 }
 
 async function loadStatus() {
@@ -419,6 +416,22 @@ async function retryLocalAiFailures() {
     loadStatus();
   } catch (err) {
     showToast('Error: ' + err.message, 'error');
+  }
+}
+
+async function clearLocalAiFailureLog(button) {
+  if (!window.confirm('Clear all AI failure log entries? This cannot be undone.')) return;
+  button.disabled = true;
+  try {
+    const res = await fetch('/api/local-ai/failures/clear', {method: 'POST'});
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { showToast(data.error || 'Could not clear AI failure log', 'error'); return; }
+    showToast(`Cleared ${data.cleared || 0} AI failure log entries`, 'success');
+    await loadStatus();
+  } catch (err) {
+    showToast('Error: ' + err.message, 'error');
+  } finally {
+    button.disabled = false;
   }
 }
 
