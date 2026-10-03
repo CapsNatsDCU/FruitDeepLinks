@@ -570,6 +570,7 @@ class XtreamClient:
         """
         maximum = None
         check = {"health": "unreachable", "error": "Provider account check failed"}
+        request_error = None
         try:
             response = self.session.get(
                 f"{self.config.server_url}/player_api.php",
@@ -578,9 +579,18 @@ class XtreamClient:
             )
             response.raise_for_status()
             maximum, check = self._account_check_result(response.json())
+            if check["health"] != "healthy":
+                request_error = "Provider did not confirm account authorization"
+        except requests.Timeout:
+            request_error = "Provider HTTP request timed out"
+        except requests.ConnectionError:
+            request_error = "Provider HTTP connection failed"
+        except requests.HTTPError as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            request_error = f"Provider HTTP {status}" if isinstance(status, int) else "Provider HTTP request was rejected"
         except Exception:
             # HTTP errors may include the authenticated URL; never retain them.
-            pass
+            request_error = "Provider HTTP request failed"
         if check["health"] != "healthy":
             # Some providers reject Python clients with HTTP 200 and auth=0.
             # Give those responses the same single compatibility retry as an
@@ -592,8 +602,21 @@ class XtreamClient:
                 # metadata is temporarily unreachable.
                 if fallback_check["health"] != "unreachable" or check["health"] != "unhealthy":
                     maximum, check = fallback_maximum, fallback_check
+            except XtreamError as exc:
+                detail = str(exc)
+                if "timed out" in detail:
+                    fallback_error = "Provider curl request timed out"
+                elif "exit code" in detail:
+                    fallback_error = "Provider curl request was rejected"
+                else:
+                    fallback_error = "Provider curl request failed"
+                if check["health"] == "unreachable":
+                    check["error"] = "; ".join(value for value in (request_error, fallback_error) if value)
             except Exception:
-                pass
+                if check["health"] == "unreachable":
+                    check["error"] = "; ".join(value for value in (request_error, "Provider curl request failed") if value)
+        if check["health"] != "healthy" and request_error and not check.get("error"):
+            check["error"] = request_error
         self.last_account_check = check
         return maximum
 

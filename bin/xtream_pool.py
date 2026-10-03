@@ -137,7 +137,10 @@ class XtreamPool:
                 check = getattr(client, "last_account_check", None) or {
                     "health": "healthy" if maximum else "unreachable", "error": None if maximum else "Provider account check failed"}
                 health = check["health"] if check.get("health") in {"healthy", "unhealthy", "unreachable"} else "unreachable"
-                error = None if health == "healthy" else ("Account authentication or subscription rejected" if health == "unhealthy" else "Provider account check failed")
+                error = None if health == "healthy" else (
+                    check.get("error") or ("Account authentication or subscription rejected"
+                                           if health == "unhealthy" else "Provider account check failed")
+                )
             except Exception:
                 maximum, health, error = None, "unreachable", "Provider account check failed"
             finally:

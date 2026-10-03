@@ -6,6 +6,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import requests
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -229,6 +230,18 @@ class AccountConfigTests(unittest.TestCase):
         self.assertIsNone(client.get_account_max_connections())
         self.assertEqual("healthy", client.last_account_check["health"])
         runner.assert_not_called()
+
+    def test_account_check_reports_safe_http_and_curl_failures(self):
+        config = load_accounts(environ=pool_environment())[0].config
+        session = Mock()
+        session.get.side_effect = requests.Timeout("http://private-user:private-password@provider.example")
+        runner = Mock(return_value=Mock(returncode=28, stdout="", stderr="private-password"))
+        client = XtreamClient(config, session=session, subprocess_runner=runner)
+        self.assertIsNone(client.get_account_max_connections())
+        check = client.last_account_check
+        self.assertEqual("unreachable", check["health"])
+        self.assertEqual("Provider HTTP request timed out; Provider curl request timed out", check["error"])
+        self.assertNotIn("private", check["error"])
 
 
 class PoolTests(unittest.TestCase):
