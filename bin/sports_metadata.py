@@ -359,6 +359,12 @@ def _source_input_fingerprint(data: Mapping[str, Any], raw: Mapping[str, Any]) -
         "participants": data.get("participants") or data.get("competitors"),
         "start": data.get("start_utc") or data.get("start_ms") or data.get("start_time"),
         "end": data.get("end_utc") or data.get("end_ms") or data.get("end_time"),
+        "description": data.get("description"), "category": data.get("category"),
+        "source_timezone": data.get("source_timezone"),
+        "program_type": data.get("program_type") or data.get("event_type"),
+        "competition": data.get("competition"), "season": data.get("season"),
+        "stage": data.get("stage"), "round": data.get("round"),
+        "venue": data.get("venue"), "status": data.get("status"),
         "raw": raw,
     }
     encoded = json.dumps(material, sort_keys=True, default=str, separators=(",", ":"))
@@ -426,6 +432,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
       updated_utc TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sports_metadata_state (
       key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_utc TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS sports_event_processing_state (
+      source TEXT NOT NULL, source_event_id TEXT NOT NULL, pass_name TEXT NOT NULL,
+      input_fingerprint TEXT NOT NULL, context_fingerprint TEXT NOT NULL,
+      canonical_event_id TEXT NOT NULL, updated_utc TEXT NOT NULL,
+      PRIMARY KEY(source, source_event_id, pass_name));
     CREATE TABLE IF NOT EXISTS xtream_catalog_categories (
       category_id TEXT PRIMARY KEY, name TEXT NOT NULL, normalized_name TEXT NOT NULL,
       enabled INTEGER NOT NULL DEFAULT 0, ignored INTEGER NOT NULL DEFAULT 0, stream_count INTEGER,
@@ -673,7 +684,7 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
         raw = {}
     source_fingerprint = _source_input_fingerprint(data, raw)
     prior_evidence = _json(prior[2]) if prior else {}
-    prior_is_current = bool(prior and (not recheck_inferred_mapping or prior[1] == "manual_override" or not prior_evidence.get("source_input_fingerprint")
+    prior_is_current = bool(prior and (not recheck_inferred_mapping or prior[1] == "manual_override"
                                        or prior_evidence.get("source_input_fingerprint") == source_fingerprint))
     title_text, description_text, category_text = _metadata_text(data, raw)
     # Explicit EPG fields win.  When absent, title/description evidence outranks
@@ -955,12 +966,33 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
                          "attempts": int(ai_result.get("attempts") or 0)}}
 
 
-def _legacy_sync_fingerprint(conn: sqlite3.Connection) -> str:
-    """Cheap change detector; avoids a full canonical backfill on every API hit."""
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
-    last_seen = ", COALESCE(MAX(last_seen_utc), '')" if "last_seen_utc" in columns else ""
-    row = conn.execute(f"SELECT COUNT(*), COALESCE(MAX(start_utc), ''), COALESCE(MAX(end_utc), ''){last_seen} FROM events WHERE start_utc IS NOT NULL").fetchone()
-    return "|".join(map(str, row))
+def _resolution_context_fingerprint(conn: sqlite3.Connection, ai_state: str) -> str:
+    """Track catalog edits and parser settings that can change event resolution.
+
+    Observation timestamps are excluded: importer sightings and resolver writes
+    must not invalidate unchanged source records on the next refresh.
+    """
+    digest = hashlib.sha256(f"event-resolution-v1|{ai_state}".encode("utf-8"))
+    tables = {
+        "catalog_entity_state": "entity_type,fruit_id,archived,merged_into_id,operator_fields_json,visibility_override",
+        "catalog_classification_mappings": "source,normalized_label,target_type,canonical_id",
+        "catalog_aliases": "source,entity_type,fruit_id,alias,normalized_alias,confidence,operator_confirmed",
+        "catalog_recurring_events": "id,sport_id,league_id,name,normalized_name,venue_aliases_json,session_vocabulary_json",
+        "source_entity_mappings": "source,entity_type,source_id,canonical_id,confidence,manual",
+    }
+    present = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    for table, columns in tables.items():
+        if table not in present:
+            continue
+        available = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        selected = [column for column in columns.split(",") if column in available]
+        if not selected:
+            continue
+        digest.update(table.encode("utf-8"))
+        manual_only = " WHERE manual=1" if table == "source_entity_mappings" else ""
+        for row in conn.execute(f"SELECT {','.join(selected)} FROM {table}{manual_only} ORDER BY {','.join(selected)}"):
+            digest.update(json.dumps(tuple(row), default=str, separators=(",", ":")).encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _legacy_event_source(data: Mapping[str, Any], raw: Mapping[str, Any]) -> str:
@@ -1044,16 +1076,17 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
     except Exception:
         ai_config = None
         ai_state = "local-ai-unavailable"
-    # Context is part of completion state.  A disabled read/export pass must
-    # never make a later bounded or overnight-unlimited refresh believe its AI
-    # backlog was already processed.
-    fingerprint = f"{_legacy_sync_fingerprint(conn)}|{ai_state}|{ai_mode}"
-    state = conn.execute("SELECT value FROM sports_metadata_state WHERE key='legacy_events_fingerprint'").fetchone()
-    if not retry_targets and state and state[0] == fingerprint:
-        result = {"resolved": 0, "skipped": 0, "unchanged": 1, "status": "complete", "pass_name": _pass}
-        if progress_callback:
-            progress_callback(**result)
-        return result
+    context_fingerprint = _resolution_context_fingerprint(conn, ai_state)
+    processed = {
+        (row[0], row[1]): (row[2], row[3], row[4])
+        for row in conn.execute(
+            "SELECT p.source,p.source_event_id,p.input_fingerprint,p.context_fingerprint,p.canonical_event_id "
+            "FROM sports_event_processing_state p JOIN source_event_records s "
+            "ON s.source=p.source AND s.source_event_id=p.source_event_id "
+            "JOIN canonical_events c ON c.id=s.canonical_event_id "
+            "WHERE p.pass_name=? AND p.canonical_event_id=s.canonical_event_id", (_pass,)
+        )
+    }
     cursor = conn.execute("SELECT * FROM events WHERE start_utc IS NOT NULL")
     rows = cursor.fetchall()
     if retry_targets is not None:
@@ -1073,7 +1106,7 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
     # while a large provider catalog cannot cause an unbounded model walk.
     ai_budget = (None if ai_mode == "unlimited" else
                  [ai_config.max_requests_per_refresh if ai_mode == "bounded" and ai_config else 0])
-    resolved = skipped = pending_ai = 0
+    resolved = skipped = pending_ai = reused_existing = 0
     summary = {"eligible": 0, "cache_hits": 0, "requests": 0, "valid": 0,
                "low_confidence": 0, "failures": 0, "timeouts": 0,
                "transport_failures": 0, "validation_failures": 0,
@@ -1096,7 +1129,22 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
         competitors = raw.get("competitors") or raw.get("participants") or _title_participants(data.get("title") or raw.get("original_stream_name"))
         data.update({"sport_name": sport, "league_name": league, "competitors": competitors})
         source = _legacy_event_source(data, raw)
-        result = resolve_source_event(conn, source=source, source_event_id=str(data["id"]), data=data, commit=False, schema_ready=True,
+        source_event_id = str(data["id"])
+        input_fingerprint = _source_input_fingerprint(data, raw)
+        prior_processing = processed.get((source, source_event_id))
+        if (retry_targets is None and prior_processing
+                and prior_processing[:2] == (input_fingerprint, context_fingerprint)):
+            reused_existing += 1
+            if progress_callback:
+                now = time.monotonic()
+                if completed == 1 or completed == len(rows) or now - last_progress_at >= 1:
+                    progress_callback(pass_name=_pass, status="running", ai_mode=ai_mode,
+                                      records=len(rows), completed=completed, resolved=resolved,
+                                      skipped=skipped, reused_existing=reused_existing,
+                                      pending_local_ai=pending_ai, duration=round(now - started, 3), **summary)
+                    last_progress_at = now
+            continue
+        result = resolve_source_event(conn, source=source, source_event_id=source_event_id, data=data, commit=False, schema_ready=True,
                                       ai_budget=ai_budget, ai_mode=ai_mode,
                                       recheck_inferred_mapping=False)
         was_resolved = bool(result.get("resolved"))
@@ -1117,6 +1165,16 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
         summary["failures"] += int(status in {"transport_failure", "parser_error", "invalid_schema", "invalid_confidence", "invalid_participants"})
         summary["budget_exhausted"] += int(status == "budget_exhausted")
         pending_ai += int(status == "budget_exhausted")
+        if was_resolved and status not in {"budget_exhausted", "transport_failure", "parser_error",
+                                           "invalid_schema", "invalid_confidence", "invalid_participants"}:
+            conn.execute(
+                "INSERT INTO sports_event_processing_state(source,source_event_id,pass_name,input_fingerprint,context_fingerprint,canonical_event_id,updated_utc) "
+                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(source,source_event_id,pass_name) DO UPDATE SET "
+                "input_fingerprint=excluded.input_fingerprint,context_fingerprint=excluded.context_fingerprint,"
+                "canonical_event_id=excluded.canonical_event_id,updated_utc=excluded.updated_utc",
+                (source, source_event_id, _pass, input_fingerprint, context_fingerprint,
+                 result["canonical_event_id"], utc_now()),
+            )
         if progress_callback:
             now = time.monotonic()
             # Publish slow model work as it finishes without flooding progress
@@ -1124,23 +1182,21 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
             if completed == 1 or completed == len(rows) or now - last_progress_at >= 1:
                 progress_callback(pass_name=_pass, status="running", ai_mode=ai_mode,
                                   records=len(rows), completed=completed,
-                                  resolved=resolved, skipped=skipped, pending_local_ai=pending_ai,
+                                  resolved=resolved, skipped=skipped, reused_existing=reused_existing,
+                                  pending_local_ai=pending_ai,
                                   duration=round(now - started, 3), **summary)
                 last_progress_at = now
-    # A capped run is intentionally not marked complete.  On the next refresh
-    # cache hits cost nothing and the next bounded slice can be interpreted.
-    if not pending_ai:
-        conn.execute("INSERT INTO sports_metadata_state(key,value,updated_utc) VALUES('legacy_events_fingerprint',?,?) "
-                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_utc=excluded.updated_utc", (fingerprint, utc_now()))
     conn.commit()
     summary["duration"] = round(time.monotonic() - started, 3)
     LOG.info("Canonical local-AI summary mode=%s eligible=%d cache_hits=%d requests=%d valid=%d low_confidence=%d failures=%d duration=%.3fs timeouts=%d transport_failures=%d validation_failures=%d budget_exhausted=%d",
              ai_mode, summary["eligible"], summary["cache_hits"], summary["requests"], summary["valid"],
              summary["low_confidence"], summary["failures"], summary["duration"], summary["timeouts"],
              summary["transport_failures"], summary["validation_failures"], summary["budget_exhausted"])
-    result = {"resolved": resolved, "skipped": skipped, "pending_local_ai": pending_ai,
+    result = {"resolved": resolved, "skipped": skipped, "reused_existing": reused_existing,
+              "pending_local_ai": pending_ai,
               "records": len(rows), "completed": len(rows), "ai_mode": ai_mode,
-              "unchanged": 0, "status": "complete", "pass_name": _pass, **summary}
+              "unchanged": int(bool(rows) and reused_existing == len(rows)),
+              "status": "complete", "pass_name": _pass, **summary}
     if progress_callback:
         progress_callback(**result)
     return result

@@ -239,22 +239,20 @@ function renderRefreshProgress(refresh) {
     const aiPass = passes.ai;
     if (deterministic) {
       const deterministicValue = deterministic.status === 'running'
-        ? `Checking ${deterministic.records ?? 'imported'} events without AI`
-        : (deterministic.unchanged ? 'No input changes since the previous refresh'
-        : `${deterministic.resolved || 0} resolved · ${deterministic.skipped || 0} skipped`);
+        ? `Checked ${deterministic.completed || 0} of ${deterministic.records ?? 'imported'} events without AI`
+        : `${deterministic.resolved || 0} processed · ${deterministic.reused_existing || 0} already saved · ${deterministic.skipped || 0} unresolved`;
       resolutionRows.push(['Deterministic pass', deterministicValue]);
     }
     if (aiPass) {
       const completedCount = aiPass.completed != null && aiPass.records != null
         ? `${Number(aiPass.completed).toLocaleString()} of ${Number(aiPass.records).toLocaleString()} completed` : '';
       const aiValue = aiPass.status === 'disabled' ? 'Disabled for this refresh'
-        : (aiPass.unchanged ? 'No input changes since the previous refresh'
         : (completedCount || (aiPass.status === 'running'
           ? `Reviewing weak metadata${aiPass.records != null ? ` across ${aiPass.records} events` : ''}`
-          : `${aiPass.ai_interpretations_used || 0} interpretations · ${aiPass.requests || 0} requests · ${aiPass.cache_hits || 0} cached`)));
+          : `${aiPass.ai_interpretations_used || 0} interpretations · ${aiPass.requests || 0} requests · ${aiPass.cache_hits || 0} cached`));
       resolutionRows.push(['Optional local-AI pass', aiValue]);
-      if (completedCount && aiPass.status !== 'disabled' && !aiPass.unchanged) {
-        resolutionRows.push(['Local AI activity', `${aiPass.requests || 0} requests · ${aiPass.cache_hits || 0} cached · ${aiPass.ai_interpretations_used || 0} interpretations used`]);
+      if (completedCount && aiPass.status !== 'disabled') {
+        resolutionRows.push(['Local AI activity', `${aiPass.reused_existing || 0} already saved · ${aiPass.requests || 0} requests · ${aiPass.cache_hits || 0} cached · ${aiPass.ai_interpretations_used || 0} interpretations used`]);
       }
       if (aiPass.budget_exhausted) resolutionRows.push(['Deferred to a later refresh', `${aiPass.budget_exhausted} events`]);
       if (aiPass.failures) resolutionRows.push(['AI parsing failures', `${aiPass.failures} events; deterministic results retained`]);

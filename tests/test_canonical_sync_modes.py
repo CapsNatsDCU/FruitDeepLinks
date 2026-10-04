@@ -71,7 +71,8 @@ class CanonicalSyncModesTests(unittest.TestCase):
                 unlimited = sync_legacy_events(conn, ai_mode="unlimited")
                 self.assertEqual(30, request.call_count)
                 self.assertEqual(28, unlimited["requests"])
-                self.assertEqual(2, unlimited["cache_hits"])
+                self.assertEqual(2, unlimited["reused_existing"])
+                self.assertEqual(0, unlimited["cache_hits"])
         finally:
             conn.close()
 
@@ -154,6 +155,42 @@ class CanonicalSyncModesTests(unittest.TestCase):
                                progress_callback=lambda **payload: reports.append(payload))
             self.assertEqual(("ai", "complete"), (reports[-1]["pass_name"], reports[-1]["status"]))
             self.assertEqual((0, 0), (reports[-1]["completed"], reports[-1]["records"]))
+        finally:
+            conn.close()
+
+    def test_saved_events_are_counted_without_reprocessing_unchanged_inputs(self):
+        conn = self.build(2)
+        reports = []
+        try:
+            conn.execute("ALTER TABLE events ADD COLUMN last_seen_utc TEXT")
+            with patch("local_ai_event_parser.urlopen", return_value=_Response()) as request:
+                first = sync_legacy_events(conn, ai_mode="bounded")
+                self.assertEqual(2, first["ai_pass"]["requests"])
+                conn.execute("UPDATE events SET last_seen_utc='2026-10-12T00:00:00Z'")
+                second = sync_legacy_events(
+                    conn, ai_mode="bounded", progress_callback=lambda **item: reports.append(item),
+                )
+                self.assertEqual(2, request.call_count)
+            self.assertEqual((2, 2), (second["records"], second["reused_existing"]))
+            self.assertEqual(2, second["deterministic_pass"]["reused_existing"])
+            self.assertEqual(0, second["resolved"])
+            self.assertEqual(2, conn.execute("SELECT COUNT(*) FROM source_event_records").fetchone()[0])
+            self.assertEqual((2, 2), (reports[-1]["completed"], reports[-1]["records"]))
+        finally:
+            conn.close()
+
+    def test_changed_source_or_catalog_mapping_is_processed_again(self):
+        conn = self.build(2)
+        try:
+            sync_legacy_events(conn, ai_mode="disabled")
+            conn.execute("UPDATE events SET title='Changed sports title' WHERE id='xtream:0'")
+            changed = sync_legacy_events(conn, ai_mode="disabled")
+            self.assertEqual((1, 1), (changed["resolved"], changed["reused_existing"]))
+            conn.execute("""INSERT INTO catalog_entity_state
+                (entity_type,fruit_id,archived,merged_into_id,operator_fields_json,updated_utc)
+                VALUES('sport','operator-test',0,NULL,'{"name":true}','2026-10-12T00:00:00Z')""")
+            remapped = sync_legacy_events(conn, ai_mode="disabled")
+            self.assertEqual((2, 0), (remapped["resolved"], remapped["reused_existing"]))
         finally:
             conn.close()
 

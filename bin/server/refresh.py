@@ -172,7 +172,7 @@ def _consume_progress_marker(line: str) -> bool:
         if pass_name in {"deterministic", "ai"}:
             passes[pass_name] = {
                 key: payload[key] for key in (
-                    "status", "ai_mode", "records", "completed", "resolved", "skipped", "unchanged",
+                    "status", "ai_mode", "records", "completed", "resolved", "skipped", "reused_existing", "unchanged",
                     "eligible", "requests", "cache_hits", "valid", "failures", "timeouts",
                     "transport_failures", "validation_failures", "budget_exhausted",
                     "resolved_without_ai", "ai_interpretations_used", "pending_local_ai", "duration",
@@ -184,7 +184,7 @@ def _consume_progress_marker(line: str) -> bool:
     elif event == "event_resolution_done":
         resolution = dict(progress.get("event_resolution") or {})
         resolution.update({key: payload[key] for key in (
-            "status", "ai_mode", "finished_at", "resolved", "skipped", "eligible", "requests",
+            "status", "ai_mode", "finished_at", "resolved", "skipped", "reused_existing", "eligible", "requests",
             "cache_hits", "valid", "failures", "timeouts", "transport_failures", "budget_exhausted",
             "resolved_without_ai", "ai_interpretations_used", "pending_local_ai", "unchanged", "detail",
         ) if key in payload})
@@ -392,7 +392,7 @@ def run_ai_failure_retry() -> None:
                     REFRESH_PROGRESS_PREFIX + json.dumps({"event": "event_resolution_pass", **payload})
                 ),
             )
-        pass_keys = ("status", "ai_mode", "records", "completed", "resolved", "skipped", "unchanged", "eligible",
+        pass_keys = ("status", "ai_mode", "records", "completed", "resolved", "skipped", "reused_existing", "unchanged", "eligible",
                      "requests", "cache_hits", "valid", "failures", "timeouts", "transport_failures",
                      "validation_failures", "budget_exhausted", "resolved_without_ai",
                      "ai_interpretations_used", "pending_local_ai", "duration", "retry_targets", "detail")
