@@ -431,7 +431,6 @@ class XtreamClient:
                    or (action == "get_live_streams" and category_id is None) else self.timeout)
         command = [
             self.curl_binary,
-            "-4",
             "-sS",
             "-L",
             "--max-time",

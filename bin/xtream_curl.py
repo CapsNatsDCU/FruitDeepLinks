@@ -19,7 +19,7 @@ class CurlStream:
     def __init__(self, url: str, idle_timeout: float, lease_fd: int):
         self.idle_timeout = idle_timeout
         self.process = subprocess.Popen(
-            ["curl", "-4", "--silent", "--location", "--fail", "--no-buffer",
+            ["curl", "--silent", "--location", "--fail", "--no-buffer",
              "--connect-timeout", "10", "--proto", "=http,https",
              "--proto-redir", "=http,https", "--config", "-"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,

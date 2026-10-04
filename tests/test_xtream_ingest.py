@@ -168,7 +168,8 @@ class XtreamParsingTest(unittest.TestCase):
         rows = client.get_live_streams("10")
         self.assertEqual(rows[0]["stream_id"], 55)
         command, kwargs = runner.calls[0]
-        self.assertEqual(command[:5], ["curl", "-4", "-sS", "-L", "--max-time"])
+        self.assertEqual(command[:4], ["curl", "-sS", "-L", "--max-time"])
+        self.assertNotIn("-4", command)
         self.assertIn("category_id=10", command)
         self.assertNotIn("shell", kwargs)
         self.assertNotIn("user name", repr(command))

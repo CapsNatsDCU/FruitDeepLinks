@@ -32,6 +32,8 @@ class CurlStreamTest(unittest.TestCase):
         with patch("xtream_curl.subprocess.Popen", return_value=process) as popen:
             stream = CurlStream("http://provider.example/live/private-user/private-password/7.ts", 5, 42)
         command = popen.call_args.args[0]
+        self.assertEqual(command[:4], ["curl", "--silent", "--location", "--fail"])
+        self.assertNotIn("-4", command)
         self.assertNotIn("private-user", " ".join(command))
         self.assertNotIn("private-password", " ".join(command))
         process.stdin.write.assert_called_once()
