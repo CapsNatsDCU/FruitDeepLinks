@@ -6,9 +6,22 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 from xtream_curl import CurlStream
+from xtream_process import close_media_process
 
 
 class CurlStreamTest(unittest.TestCase):
+    def test_close_kills_child_when_terminate_fails(self):
+        process = Mock()
+        process.poll.return_value = None
+        process.terminate.side_effect = OSError("terminate failed")
+        process.stdin.closed = False
+        process.stdout.closed = False
+        close_media_process(process)
+        process.kill.assert_called_once()
+        process.wait.assert_called_once_with(timeout=5)
+        process.stdin.close.assert_called_once()
+        process.stdout.close.assert_called_once()
+
     def test_authenticated_url_is_sent_only_through_stdin_configuration(self):
         process = Mock()
         process.stdin = Mock()

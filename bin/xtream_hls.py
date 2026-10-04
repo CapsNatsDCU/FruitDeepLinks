@@ -8,6 +8,8 @@ from __future__ import annotations
 import select
 import subprocess
 
+from xtream_process import close_media_process
+
 
 class HLSStream:
     def __init__(self, url: str, idle_timeout: float, lease_fd: int):
@@ -44,13 +46,4 @@ class HLSStream:
             yield chunk
 
     def close(self):
-        if self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=5)
-        for pipe in (self.process.stdin, self.process.stdout):
-            if pipe and not pipe.closed:
-                pipe.close()
+        close_media_process(self.process)

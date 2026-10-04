@@ -8,6 +8,8 @@ from __future__ import annotations
 import select
 import subprocess
 
+from xtream_process import close_media_process
+
 
 def _config_quote(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
@@ -43,13 +45,4 @@ class CurlStream:
             yield chunk
 
     def close(self):
-        if self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=5)
-        for pipe in (self.process.stdin, self.process.stdout):
-            if pipe and not pipe.closed:
-                pipe.close()
+        close_media_process(self.process)
