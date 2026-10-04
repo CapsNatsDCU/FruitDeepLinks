@@ -346,6 +346,32 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(2, self.pool.status()["available"])
         self.assertEqual(3, self.pool.check_accounts()["available"])
 
+    def test_metadata_failure_does_not_block_a_previously_working_stream(self):
+        class MetadataUnavailable(HealthyAccountClient):
+            def get_account_max_connections(self):
+                self.last_account_check = {"health": "unreachable", "error": "Provider HTTP 403"}
+                return None
+
+        self.pool.client_factory = MetadataUnavailable
+        with self.pool.connection() as conn:
+            conn.execute("UPDATE xtream_account_state SET last_checked=0")
+        state = self.pool.check_accounts(due_only=True)
+        self.assertTrue(all(account["health"] == "degraded" for account in state["accounts"]))
+        self.assertEqual(3, state["available"])
+        lease = self.pool.acquire("100", "persistent:1")
+        lease.release()
+
+    def test_automatic_metadata_check_preserves_media_failure_cooldown(self):
+        class MetadataUnavailable(HealthyAccountClient):
+            def get_account_max_connections(self):
+                self.last_account_check = {"health": "unreachable", "error": "Provider HTTP 403"}
+                return None
+
+        self.pool.fail_account("account_0")
+        self.pool.client_factory = MetadataUnavailable
+        self.pool.check_accounts()
+        self.assertEqual(0, self.pool.status()["accounts"][0]["available"])
+
     def test_disabling_or_lowering_capacity_does_not_kill_existing_stream(self):
         lease = self.pool.acquire("1", "test")
         self.pool.update(lease.account.id, {"enabled": False})

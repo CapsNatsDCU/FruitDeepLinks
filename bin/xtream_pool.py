@@ -146,13 +146,18 @@ class XtreamPool:
                         pass
             with self.connection() as conn:
                 # A transient metadata outage must not invalidate credentials
-                # that were previously authenticated successfully.
+                # that were previously authenticated successfully. Metadata
+                # failures must not put media on cooldown: the live stream may
+                # still work when player_api.php is unavailable or rejected.
+                # Preserve a cooldown caused by an actual failed media tune;
+                # an explicit successful account test may clear it.
                 if health == "unreachable" and state["last_success"]:
                     health = "degraded"
                 conn.execute("UPDATE xtream_account_state SET discovered_capacity=COALESCE(?,discovered_capacity),"
                              "health=?,last_checked=?,last_success=CASE WHEN ?='healthy' THEN ? ELSE last_success END,"
-                             "last_error=?,retry_after=? WHERE account_id=? AND fingerprint=?",
-                             (maximum, health, now, health, now, error, now + (30 if error else 0), account.id, account.fingerprint))
+                             "last_error=?,retry_after=CASE WHEN ?='healthy' AND ?=0 THEN 0 ELSE retry_after END "
+                             "WHERE account_id=? AND fingerprint=?",
+                             (maximum, health, now, health, now, error, health, int(due_only), account.id, account.fingerprint))
         return self.status()
 
     def update(self, account_id, payload):
