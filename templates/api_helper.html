@@ -449,7 +449,7 @@ curl "$BASE/api/events/appletv-umc.cse.12345" | jq
 
 # Quick look at just playables
 curl "$BASE/api/events/appletv-umc.cse.12345" | jq '.playables[] | {provider, service_name, priority, deeplink_play, http_deeplink_url}'</pre>
-  <p class="description">Use <code>PATCH /api/events/&lt;event_id&gt;</code> with <code>{"normalized_name":"[League] Road Team @ Home Team (Broadcast)"}</code> to save an operator override. Send <code>null</code> to clear it.</p>
+  <p class="description">Use <code>PATCH /api/events/&lt;event_id&gt;</code> with <code>{"normalized_name":"[League] Road Team @ Home Team (Broadcast)"}</code> to save a fallback name used when an automatic matchup name cannot be generated. Send <code>null</code> to clear it.</p>
 </div>
 
 <div class="card" style="margin-bottom:14px">

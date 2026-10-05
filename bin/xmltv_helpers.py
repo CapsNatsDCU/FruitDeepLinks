@@ -493,8 +493,8 @@ def build_enhanced_title(event: Dict) -> str:
     Returns:
         Enhanced title string
     """
-    # A manual normalized_name always wins.  Otherwise use a generated
-    # matchup name when structured team/league metadata is available.
+    # Prefer a generated matchup; use the saved normalized_name when no
+    # matchup can be generated. Preserve either result before source cleanup.
     title = programming_name(event)
     if event.get("normalized_name"):
         return title

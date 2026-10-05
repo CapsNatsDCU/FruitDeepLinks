@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 from event_naming import build_normalized_name, ensure_normalized_name_column, programming_name
+from xmltv_helpers import build_enhanced_title
 
 
 class EventNamingTest(unittest.TestCase):
@@ -29,9 +30,10 @@ class EventNamingTest(unittest.TestCase):
         event["title"] = "NHL | 05 - 8/28 6pm Capitals at Lightning"
         self.assertEqual("[NHL] Capitals @ Lightning", build_normalized_name(event))
 
-    def test_override_wins_and_empty_override_falls_back(self):
+    def test_generated_matchup_takes_priority_over_saved_name(self):
         event = {"title": "NHL | Capitals @ Lightning", "normalized_name": "[NHL] Washington @ Tampa Bay"}
-        self.assertEqual("[NHL] Washington @ Tampa Bay", programming_name(event))
+        self.assertEqual("[NHL] Capitals @ Lightning", programming_name(event))
+        self.assertEqual("[NHL] Capitals @ Lightning", build_enhanced_title(event))
         event["normalized_name"] = "  "
         self.assertEqual("[NHL] Capitals @ Lightning", programming_name(event))
 
@@ -48,13 +50,16 @@ class EventNamingTest(unittest.TestCase):
             programming_name(event),
         )
 
-    def test_manual_override_does_not_get_broadcast_suffix(self):
+    def test_saved_name_is_fallback_and_does_not_get_broadcast_suffix(self):
         event = {
             "normalized_name": "Game title chosen by operator",
-            "title": "NHL | Capitals @ Lightning",
+            "title": "NHL Hockey",
             "broadcast_name": "ESPN+",
         }
         self.assertEqual("Game title chosen by operator", programming_name(event))
+        self.assertEqual("Game title chosen by operator", build_enhanced_title(event))
+        event["normalized_name"] = "  "
+        self.assertEqual("NHL Hockey (ESPN+)", programming_name(event))
 
     def test_migration_is_idempotent(self):
         conn = sqlite3.connect(":memory:")

@@ -1,9 +1,9 @@
 """Shared event/programming-name normalization.
 
-The provider title remains source data.  ``normalized_name`` is an optional
-operator override; when it is empty, exporters derive a conservative matchup
-name from structured team/league metadata and add an available broadcast/feed
-label.
+The provider title remains source data. Exporters first derive a conservative
+matchup name from team/league metadata and add an available broadcast/feed
+label. ``normalized_name`` is an optional saved name used when a matchup name
+cannot be generated.
 """
 
 from __future__ import annotations
@@ -279,12 +279,12 @@ def build_normalized_name(event: Dict[str, Any], broadcast_name: Optional[str] =
 
 def programming_name(event: Dict[str, Any], broadcast_name: Optional[str] = None) -> str:
     """Return the name used for guide/M3U/XMLTV programming."""
-    override = _text(event.get("normalized_name"))
-    if override:
-        return override
     generated = build_normalized_name(event, broadcast_name)
     if generated:
         return generated
+    override = _text(event.get("normalized_name"))
+    if override:
+        return override
     title = _text(event.get("title")) or "Sports Event"
     broadcast = _text(broadcast_name) or _broadcast_label(event)
     if broadcast and broadcast.lower() not in title.lower():

@@ -31,11 +31,11 @@ pre { background:var(--bg-inset); border:1px solid var(--border); border-radius:
 
 <div class="card" style="margin-bottom:16px">
   <h2>Programming name</h2>
-  <div class="small" style="margin-bottom:8px">Optional override used by XMLTV, guide, and lane exports. Leave blank to use the automatic matchup name.</div>
+  <div class="small" style="margin-bottom:8px">Automatic matchup names take priority. This optional saved name is used by XMLTV, guide, and lane exports when a matchup name cannot be generated. Leave blank to fall back to the source title.</div>
   <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
     <input id="normalizedName" type="text" maxlength="256" style="flex:1;min-width:260px" placeholder="[NHL] Road Team @ Home Team">
     <button class="btn" onclick="saveNormalizedName()">Save name</button>
-    <button class="btn btn-secondary" onclick="clearNormalizedName()">Use automatic</button>
+    <button class="btn btn-secondary" onclick="clearNormalizedName()">Clear saved name</button>
   </div>
   <div id="nameStatus" class="small" style="margin-top:8px"></div>
 </div>
@@ -281,7 +281,7 @@ async function saveNormalizedName() {
     });
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || "Save failed");
-    status.textContent = value ? "Saved. Refresh lane/XMLTV exports to apply it." : "Cleared; automatic naming will be used.";
+    status.textContent = value ? "Saved fallback name. Refresh lane/XMLTV exports to apply it when no matchup name is available." : "Cleared; the automatic matchup name or source title will be used.";
     status.style.color = "var(--success)";
     loadDetail();
   } catch (err) {

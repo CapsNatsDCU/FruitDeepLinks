@@ -208,10 +208,11 @@ provider that does not support the endpoint does not fail the whole refresh.
 Event programming names are derived conservatively from available league/team
 metadata as `[League] Road Team @ Home Team (Broadcast)` when a broadcast,
 network, or feed label is available. The provider title is retained as source
-data. In the Event Inspector, use **Programming name** to save an optional
-per-event override for XMLTV, guide, direct, and ADB exports; clearing the field
-returns to automatic naming. This is useful for social/manual event records
-that are not present in ESPN+ metadata.
+data. Automatic matchup naming takes priority. In the Event Inspector, use
+**Programming name** to save an optional per-event fallback for XMLTV, guide,
+direct, and ADB exports when a matchup name cannot be generated. Clearing the
+field falls back to the source title in that case. This is useful for
+social/manual event records that are not present in ESPN+ metadata.
 
 ### Xtream motorsports events
 
