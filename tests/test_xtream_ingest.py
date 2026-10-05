@@ -2,10 +2,11 @@ import json
 import io
 import sqlite3
 import sys
+import tempfile
 import threading
 import unittest
 from contextlib import redirect_stdout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
@@ -29,6 +30,7 @@ from xtream_ingest import (  # noqa: E402
     parse_stop_from_name,
     parse_start_from_name,
     redact_credentials,
+    run,
     stable_event_id,
 )
 from event_naming import programming_name  # noqa: E402
@@ -367,9 +369,45 @@ class XtreamParsingTest(unittest.TestCase):
         self.assertEqual(["10"], list(streams))
         self.assertEqual(["20"], diagnostics["failed_category_ids"])
         self.assertEqual(["10"], diagnostics["fetched_category_ids"])
-        self.assertEqual(2, len(workers))
+        self.assertEqual(3, len(workers))
         for worker in workers:
             worker.session.close.assert_called_once_with()
+
+    def test_first_category_epg_is_ready_while_another_category_is_fetching(self):
+        first_ready = threading.Event()
+        stages = []
+
+        class Worker:
+            def __init__(self):
+                self.session = Mock()
+
+            def get_live_streams(self, category_id):
+                if category_id == "20":
+                    if not first_ready.wait(timeout=2):
+                        raise AssertionError("Second category waited for the full fetch phase")
+                return [{"stream_id": category_id, "name": "NHL event"}]
+
+            def get_short_epg(self, stream_id):
+                stages.append(("epg", stream_id))
+                return []
+
+        client = XtreamClient(config())
+        try:
+            client.get_live_categories = lambda: [
+                {"category_id": "10", "category_name": "First"},
+                {"category_id": "20", "category_name": "Second"},
+            ]
+            client.metadata_worker = Worker
+            _, streams = fetch_snapshot(
+                client, config(), on_category_ready=lambda category_id, _name, _rows: (
+                    stages.append(("ready", category_id)),
+                    first_ready.set() if category_id == "10" else None,
+                ),
+            )
+        finally:
+            client.session.close()
+        self.assertEqual(["10", "20"], list(streams))
+        self.assertLess(stages.index(("ready", "10")), stages.index(("epg", "20")))
 
     def test_repeated_category_failures_log_safe_reasons_and_back_off(self):
         class Worker:
@@ -691,6 +729,125 @@ class XtreamParsingTest(unittest.TestCase):
             "XTREAM_PASSWORD": "password",
         })
         self.assertTrue(loaded.enabled)
+
+
+class XtreamStreamingPipelineTest(unittest.TestCase):
+    def test_next_category_imports_while_previous_resolution_is_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "fruit.db"
+            cfg = config(timezone_name="UTC")
+            start = int((datetime.now(timezone.utc) + timedelta(days=1)).timestamp())
+            deterministic_started = threading.Event()
+            second_imported = threading.Event()
+            overlap_confirmed = threading.Event()
+
+            class Client:
+                def __init__(self):
+                    self.config = cfg
+                    self.metadata_configs = (cfg,)
+                    self.session = Mock()
+
+                def get_live_categories(self):
+                    return [{"category_id": category_id, "category_name": "NHL"}
+                            for category_id in cfg.category_ids]
+
+                def get_live_streams(self, category_id):
+                    if category_id == "20":
+                        self_test.assertTrue(deterministic_started.wait(timeout=2))
+                    return [{"stream_id": category_id, "name": "NHL | Rangers @ Bruins",
+                             "start_timestamp": start, "end_timestamp": start + 7200,
+                             "container_extension": "ts"}]
+
+            self_test = self
+
+            def fake_sync(_conn, *, _pass, event_ids, **_kwargs):
+                if _pass == "deterministic" and stable_event_id("10", "10") in event_ids:
+                    deterministic_started.set()
+                    if second_imported.wait(timeout=2):
+                        overlap_confirmed.set()
+                return {"records": len(event_ids), "completed": len(event_ids),
+                        "resolved": len(event_ids), "pass_name": _pass}
+
+            actual_ingest = ingest_payload
+
+            def recording_ingest(conn, categories, streams, *args, **kwargs):
+                chunk = actual_ingest(conn, categories, streams, *args, **kwargs)
+                if categories[0]["category_id"] == "20":
+                    second_imported.set()
+                return chunk
+
+            pool = Mock()
+            pool.accounts = ()
+            pool.check_accounts.return_value = {"capacity": 0}
+            with patch("xtream_pool.XtreamPool", return_value=pool), \
+                 patch("xtream_ingest.load_metadata_configs", return_value=(cfg,)), \
+                 patch("xtream_ingest.ingest_payload", side_effect=recording_ingest), \
+                 patch("sports_metadata.sync_legacy_events", side_effect=fake_sync), \
+                 patch("xtream_epg.refresh_epg", return_value={}):
+                result = run(db_path, client_factory=lambda _cfg: Client())
+            self.assertEqual(2, result["imported"])
+            self.assertTrue(second_imported.is_set())
+            self.assertTrue(overlap_confirmed.is_set(),
+                            "The next category waited for deterministic resolution")
+
+    def test_import_and_resolution_start_before_next_category_finishes_fetching(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "fruit.db"
+            cfg = config(timezone_name="UTC")
+            start = int((datetime.now(timezone.utc) + timedelta(days=1)).timestamp())
+            ai_started = threading.Event()
+            observed = []
+            test_case = self
+
+            class Client:
+                def __init__(self):
+                    self.config = cfg
+                    self.metadata_configs = (cfg,)
+                    self.session = Mock()
+
+                def get_live_categories(self):
+                    return [{"category_id": "10", "category_name": "NHL"},
+                            {"category_id": "20", "category_name": "NHL"}]
+
+                def get_live_streams(self, category_id):
+                    if category_id == "20":
+                        read_conn = sqlite3.connect(db_path)
+                        try:
+                            test_case.assertIsNotNone(read_conn.execute(
+                                "SELECT 1 FROM events WHERE id=?",
+                                (stable_event_id("10", "10"),),
+                            ).fetchone(), "First category was not imported")
+                        finally:
+                            read_conn.close()
+                        test_case.assertTrue(ai_started.wait(timeout=2),
+                                             "AI did not start after the first deterministic pass")
+                        observed.append("second_fetch_after_first_ai")
+                    return [{"stream_id": category_id, "name": "NHL | Rangers @ Bruins",
+                             "start_timestamp": start, "end_timestamp": start + 7200,
+                             "container_extension": "ts"}]
+
+                def get_short_epg(self, _stream_id):
+                    return []
+
+            def fake_sync(_conn, *, _pass, event_ids, **_kwargs):
+                observed.append(_pass)
+                if _pass == "ai":
+                    ai_started.set()
+                return {"records": len(event_ids), "completed": len(event_ids),
+                        "resolved": len(event_ids), "pass_name": _pass}
+
+            pool = Mock()
+            pool.accounts = ()
+            pool.check_accounts.return_value = {"capacity": 0}
+            with patch("xtream_pool.XtreamPool", return_value=pool), \
+                 patch("xtream_ingest.load_metadata_configs", return_value=(cfg,)), \
+                 patch("sports_metadata.sync_legacy_events", side_effect=fake_sync), \
+                 patch("xtream_epg.refresh_epg", return_value={}):
+                result = run(db_path, client_factory=lambda _cfg: Client(),
+                             canonical_ai_mode="bounded")
+            self.assertEqual(2, result["imported"])
+            self.assertIn("second_fetch_after_first_ai", observed)
+            self.assertLess(observed.index("deterministic"), observed.index("ai"))
 
 
 class XtreamStaleHandlingTest(unittest.TestCase):

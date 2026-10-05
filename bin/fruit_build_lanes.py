@@ -127,7 +127,8 @@ def derive_times_from_attrs(
     return start_ms, end_ms, runtime_seconds
 
 
-def load_future_events(conn: sqlite3.Connection, days_ahead: int, *, canonical_ai_mode: str = "disabled") -> List[Event]:
+def load_future_events(conn: sqlite3.Connection, days_ahead: int, *, canonical_ai_mode: str = "disabled",
+                       ai_budget_remaining: int | None = None) -> List[Event]:
     """Load future events with optional sports/league filtering."""
     now = datetime.now(timezone.utc)
     cutoff = now + timedelta(days=days_ahead)
@@ -141,6 +142,7 @@ def load_future_events(conn: sqlite3.Connection, days_ahead: int, *, canonical_a
                       started_at=datetime.now(timezone.utc).isoformat())
         resolution = sync_legacy_events(
             conn, ai_mode=canonical_ai_mode,
+            ai_budget_override=([ai_budget_remaining] if ai_budget_remaining is not None else None),
             progress_callback=lambda **payload: emit_progress("event_resolution_pass", **payload),
         )
         emit_progress("event_resolution_done", **{**resolution, "ai_mode": canonical_ai_mode,
@@ -813,13 +815,25 @@ def main():
     )
     ap.add_argument("--canonical-ai-mode", choices=("disabled", "bounded", "unlimited"), default="disabled",
                     help="Canonical sync AI mode; refresh selects this explicitly.")
+    ap.add_argument("--ai-budget-state", type=Path,
+                    help="Remaining bounded local-AI budget after streaming Xtream resolution.")
     args = ap.parse_args()
     conn = sqlite3.connect(args.db)
     ensure_lane_schema(conn)
     reset_lanes(conn)
     create_lanes(conn, args.lanes)
 
-    events = load_future_events(conn, args.days_ahead, canonical_ai_mode=args.canonical_ai_mode)
+    ai_budget_remaining = None
+    if args.canonical_ai_mode == "bounded" and args.ai_budget_state and args.ai_budget_state.exists():
+        try:
+            state = json.loads(args.ai_budget_state.read_text(encoding="utf-8"))
+            remaining = state.get("remaining")
+            if isinstance(remaining, int) and remaining >= 0:
+                ai_budget_remaining = remaining
+        except (OSError, ValueError, AttributeError):
+            pass
+    events = load_future_events(conn, args.days_ahead, canonical_ai_mode=args.canonical_ai_mode,
+                                ai_budget_remaining=ai_budget_remaining)
     print(f"Loaded {len(events)} future events (after sports/league filtering)")
     build_lanes_with_placeholders(conn, events, args.lanes)
 

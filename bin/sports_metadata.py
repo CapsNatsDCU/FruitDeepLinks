@@ -669,6 +669,7 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
                          schema_ready: bool = False, ai_config=None,
                          ai_requester=None, ai_budget: list[int] | None = None,
                          ai_mode: str = "bounded",
+                         commit_before_ai_retry: bool = False,
                          recheck_inferred_mapping: bool = True) -> dict[str, Any]:
     """Resolve one structured source record to Fruit-owned canonical identity."""
     if not schema_ready:
@@ -841,6 +842,7 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
                 "canonical_candidates": _canonical_candidate_hints(conn, start=start),
                 "config": active_ai_config,
                 "budget": ai_budget,
+                "commit_before_retry": commit_before_ai_retry,
             }
             if ai_requester is not None:
                 kwargs["requester"] = ai_requester
@@ -1032,7 +1034,11 @@ def retry_failed_local_ai(conn: sqlite3.Connection, *, progress_callback=None) -
 
 def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
                        progress_callback=None, _pass: str | None = None,
-                       retry_targets: set[tuple[str, str]] | None = None) -> dict[str, Any]:
+                       retry_targets: set[tuple[str, str]] | None = None,
+                       event_ids: set[str] | None = None,
+                       ai_budget_override: list[int] | None = None,
+                       commit_each: bool = False,
+                       schema_ready: bool = False) -> dict[str, Any]:
     """Incrementally materialize canonical records during refresh/import only.
 
     ``unlimited`` is represented by a ``None`` budget, never a fabricated
@@ -1048,7 +1054,8 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
     if _pass is None:
         deterministic = sync_legacy_events(
             conn, ai_mode="disabled", progress_callback=progress_callback,
-            _pass="deterministic",
+            _pass="deterministic", event_ids=event_ids,
+            commit_each=commit_each, schema_ready=schema_ready,
         )
         if ai_mode == "disabled":
             ai_pass = {"requests": 0, "cache_hits": 0, "ai_interpretations_used": 0}
@@ -1057,9 +1064,12 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
             return {**deterministic, "deterministic_pass": deterministic, "ai_pass": ai_pass}
         ai_pass = sync_legacy_events(
             conn, ai_mode=ai_mode, progress_callback=progress_callback, _pass="ai",
+            event_ids=event_ids, ai_budget_override=ai_budget_override,
+            commit_each=commit_each, schema_ready=schema_ready,
         )
         return {**ai_pass, "deterministic_pass": deterministic, "ai_pass": ai_pass}
-    ensure_schema(conn)
+    if not schema_ready:
+        ensure_schema(conn)
     if progress_callback:
         progress_callback(pass_name=_pass, status="running", ai_mode=ai_mode)
     columns = {r[1] for r in conn.execute("PRAGMA table_info(events)")}
@@ -1077,18 +1087,37 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
         ai_config = None
         ai_state = "local-ai-unavailable"
     context_fingerprint = _resolution_context_fingerprint(conn, ai_state)
-    processed = {
-        (row[0], row[1]): (row[2], row[3], row[4])
-        for row in conn.execute(
+    selected_ids = sorted(event_ids) if event_ids is not None else None
+    processed = {}
+    processed_id_batches = ([None] if selected_ids is None else
+                            [selected_ids[offset:offset + 400]
+                             for offset in range(0, len(selected_ids), 400)])
+    for event_id_batch in processed_id_batches:
+        query = (
             "SELECT p.source,p.source_event_id,p.input_fingerprint,p.context_fingerprint,p.canonical_event_id "
             "FROM sports_event_processing_state p JOIN source_event_records s "
             "ON s.source=p.source AND s.source_event_id=p.source_event_id "
             "JOIN canonical_events c ON c.id=s.canonical_event_id "
-            "WHERE p.pass_name=? AND p.canonical_event_id=s.canonical_event_id", (_pass,)
+            "WHERE p.pass_name=? AND p.canonical_event_id=s.canonical_event_id"
         )
-    }
-    cursor = conn.execute("SELECT * FROM events WHERE start_utc IS NOT NULL")
-    rows = cursor.fetchall()
+        if event_id_batch is not None:
+            query += " AND p.source_event_id IN (" + ",".join("?" for _ in event_id_batch) + ")"
+        for row in conn.execute(query, (_pass, *(event_id_batch or ()))):
+            processed[(row[0], row[1])] = (row[2], row[3], row[4])
+    if event_ids is None:
+        cursor = conn.execute("SELECT * FROM events WHERE start_utc IS NOT NULL")
+        rows = cursor.fetchall()
+    else:
+        rows = []
+        for offset in range(0, len(selected_ids), 400):
+            event_id_batch = selected_ids[offset:offset + 400]
+            cursor = conn.execute(
+                "SELECT * FROM events WHERE start_utc IS NOT NULL AND id IN ("
+                + ",".join("?" for _ in event_id_batch) + ")", event_id_batch,
+            )
+            rows.extend(cursor.fetchall())
+        if not event_ids:
+            cursor = conn.execute("SELECT * FROM events WHERE 0")
     if retry_targets is not None:
         filtered_rows = []
         for row in rows:
@@ -1104,7 +1133,8 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
                           records=len(rows), completed=0)
     # One bounded budget covers this incremental sync.  Cache hits are free,
     # while a large provider catalog cannot cause an unbounded model walk.
-    ai_budget = (None if ai_mode == "unlimited" else
+    ai_budget = (ai_budget_override if ai_mode == "bounded" and ai_budget_override is not None else
+                 None if ai_mode == "unlimited" else
                  [ai_config.max_requests_per_refresh if ai_mode == "bounded" and ai_config else 0])
     resolved = skipped = pending_ai = reused_existing = 0
     summary = {"eligible": 0, "cache_hits": 0, "requests": 0, "valid": 0,
@@ -1146,6 +1176,7 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
             continue
         result = resolve_source_event(conn, source=source, source_event_id=source_event_id, data=data, commit=False, schema_ready=True,
                                       ai_budget=ai_budget, ai_mode=ai_mode,
+                                      commit_before_ai_retry=commit_each,
                                       recheck_inferred_mapping=False)
         was_resolved = bool(result.get("resolved"))
         resolved += int(was_resolved); skipped += int(not was_resolved)
@@ -1175,6 +1206,10 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
                 (source, source_event_id, _pass, input_fingerprint, context_fingerprint,
                  result["canonical_event_id"], utc_now()),
             )
+        if commit_each:
+            # Release the SQLite write lock before the next optional model
+            # request so category imports can continue on their connection.
+            conn.commit()
         if progress_callback:
             now = time.monotonic()
             # Publish slow model work as it finishes without flooding progress

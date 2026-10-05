@@ -12,6 +12,8 @@ import subprocess
 import sqlite3
 import time
 import json
+import atexit
+import tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -908,13 +910,22 @@ def main(argv=None):
     # non-fatal: a provider outage or credential problem must not prevent the
     # existing sources from proceeding to lane planning and export.
     xtream_enabled = provider_plan["xtream"]
+    ai_budget_state_path = None
     if skip_scrape or not xtream_enabled:
         reason = "SKIPPED" if skip_scrape else "DISABLED"
         print(f"\n[7-xtream/{total_steps}] Ingesting Xtream IPTV events. {reason}")
     else:
+        if args.canonical_ai_mode == "bounded":
+            budget_fd, budget_path = tempfile.mkstemp(prefix="fruit-xtream-ai-", suffix=".json")
+            os.close(budget_fd)
+            ai_budget_state_path = Path(budget_path)
+            atexit.register(lambda path=ai_budget_state_path: path.unlink(missing_ok=True))
+        xtream_command = ["python3", "-u", "xtream_ingest.py", "--db", str(DB_PATH),
+                          "--canonical-ai-mode", args.canonical_ai_mode]
+        if ai_budget_state_path:
+            xtream_command.extend(("--ai-budget-state", str(ai_budget_state_path)))
         run_step("7-xtream", total_steps, "Ingesting configured Xtream IPTV categories", [
-            "python3", "-u", "xtream_ingest.py",
-            "--db", str(DB_PATH),
+            *xtream_command,
         ], allow_fail=True, env={"FDL_REFRESH_PROGRESS": "1"})
 
     # Step 7a: Scrape Victory+ events
@@ -1160,12 +1171,16 @@ def main(argv=None):
 # Step 9: Build virtual lanes (Channels-style direct lanes)
     # num_lanes is a known settings key, so this resolves DB -> FRUIT_LANES env -> default (50).
     lanes = str(_get_db_setting("num_lanes"))
-    if not run_step(9, total_steps, f"Building {lanes} virtual lanes", [
+    lane_command = [
         "python3", "fruit_build_lanes.py",
         "--db", str(DB_PATH),
         "--lanes", lanes,
         "--canonical-ai-mode", args.canonical_ai_mode,
-    ], env={"FDL_REFRESH_PROGRESS": "1"}):
+    ]
+    if ai_budget_state_path:
+        lane_command.extend(("--ai-budget-state", str(ai_budget_state_path)))
+    if not run_step(9, total_steps, f"Building {lanes} virtual lanes", lane_command,
+                    env={"FDL_REFRESH_PROGRESS": "1"}):
         return 1
 
     # Step 10: Export direct channels (primary XML/M3U)

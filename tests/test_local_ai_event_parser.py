@@ -155,6 +155,34 @@ class LocalAIEventParserTests(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(failures[0]["input"]))
         self.assertEqual("Live coverage password=[redacted] [redacted-url]", failures[0]["input"]["description"])
 
+    def test_streaming_retry_releases_database_writer_for_category_import(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "fruit.db"
+            parser_conn = sqlite3.connect(db_path)
+            importer_conn = sqlite3.connect(db_path, timeout=0)
+            try:
+                ensure_schema(parser_conn)
+                attempts = 0
+
+                def requester(_config, _payload):
+                    nonlocal attempts
+                    attempts += 1
+                    if attempts == 1:
+                        raise RuntimeError("timeout")
+                    importer_conn.execute("CREATE TABLE IF NOT EXISTS import_probe (id INTEGER)")
+                    importer_conn.execute("INSERT INTO import_probe VALUES (1)")
+                    importer_conn.commit()
+                    return interpretation(sport="Hockey", league="NHL")
+
+                result = enrich(parser_conn, provider="xtream", source_event_id="retry-lock",
+                                title="NHL game", config=CONFIG, requester=requester,
+                                commit_before_retry=True)
+                self.assertEqual("fresh", result["status"])
+                self.assertEqual(1, importer_conn.execute("SELECT COUNT(*) FROM import_probe").fetchone()[0])
+            finally:
+                importer_conn.close()
+                parser_conn.close()
+
     def test_clear_failure_log_does_not_clear_cache_or_reimport_old_failures(self):
         enrich(self.conn, provider="xtream", source_event_id="failed", title="Offline game",
                config=CONFIG, requester=lambda *_args: (_ for _ in ()).throw(RuntimeError("offline")))

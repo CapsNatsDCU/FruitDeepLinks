@@ -76,6 +76,31 @@ class CanonicalSyncModesTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_scoped_early_pass_shares_remaining_ai_budget_with_final_pass(self):
+        conn = self.build(2)
+        budget = [1]
+        try:
+            with patch("local_ai_event_parser.urlopen", return_value=_Response()) as request:
+                deterministic = sync_legacy_events(
+                    conn, ai_mode="disabled", _pass="deterministic",
+                    event_ids={"xtream:0"}, commit_each=True,
+                )
+                early_ai = sync_legacy_events(
+                    conn, ai_mode="bounded", _pass="ai",
+                    event_ids={"xtream:0"}, ai_budget_override=budget,
+                    commit_each=True,
+                )
+                final = sync_legacy_events(conn, ai_mode="bounded",
+                                           ai_budget_override=budget)
+            self.assertEqual(1, deterministic["records"])
+            self.assertEqual(1, early_ai["records"])
+            self.assertEqual(0, budget[0])
+            self.assertEqual(1, request.call_count)
+            self.assertGreaterEqual(final["budget_exhausted"], 1)
+            self.assertFalse(conn.in_transaction)
+        finally:
+            conn.close()
+
     def test_timeout_configuration_accepts_sixty_seconds(self):
         conn = self.build(1)
         reports = []

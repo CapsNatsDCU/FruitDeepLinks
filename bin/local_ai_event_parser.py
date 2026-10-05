@@ -356,6 +356,7 @@ def enrich(conn: sqlite3.Connection, *, provider: str, source_event_id: str, tit
            description: Any = None, category: Any = None, sport_hint: Any = None, league_hint: Any = None,
            start_time: Any = None, canonical_candidates: Any = None, config: LocalAIConfig | None = None,
            budget: list[int] | None = None,
+           commit_before_retry: bool = False,
            requester: Callable[[LocalAIConfig, Mapping[str, Any]], Any] = request_openai_compatible,
            now: Callable[[], str] | None = None) -> dict[str, Any]:
     """Return a validated candidate or a non-fatal diagnostic.
@@ -431,6 +432,11 @@ def enrich(conn: sqlite3.Connection, *, provider: str, source_event_id: str, tit
         # local endpoint/model hiccups without creating an unbounded loop.
         if result["status"] not in RETRYABLE_FAILURE_STATUSES or attempts >= 2:
             return result
+        if commit_before_retry:
+            # Streaming resolution shares the database with category imports.
+            # Keep the first failure, then release its write lock before the
+            # next network request for this same item.
+            conn.commit()
 
 
 def clear_cache(conn: sqlite3.Connection, *, provider: str | None = None, source_event_id: str | None = None) -> int:
