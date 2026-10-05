@@ -15,6 +15,8 @@ import os
 import re
 import sqlite3
 import subprocess
+import time
+from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -39,6 +41,8 @@ DEFAULT_TIMEOUT_SECONDS = 20
 DEFAULT_CATALOG_TIMEOUT_SECONDS = 90
 DEFAULT_DURATION_MINUTES = 180
 MAX_CATEGORY_FETCH_WORKERS = 3
+CATEGORY_FAILURE_BACKOFF_AFTER = 3
+CATEGORY_FAILURE_BACKOFF_SECONDS = 5
 _SAFE_EXTENSION_RE = re.compile(r"^[A-Za-z0-9]{1,8}$")
 _PLACEHOLDER_LABELS = {
     "NO EVENT",
@@ -340,6 +344,7 @@ class XtreamClient:
         self.catalog_timeout = catalog_timeout
         self.subprocess_runner = subprocess_runner or subprocess.run
         self.curl_binary = curl_binary
+        self._last_request_failure: Optional[str] = None
 
     @staticmethod
     def _usable_payload(payload: Any, required_key: str) -> Optional[list[dict]]:
@@ -397,6 +402,8 @@ class XtreamClient:
             params["stream_id"] = str(stream_id)
         # A fallback account must not inherit cookies from the first account.
         session = self.session if config is self.config else requests.Session()
+        self._last_request_failure = None
+        response = None
         try:
             response = session.get(
                 f"{config.server_url}/player_api.php",
@@ -404,19 +411,38 @@ class XtreamClient:
                 timeout=self.timeout,
             )
             response.raise_for_status()
+            payload = response.json()
             if action in {"get_short_epg", "get_simple_data_table"}:
                 # Empty EPG is authoritative and should not trigger a second
                 # request through curl for every stream in the category.
-                return self._usable_epg_payload(response.json())
+                rows = self._usable_epg_payload(payload)
+                if rows is not None:
+                    return rows
+                self._last_request_failure = "unusable EPG response"
+                return None
             required_key = "category_id" if action == "get_live_categories" else "stream_id"
-            rows = self._usable_payload(response.json(), required_key)
+            rows = self._usable_payload(payload, required_key)
             # Some incompatible providers return a misleading empty list to
             # Python clients. Give curl one chance; curl may confirm the empty
             # list as the final authoritative response.
-            return rows if rows else None
-        except Exception:
+            if rows:
+                return rows
+            self._last_request_failure = "empty response" if rows == [] else "unusable response"
+            return None
+        except Exception as exc:
             # requests exceptions can embed the fully-authenticated request URL.
-            # Do not propagate or log their text; curl gets one clean retry.
+            # Record only a fixed failure class or HTTP status, never the text.
+            status = getattr(response, "status_code", None)
+            if isinstance(status, int) and 400 <= status <= 599:
+                self._last_request_failure = f"HTTP {status}"
+            elif isinstance(exc, requests.exceptions.Timeout):
+                self._last_request_failure = "timeout"
+            elif isinstance(exc, requests.exceptions.ConnectionError):
+                self._last_request_failure = "connection error"
+            elif isinstance(exc, ValueError):
+                self._last_request_failure = "invalid JSON"
+            else:
+                self._last_request_failure = "request error"
             return None
         finally:
             if session is not self.session:
@@ -503,19 +529,35 @@ class XtreamClient:
     def _get(self, action: str, category_id: Optional[str] = None,
              stream_id: Optional[str] = None) -> list[dict]:
         configs = self.metadata_configs
+        failures: list[tuple[str, str]] = []
         for config in configs:
+            self._last_request_failure = None
             rows = self._get_with_requests(action, category_id, stream_id, config)
             if rows is not None:
                 self._prefer_metadata_config(config)
                 return rows
+            request_failure = self._last_request_failure or "request error"
             try:
                 rows = self._get_with_curl(action, category_id, stream_id, config)
                 self._prefer_metadata_config(config)
                 return rows
-            except XtreamError:
+            except XtreamError as exc:
+                # Curl errors are constructed without response bodies or URLs.
+                # Redact against every account as an additional safeguard.
+                curl_failure = str(exc)
+                for account_config in configs:
+                    curl_failure = redact_credentials(curl_failure, account_config)
+                failures.append((request_failure, curl_failure))
                 if len(configs) == 1:
-                    raise
-        raise XtreamError(f"Xtream {action} failed for all enabled accounts")
+                    raise XtreamError(f"{curl_failure}; Python HTTP: {request_failure}") from None
+        request_counts = Counter(reason for reason, _ in failures)
+        curl_counts = Counter(reason for _, reason in failures)
+        def describe(counts: Counter) -> str:
+            return ", ".join(f"{reason} ({count})" for reason, count in sorted(counts.items()))
+        raise XtreamError(
+            f"Xtream {action} failed for all enabled accounts ({len(configs)} attempted); "
+            f"Python HTTP: {describe(request_counts)}; curl: {describe(curl_counts)}"
+        )
 
     def _prefer_metadata_config(self, config: XtreamConfig) -> None:
         """Keep a working account first for the rest of this refresh/request."""
@@ -1464,6 +1506,7 @@ def fetch_snapshot(client: XtreamClient, config: XtreamConfig,
     }
     missing = [category_id for category_id in config.category_ids if category_id not in available]
     available_selected = [category_id for category_id in config.category_ids if category_id in available]
+    selected_order = {category_id: index for index, category_id in enumerate(available_selected)}
     if progress_reporter:
         progress_reporter("xtream_categories_start", categories=[
             {"category_id": category_id, "category_name": category_names.get(category_id, "Xtream"),
@@ -1478,6 +1521,7 @@ def fetch_snapshot(client: XtreamClient, config: XtreamConfig,
 
     streams: dict[str, list[dict]] = {}
     failed: set[str] = set()
+    consecutive_failures = 0
 
     def started_fetch(category_id: str) -> None:
         if progress_reporter:
@@ -1490,11 +1534,23 @@ def fetch_snapshot(client: XtreamClient, config: XtreamConfig,
             progress_reporter("xtream_category_update", category_id=category_id, status="fetched",
                               streams_fetched=len(rows), detail="Snapshot received")
 
-    def failed_fetch(category_id: str) -> None:
+    def failed_fetch(category_id: str, exc: XtreamError) -> None:
         failed.add(category_id)
+        detail = str(exc)
+        for account_config in getattr(client, "metadata_configs", (config,)):
+            detail = redact_credentials(detail, account_config)
+        print(f"Xtream category {json.dumps(category_id)} fetch failed: {detail}", flush=True)
         if progress_reporter:
             progress_reporter("xtream_category_update", category_id=category_id, status="failed",
-                              finished_at=datetime.now(timezone.utc).isoformat(), detail="Category request failed")
+                              finished_at=datetime.now(timezone.utc).isoformat(), detail=detail)
+
+    def back_off_if_needed() -> None:
+        nonlocal consecutive_failures
+        if consecutive_failures >= CATEGORY_FAILURE_BACKOFF_AFTER:
+            print(f"Xtream category fetch backing off {CATEGORY_FAILURE_BACKOFF_SECONDS}s "
+                  f"after {consecutive_failures} consecutive failures", flush=True)
+            time.sleep(CATEGORY_FAILURE_BACKOFF_SECONDS)
+            consecutive_failures = 0
 
     if type(client) is XtreamClient and len(available_selected) > 1:
         # The provider calls are network-bound. Never share a requests.Session
@@ -1522,20 +1578,28 @@ def fetch_snapshot(client: XtreamClient, config: XtreamConfig,
                 submit_next()
             while pending:
                 done, _ = wait(pending, return_when=FIRST_COMPLETED)
-                for future in done:
+                for future in sorted(done, key=lambda item: selected_order[pending[item]]):
                     category_id = pending.pop(future)
                     try:
                         fetched(category_id, future.result())
-                    except XtreamError:
-                        failed_fetch(category_id)
+                        consecutive_failures = 0
+                    except XtreamError as exc:
+                        failed_fetch(category_id, exc)
+                        consecutive_failures += 1
+                    if consecutive_failures >= CATEGORY_FAILURE_BACKOFF_AFTER and len(streams) + len(failed) < len(available_selected):
+                        back_off_if_needed()
                     submit_next()
     else:
         for category_id in available_selected:
             started_fetch(category_id)
             try:
                 fetched(category_id, client.get_live_streams(category_id))
-            except XtreamError:
-                failed_fetch(category_id)
+                consecutive_failures = 0
+            except XtreamError as exc:
+                failed_fetch(category_id, exc)
+                consecutive_failures += 1
+                if consecutive_failures >= CATEGORY_FAILURE_BACKOFF_AFTER and len(streams) + len(failed) < len(available_selected):
+                    back_off_if_needed()
     if not streams:
         raise XtreamError("Could not fetch any currently available configured Xtream categories")
     # Reconciliation and diagnostics retain configured order, even when network

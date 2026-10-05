@@ -23,6 +23,9 @@
 .xtream-progress { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
 .xtream-progress h3 { margin: 0 0 7px; font-size: 13px; }
 .xtream-category-meta { display: block; color: var(--text-muted); font-size: 11px; margin-top: 2px; }
+.xtream-failed-details { margin-top: 10px; font-size: 12px; }
+.xtream-failed-details summary { cursor: pointer; color: var(--text-dim); }
+.xtream-failed-list { max-height: 260px; overflow: auto; }
 .resolution-progress { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
 .resolution-progress h3 { margin: 0 0 7px; font-size: 13px; }
 .activity-progress { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
@@ -229,7 +232,15 @@ function renderRefreshProgress(refresh) {
   const categoryRows = categoryStages.map(status =>
     `<div class="progress-item"><span class="progress-item-label">${categoryLabel(status)}</span><span class="progress-item-status ${categoryClass(status)}">${categoryCounts[status] || 0} categories</span></div>`
   ).join('');
-  const xtreamPanel = categories.length ? `<section class="xtream-progress"><h3>Xtream category import</h3><div class="progress-detail">${categories.length} configured categories</div><div class="progress-list">${categoryRows}</div></section>` : '';
+  const failedCategories = categories.filter(item => item.status === 'failed' || item.status === 'unavailable');
+  const failedDetailsOpen = document.getElementById('xtream-failed-details')?.open || false;
+  const failedDetails = failedCategories.length ? `<details id="xtream-failed-details" class="xtream-failed-details" ${failedDetailsOpen ? 'open' : ''}>
+    <summary>Show ${failedCategories.length} failed or unavailable category reasons</summary>
+    <div class="progress-list xtream-failed-list">${failedCategories.map(item =>
+      `<div class="progress-item"><span class="progress-item-label">${_escapeHtml(item.category_name || 'Xtream')} (${_escapeHtml(item.category_id || '')})<span class="xtream-category-meta">${_escapeHtml(item.detail || 'No reason recorded')}</span></span></div>`
+    ).join('')}</div>
+  </details>` : '';
+  const xtreamPanel = categories.length ? `<section class="xtream-progress"><h3>Xtream category import</h3><div class="progress-detail">${categories.length} configured categories</div><div class="progress-list">${categoryRows}</div>${failedDetails}</section>` : '';
   const phaseClass = status => ({complete:'status-success',completed:'status-success',disabled:'status-muted',running:'status-running',failed:'status-failed',error:'status-failed'}[status] || 'status-muted');
   const resolution = progress.event_resolution;
   const resolutionPanel = resolution ? (() => {

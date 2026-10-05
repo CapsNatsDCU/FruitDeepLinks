@@ -1,12 +1,16 @@
 import json
+import io
 import sqlite3
 import sys
 import threading
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
+
+import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
@@ -132,8 +136,26 @@ class XtreamParsingTest(unittest.TestCase):
         with patch("xtream_ingest.requests.Session", return_value=fallback), self.assertRaises(XtreamError) as caught:
             client.get_live_categories()
         self.assertIn("all enabled accounts", str(caught.exception))
+        self.assertIn("Python HTTP: HTTP 403 (2)", str(caught.exception))
+        self.assertIn("curl transport failed for action get_live_categories with exit code 22 (2)",
+                      str(caught.exception))
         for secret in ("first-user", "first-secret", "second-user", "second-secret"):
             self.assertNotIn(secret, str(caught.exception))
+
+    def test_request_timeout_reports_class_without_authenticated_url(self):
+        session = Mock()
+        session.get.side_effect = requests.exceptions.Timeout(
+            "http://provider.example/player_api.php?username=user%20name&password=p%40ss%2Fword"
+        )
+        client = XtreamClient(config(), session=session,
+                              subprocess_runner=FakeRunner(FakeCompleted(returncode=28)))
+        with self.assertRaises(XtreamError) as caught:
+            client.get_live_streams("10")
+        message = str(caught.exception)
+        self.assertIn("Python HTTP: timeout", message)
+        self.assertIn("timed out during get_live_streams", message)
+        for secret in ("user name", "p@ss/word", "user%20name", "p%40ss%2Fword"):
+            self.assertNotIn(secret, message)
 
     def test_api_response_parsing_and_request_shape(self):
         session = FakeSession([{"category_id": "10", "category_name": "Sports"}, "bad"])
@@ -348,6 +370,42 @@ class XtreamParsingTest(unittest.TestCase):
         self.assertEqual(2, len(workers))
         for worker in workers:
             worker.session.close.assert_called_once_with()
+
+    def test_repeated_category_failures_log_safe_reasons_and_back_off(self):
+        class Worker:
+            def __init__(self):
+                self.session = Mock()
+
+            def get_live_streams(self, category_id):
+                if category_id != "7":
+                    raise XtreamError("provider timeout for user name")
+                return [{"stream_id": "7", "name": "NHL game"}]
+
+        client = XtreamClient(config(category_ids=tuple(str(i) for i in range(1, 8))))
+        reports = []
+        output = io.StringIO()
+        try:
+            client.get_live_categories = lambda: [
+                {"category_id": str(i), "category_name": f"Category {i}"}
+                for i in range(1, 8)
+            ]
+            client.get_short_epg = lambda _stream_id: []
+            client.metadata_worker = Worker
+            with patch("xtream_ingest.time.sleep") as pause, redirect_stdout(output):
+                _, streams = fetch_snapshot(
+                    client, client.config, progress_reporter=lambda event, **fields: reports.append((event, fields))
+                )
+        finally:
+            client.session.close()
+
+        self.assertEqual(["7"], list(streams))
+        pause.assert_called_with(5)
+        failed = [fields for event, fields in reports
+                  if event == "xtream_category_update" and fields.get("status") == "failed"]
+        self.assertEqual(6, len(failed))
+        self.assertTrue(all("provider timeout for [REDACTED]" in item["detail"] for item in failed))
+        self.assertIn("fetch backing off 5s", output.getvalue())
+        self.assertNotIn("user name", output.getvalue())
 
     def test_metadata_worker_has_its_own_session_and_account_order(self):
         client = XtreamClient(config())
