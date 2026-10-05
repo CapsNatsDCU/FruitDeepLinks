@@ -43,7 +43,8 @@ are checked, the derived sum supersedes the historical single-account limit.
         row = rows.get(account.id)
         if (row and row[1] == account.fingerprint and account.enabled and account.config.enabled
                 and row[2] != 0 and row[5] in {"healthy", "degraded"}):
-            total += row[3] or account.capacity_override or row[4] or 1
+            requested = row[3] or account.capacity_override or row[4] or 1
+            total += min(requested, row[4]) if row[4] else requested
     return total
 
 
@@ -104,8 +105,11 @@ class XtreamPool:
         row.update(id=account.id, label=safe_value(row["label_override"] or account.label, self.accounts),
                    enabled=self.enabled and account.enabled and row["enabled_override"] != 0)
         row["configured_override"] = row["capacity_override"] if row["capacity_override"] is not None else account.capacity_override
-        row["effective_capacity"] = row["configured_override"] or row["discovered_capacity"] or 1
-        row["capacity_source"] = "override" if row["configured_override"] else "discovered" if row["discovered_capacity"] else "conservative_default"
+        requested = row["configured_override"] or row["discovered_capacity"] or 1
+        row["effective_capacity"] = min(requested, row["discovered_capacity"]) if row["discovered_capacity"] else requested
+        row["capacity_source"] = ("provider_limit" if row["discovered_capacity"] and requested > row["discovered_capacity"]
+                                  else "override" if row["configured_override"] else "discovered" if row["discovered_capacity"]
+                                  else "conservative_default")
         return row
 
     def check_accounts(self, account_id=None, *, due_only=False):

@@ -611,7 +611,7 @@ class XtreamParsingTest(unittest.TestCase):
         url = build_stream_url(cfg, "55/6", "ts")
         self.assertEqual(
             url,
-            "http://provider.example:8080/live/user%20name/p%40ss%2Fword/55%2F6.ts",
+            "http://provider.example:8080/user%20name/p%40ss%2Fword/55%2F6.ts",
         )
         diagnostic = f"raw=user name:p@ss/word url={url}"
         redacted = redact_credentials(diagnostic, cfg)

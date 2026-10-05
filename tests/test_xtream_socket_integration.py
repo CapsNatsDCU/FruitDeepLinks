@@ -36,6 +36,7 @@ class SocketIntegrationTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.path = self.root / 'fruit.db'
         self.active = 0
+        self.redirects = 0
         self.lock = threading.Lock()
         owner = self
 
@@ -52,6 +53,12 @@ class SocketIntegrationTests(unittest.TestCase):
                     self.send_header('Content-Type', 'application/json')
                     self.end_headers()
                     self.wfile.write(b'{"user_info":{"auth":1,"status":"Active","max_connections":"1"}}')
+                    return
+                if path.endswith('/324969.ts') and path != '/media/324969.ts':
+                    owner.redirects += 1
+                    self.send_response(302)
+                    self.send_header('Location', '/media/324969.ts?token=fixture')
+                    self.end_headers()
                     return
                 if path.endswith('101.ts'):
                     self.send_response(200)
@@ -96,7 +103,7 @@ class SocketIntegrationTests(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
         with sqlite3.connect(self.path) as conn:
-            for index, stream in enumerate(('100', '101')):
+            for index, stream in enumerate(('100', '101', '324969')):
                 create_channel(conn, {'stream_id': stream, 'name': 'Fixture'}, category_id='10', category_name='Fixtures', channel_number=str(index + 1))
         self.server = make_server('127.0.0.1', 0, create_app(), threaded=True)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -134,6 +141,18 @@ class SocketIntegrationTests(unittest.TestCase):
         finally:
             for response in streams:
                 response.close()
+        self.until(lambda: self.pool.status()['active'] == 0 and self.active == 0)
+
+    def test_root_path_redirect_is_followed_and_hidden_from_client(self):
+        response = requests.get(self.base + '/xtream/channel/3/stream', stream=True, timeout=10)
+        try:
+            self.assertEqual(200, response.status_code)
+            self.assertEqual(b'\x47' * 188, response.raw.read(188))
+            self.assertEqual(1, self.redirects)
+            self.assertNotIn('Location', response.headers)
+            self.assertEqual(1, self.pool.status()['active'])
+        finally:
+            response.close()
         self.until(lambda: self.pool.status()['active'] == 0 and self.active == 0)
 
     def test_real_hls_remux_copies_playable_media_and_releases_process(self):

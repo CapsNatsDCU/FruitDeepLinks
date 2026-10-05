@@ -200,7 +200,7 @@ class XtreamLanePipelineTest(unittest.TestCase):
         response.close()
         self.assertEqual(
             upstream.get.call_args.args[0],
-            "http://provider.example:8080/live/demo%20user/secret%2Fpass/500.ts",
+            "http://provider.example:8080/demo%20user/secret%2Fpass/500.ts",
         )
         self.assertEqual(response.headers["Cache-Control"], "no-store")
 
@@ -240,7 +240,7 @@ class XtreamLanePipelineTest(unittest.TestCase):
         response.close()
         self.assertEqual(
             upstream.get.call_args.args[0],
-            "http://provider.example:8080/live/demo%20user/secret%2Fpass/500.ts",
+            "http://provider.example:8080/demo%20user/secret%2Fpass/500.ts",
         )
 
 

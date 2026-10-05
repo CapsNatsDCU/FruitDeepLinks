@@ -79,7 +79,7 @@ class AccountConfigTests(unittest.TestCase):
                "XTREAM_USERNAME": "private user?#", "XTREAM_PASSWORD": "secret/pass&"}
         accounts = load_accounts(environ=env)
         self.assertEqual(["legacy"], [a.id for a in accounts])
-        self.assertEqual("http://provider.example/live/private%20user%3F%23/secret%2Fpass%26/55%2F6.ts",
+        self.assertEqual("http://provider.example/private%20user%3F%23/secret%2Fpass%26/55%2F6.ts",
                          build_stream_url(accounts[0].config, "55/6"))
         self.assertNotIn("secret", repr(accounts))
         self.assertNotIn("private user", repr(accounts[0].config))
@@ -145,8 +145,8 @@ class AccountConfigTests(unittest.TestCase):
         config = load_accounts(environ=pool_environment())[0].config
         for payload, maximum, health in [
             ({"user_info": {"auth": 1, "status": "Active", "max_connections": "4"}}, 4, "healthy"),
-            ({"user_info": {"auth": 1, "max_connections": "0"}}, None, "healthy"),
-            ({"user_info": {"auth": 1, "max_connections": "bad"}}, None, "healthy"),
+            ({"user_info": {"auth": 1, "max_connections": "0"}}, None, "unreachable"),
+            ({"user_info": {"auth": 1, "max_connections": "bad"}}, None, "unreachable"),
             ({"user_info": {"auth": 0, "max_connections": "4"}}, None, "unhealthy"),
             ({"user_info": {"status": "Expired", "max_connections": "4"}}, None, "unhealthy"),
             ([], None, "unreachable"), ({"user_info": []}, None, "unreachable"),
@@ -163,7 +163,7 @@ class AccountConfigTests(unittest.TestCase):
         config = load_accounts(environ=pool_environment())[0].config
         session = Mock()
         session.get.side_effect = OSError("provider unavailable")
-        runner = Mock(return_value=Mock(returncode=0, stdout='{"user_info":{"auth":1,"max_connections":"4"}}'))
+        runner = Mock(return_value=Mock(returncode=0, stdout='{"user_info":{"auth":1,"status":"Active","max_connections":"4"}}'))
         client = XtreamClient(config, session=session, subprocess_runner=runner)
         self.assertEqual(4, client.get_account_max_connections())
         self.assertEqual("healthy", client.last_account_check["health"])
@@ -229,8 +229,8 @@ class AccountConfigTests(unittest.TestCase):
         runner = Mock()
         client = XtreamClient(config, session=session, subprocess_runner=runner)
         self.assertIsNone(client.get_account_max_connections())
-        self.assertEqual("healthy", client.last_account_check["health"])
-        runner.assert_not_called()
+        self.assertEqual("unreachable", client.last_account_check["health"])
+        runner.assert_called_once()
 
     def test_account_check_reports_safe_http_and_curl_failures(self):
         config = load_accounts(environ=pool_environment())[0].config
@@ -308,14 +308,15 @@ class PoolTests(unittest.TestCase):
     def test_different_capacities_disabled_and_override_survive_checks(self):
         env = pool_environment(account_rows((2, 1, 4)))
         pool = XtreamPool(self.path, env, client_factory=HealthyAccountClient)
-        self.assertEqual(7, pool.check_accounts()["capacity"])
+        self.assertEqual(3, pool.check_accounts()["capacity"])
         pool.update("account_1", {"enabled": False})
-        self.assertEqual(6, pool.status()["capacity"])
+        self.assertEqual(2, pool.status()["capacity"])
         pool.update("account_0", {"capacity_override": 3, "label": "Recorder"})
         status = pool.check_accounts()
-        self.assertEqual(7, status["capacity"])
+        self.assertEqual(2, status["capacity"])
         self.assertEqual(3, status["accounts"][0]["configured_override"])
         self.assertEqual(1, status["accounts"][0]["discovered_capacity"])
+        self.assertEqual("provider_limit", status["accounts"][0]["capacity_source"])
 
     def test_discovered_limit_and_conservative_unknown_limit(self):
         rows = account_rows((None,))

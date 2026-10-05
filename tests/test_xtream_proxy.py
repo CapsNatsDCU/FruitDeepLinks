@@ -44,6 +44,9 @@ class StreamProxyTests(unittest.TestCase):
             self.assertEqual(1, upstream.reads)
             self.assertEqual(1, self.pool.status()["active"])
             self.assertTrue(session.get.call_args.kwargs["stream"])
+            self.assertTrue(session.get.call_args.kwargs["allow_redirects"])
+            self.assertEqual("http://provider.example:8080/private-user-0/private-password%2F0/437219.ts",
+                             session.get.call_args.args[0])
             self.assertEqual((10, 60), session.get.call_args.kwargs["timeout"])
             response.close()
         self.assertTrue(upstream.closed)
@@ -158,6 +161,23 @@ class StreamProxyTests(unittest.TestCase):
         state = self.pool.status()
         self.assertEqual(0, state["active"])
         self.assertTrue(all(a["health"] == "healthy" for a in state["accounts"]))
+
+    def test_missing_stream_retries_another_account_with_its_own_credentials(self):
+        first = FakeMedia(status=404)
+        second = FakeMedia([b"\x47" * 188])
+        session = Mock()
+        session.get.side_effect = [first, second]
+        with patch("server.services.xtream_proxy.requests.Session", return_value=session):
+            response = self.client.get('/stream', buffered=False)
+            self.assertEqual(200, response.status_code)
+            self.assertEqual(b"\x47" * 188, response.get_data())
+            response.close()
+        self.assertEqual([
+            "http://provider.example:8080/private-user-0/private-password%2F0/437219.ts",
+            "http://provider.example:8080/private-user-1/private-password%2F1/437219.ts",
+        ], [call.args[0] for call in session.get.call_args_list])
+        self.assertTrue(first.closed)
+        self.assertEqual(0, self.pool.status()["active"])
 
     def test_head_and_range_probe_cannot_leak_upstream_headers(self):
         with mocked_provider() as session:

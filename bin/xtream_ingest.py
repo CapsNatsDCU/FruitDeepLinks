@@ -297,7 +297,7 @@ def redact_credentials(text: Any, config: XtreamConfig) -> str:
 
 def build_stream_url(config: XtreamConfig, stream_id: Any,
                      extension: Any = "ts") -> str:
-    """Construct a standard Xtream live URL with encoded path segments."""
+    """Construct this provider's root-path live URL with encoded segments."""
     config.validate(require_categories=False)
     stream_id_text = str(stream_id).strip()
     if not stream_id_text:
@@ -306,7 +306,7 @@ def build_stream_url(config: XtreamConfig, stream_id: Any,
     if not _SAFE_EXTENSION_RE.fullmatch(extension_text):
         extension_text = "ts"
     return (
-        f"{config.server_url}/live/{quote(config.username, safe='')}/"
+        f"{config.server_url}/{quote(config.username, safe='')}/"
         f"{quote(config.password, safe='')}/{quote(stream_id_text, safe='')}."
         f"{extension_text.lower()}"
     )
@@ -564,9 +564,9 @@ class XtreamClient:
         if not isinstance(info, dict):
             return None, {"health": "unreachable", "error": "Malformed provider account response"}
         status = str(info.get("status", "")).lower()
-        if str(info.get("auth", "1")) == "0" or status in {"expired", "disabled", "banned", "inactive"}:
+        if str(info.get("auth", "")) == "0" or status in {"expired", "disabled", "banned", "inactive"}:
             return None, {"health": "unhealthy", "error": "Account authentication or subscription rejected"}
-        if str(info.get("auth", "")) != "1" and status != "active":
+        if str(info.get("auth", "")) != "1" or status != "active":
             return None, {"health": "unreachable", "error": "Provider did not confirm account authorization"}
         check = {"health": "healthy", "error": None}
         try:

@@ -260,7 +260,7 @@ class XtreamF1LanePipelineTest(unittest.TestCase):
         self.assertNotIn("Location", response.headers)
         response.close()
         self.assertEqual(
-            "http://provider.example:8080/live/demo%20user/secret%2Fpass/3001.ts",
+            "http://provider.example:8080/demo%20user/secret%2Fpass/3001.ts",
             upstream.get.call_args.args[0],
         )
 

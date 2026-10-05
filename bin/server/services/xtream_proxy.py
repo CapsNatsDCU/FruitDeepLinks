@@ -103,8 +103,8 @@ def proxy_stream(stream_id, source, extension="ts", *, pool=None):
             from xtream_logging import protect_http_logs
             protect_http_logs(lease.account.config)
             session = requests.Session()
-            # The standard Xtream .ts endpoint keeps the whole session on one
-            # HTTP connection, even when catalogue metadata advertises m3u8.
+            # This provider's root-path .ts endpoint redirects to MPEG-TS,
+            # even when catalogue metadata advertises m3u8.
             url = build_stream_url(lease.account.config, stream_id, "ts")
             upstream = session.get(url, stream=True, timeout=(10, _timeout()),
                                    headers={"Accept-Encoding": "identity"}, allow_redirects=True)

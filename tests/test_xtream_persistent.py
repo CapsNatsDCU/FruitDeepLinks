@@ -352,7 +352,7 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
             tuned = self.client.get(f"/xtream/channel/{channel['id']}/stream")
             self.assertEqual(200, tuned.status_code)
             self.assertNotIn("Location", tuned.headers)
-            self.assertEqual("http://provider.example:8080/live/demo%20user/secret%2Fpass/1904224.ts", upstream.get.call_args.args[0])
+            self.assertEqual("http://provider.example:8080/demo%20user/secret%2Fpass/1904224.ts", upstream.get.call_args.args[0])
             tuned.close()
         self.assertEqual("no-store", tuned.headers["Cache-Control"])
         self.assertEqual(200, self.client.head(f"/xtream/channel/{channel['id']}/stream").status_code)

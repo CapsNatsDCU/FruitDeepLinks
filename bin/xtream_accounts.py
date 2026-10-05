@@ -1,7 +1,8 @@
 """Deployment-only Xtream secrets and safe, stable account identities.
 
-One pool represents one provider catalogue: stream/category IDs must mean the
-same thing on every account. SQLite stores only health and operator controls.
+One pool represents accounts for the same provider. Catalog sizes may differ;
+the tune path validates media from the selected account before serving it.
+SQLite stores only health and operator controls.
 """
 from __future__ import annotations
 
