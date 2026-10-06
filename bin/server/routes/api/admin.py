@@ -73,7 +73,8 @@ def health():
 @bp.route("/api/status")
 def api_status():
     stats = get_db_stats()
-    operational = {"live_events": 0, "xtream_enabled": False, "xtream_only": False, "xtream_categories": 0}
+    operational = {"live_events": 0, "xtream_enabled": False, "xtream_only": False, "xtream_categories": 0,
+                   "xtream_transport": "http_proxy" if os.getenv("XTREAM_HTTP_PROXY", "").strip() else "direct"}
     local_ai_failures = []
     try:
         with get_conn() as conn:
