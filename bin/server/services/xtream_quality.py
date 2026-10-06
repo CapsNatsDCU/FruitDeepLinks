@@ -135,4 +135,7 @@ def measure_stream_quality(stream_id, extension="ts", *, pool=None,
             _close(upstream)
             _close(session)
             lease.release(outcome)
-    raise XtreamError("Video resolution could not be measured; check the stream and account pool")
+    raise XtreamError(
+        "Video resolution could not be measured on this attempt; playback accounts were not changed. "
+        "Retry to sample another available account."
+    )
