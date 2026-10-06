@@ -84,7 +84,8 @@ let _persistentSearchScope = 'all';
 let _persistentSearchSequence = 0;
 let _persistentQualityBatch = null;
 let _favoriteState = {teams:[]};
-const QUALITY_BATCH_DELAY_MS = 1500;
+const QUALITY_BATCH_DELAY_MS = 30000;
+let _persistentQualityInFlight = false;
 
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -254,22 +255,28 @@ function persistentResultRows() {
 }
 
 async function requestPersistentQuality(stream) {
-  const data = await persistentRequest('/api/xtream/persistent-channels/quality', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({category_id:stream.category_id, stream_id:stream.stream_id}),
-  });
-  for (const visible of _persistentResults) {
-    if (visible.category_id === stream.category_id && visible.stream_id === stream.stream_id)
-      visible.measured_quality = data.measured_quality;
+  if (_persistentQualityInFlight) throw new Error('Another resolution check is running. Wait for it to finish.');
+  _persistentQualityInFlight = true;
+  try {
+    const data = await persistentRequest('/api/xtream/persistent-channels/quality', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({category_id:stream.category_id, stream_id:stream.stream_id}),
+    });
+    for (const visible of _persistentResults) {
+      if (visible.category_id === stream.category_id && visible.stream_id === stream.stream_id)
+        visible.measured_quality = data.measured_quality;
+    }
+    for (const channel of _persistentChannels) {
+      if (channel.category_id === stream.category_id && channel.stream_id === stream.stream_id)
+        channel.measured_quality = data.measured_quality;
+    }
+    renderPersistentChannels();
+    if (_persistentResults.length && !document.getElementById('persistent-browser').hidden)
+      document.getElementById('persistent-results').innerHTML = persistentResultRows();
+    return data.measured_quality;
+  } finally {
+    _persistentQualityInFlight = false;
   }
-  for (const channel of _persistentChannels) {
-    if (channel.category_id === stream.category_id && channel.stream_id === stream.stream_id)
-      channel.measured_quality = data.measured_quality;
-  }
-  renderPersistentChannels();
-  if (_persistentResults.length && !document.getElementById('persistent-browser').hidden)
-    document.getElementById('persistent-results').innerHTML = persistentResultRows();
-  return data.measured_quality;
 }
 
 async function detectPersistentQuality(index, button) {
@@ -334,19 +341,19 @@ async function detectAllPersistentQuality() {
         try {
           await requestPersistentQuality(stream);
         } catch (err) {
-          failed++;
-          checked++;
           batch.stopped = true;
-          if (err.code === 'capacity_unavailable') {
+          if (err.code === 'capacity_unavailable' || err.code === 'quality_probe_deferred') {
             persistentError(`Quality detection paused: ${err.message}`);
           } else {
+            failed++;
+            checked++;
             persistentError(`Quality detection stopped after one failed stream: ${err.message}`);
           }
           break;
         }
         checked++;
         if (!batch.stopped) {
-          progress.textContent = `Waiting briefly before the next provider check… ${checked} of ${total} results.`;
+          progress.textContent = `Waiting 30 seconds before the next resolution check… ${checked} of ${total} results.`;
           await new Promise(resolve => setTimeout(resolve, QUALITY_BATCH_DELAY_MS));
         }
       }

@@ -8,7 +8,9 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
-from server.services.xtream_quality import measure_stream_quality
+from server.services.xtream_quality import (
+    QualityProbeDeferred, measure_stream_quality, quality_probe_guard,
+)
 from tests.test_xtream_pool import pool_environment
 from tests.xtream_test_helpers import FakeMedia, HealthyAccountClient
 from xtream_ingest import XtreamError
@@ -24,6 +26,51 @@ class QualityProbeTest(unittest.TestCase):
         with patch.dict(os.environ, environment):
             self.pool = XtreamPool(path, environment, client_factory=HealthyAccountClient)
             self.pool.check_accounts()
+
+    def test_independent_guards_serialize_without_blocking_playback(self):
+        with quality_probe_guard(self.pool.db_path):
+            with self.assertRaises(QualityProbeDeferred) as deferred:
+                with quality_probe_guard(self.pool.db_path):
+                    self.fail("A second probe must not run")
+            self.assertIn("running", str(deferred.exception))
+            lease = self.pool.acquire("playback", "persistent:1")
+            lease.release()
+        self.assertEqual(3, self.pool.status()["available"])
+
+    def test_guard_defers_while_an_existing_probe_media_lease_is_live(self):
+        lease = self.pool.acquire("probe", "quality_probe")
+        try:
+            with self.assertRaises(QualityProbeDeferred):
+                with quality_probe_guard(self.pool.db_path):
+                    self.fail("An existing probe media lease must prevent overlap")
+        finally:
+            lease.release()
+
+    def test_successful_guard_pacing_survives_a_new_guard_instance(self):
+        with patch("server.services.xtream_quality.time.time", return_value=100):
+            with quality_probe_guard(self.pool.db_path):
+                pass
+        with patch("server.services.xtream_quality.time.time", return_value=129):
+            with self.assertRaises(QualityProbeDeferred) as deferred:
+                with quality_probe_guard(self.pool.db_path):
+                    self.fail("Probe spacing must be preserved")
+            self.assertEqual(1, deferred.exception.retry_after)
+        with patch("server.services.xtream_quality.time.time", return_value=130):
+            with quality_probe_guard(self.pool.db_path):
+                pass
+
+    def test_failed_guard_pauses_probes_but_not_playback_accounts(self):
+        before = self.pool.status()["accounts"]
+        with patch("server.services.xtream_quality.time.time", return_value=100):
+            with self.assertRaises(RuntimeError):
+                with quality_probe_guard(self.pool.db_path):
+                    raise RuntimeError("Provider failure")
+        with patch("server.services.xtream_quality.time.time", return_value=101):
+            with self.assertRaises(QualityProbeDeferred) as deferred:
+                with quality_probe_guard(self.pool.db_path):
+                    self.fail("Failed probes must pause subsequent probes")
+            self.assertEqual(119, deferred.exception.retry_after)
+        self.assertEqual(before, self.pool.status()["accounts"])
 
     def test_probe_passes_only_media_to_ffprobe_and_releases_capacity(self):
         media = FakeMedia([b"\x47" * 188] * 3)

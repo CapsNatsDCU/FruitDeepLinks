@@ -277,6 +277,13 @@ EPG, and media requests, without proxying other Fruit integrations. The
 [Channels DVR middleware guide](docs/CHANNELS_DVR_MIDDLEWARE.md) has the TrueNAS
 network setup and playback verification steps.
 
+Resolution checks run one at a time across Fruit workers and browser tabs.
+Checks wait 30 seconds after a success; a failure pauses new checks for two
+minutes. The API returns HTTP 429 with `Retry-After` while paused. These local
+limits reduce optional probe traffic; they do not guarantee provider recovery.
+Playback account health and slots are unchanged by a failed resolution check.
+Fruit cannot track streams opened directly by an external Channels playlist.
+
 The [Channels DVR middleware guide](docs/CHANNELS_DVR_MIDDLEWARE.md) includes the
 account configuration example, migration, Docker/TrueNAS update commands, proxy
 behavior, tests, limitations, and the parallel testing checklist for safely

@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -479,12 +480,13 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
             })
         self.assertEqual(200, result.status_code, result.get_data(as_text=True))
         self.assertEqual(720, result.get_json()["measured_quality"]["height"])
-        probe.assert_called_once_with("1904224", "ts")
+        probe.assert_called_once_with("1904224", "ts", guarded=False)
         search = self.client.post("/api/xtream/persistent-channels/search", query_string={"q": "Washington"})
         self.assertEqual(720, search.get_json()["items"][0]["measured_quality"]["height"])
-        invalid = self.client.post("/api/xtream/persistent-channels/quality", json={
-            "category_id": "410", "stream_id": "unknown",
-        })
+        with patch("server.services.xtream_quality.time.time", return_value=time.time() + 31):
+            invalid = self.client.post("/api/xtream/persistent-channels/quality", json={
+                "category_id": "410", "stream_id": "unknown",
+            })
         self.assertEqual(400, invalid.status_code)
 
     def test_configured_channel_quality_uses_saved_identity_without_catalog_requests(self):
@@ -502,8 +504,23 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
                 "category_id": "410", "stream_id": "1904224",
             })
         self.assertEqual(200, result.status_code, result.get_data(as_text=True))
-        probe.assert_called_once_with("1904224", "ts")
+        probe.assert_called_once_with("1904224", "ts", guarded=False)
         self.assertEqual(720, result.get_json()["measured_quality"]["height"])
+
+    def test_probe_pacing_rejects_before_catalog_or_media_requests(self):
+        from server.services.xtream_quality import quality_probe_guard
+        with quality_probe_guard(self.db_path):
+            pass
+        with (patch("server.routes.api.xtream._configured_client") as catalog,
+              patch("server.services.xtream_quality.measure_stream_quality") as media):
+            result = self.client.post("/api/xtream/persistent-channels/quality", json={
+                "category_id": "410", "stream_id": "1904224",
+            })
+        self.assertEqual(429, result.status_code)
+        self.assertEqual("quality_probe_deferred", result.get_json()["code"])
+        self.assertEqual("30", result.headers["Retry-After"])
+        catalog.assert_not_called()
+        media.assert_not_called()
 
     def test_quality_endpoint_reports_busy_pool_without_a_retry_storm(self):
         with patch("server.services.xtream_quality.measure_stream_quality",

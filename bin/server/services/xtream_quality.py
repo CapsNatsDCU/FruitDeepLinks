@@ -2,9 +2,14 @@
 from __future__ import annotations
 
 import json
+import fcntl
+import math
+import os
 import subprocess
 import time
+from contextlib import contextmanager
 from fractions import Fraction
+from pathlib import Path
 
 import requests
 
@@ -20,6 +25,58 @@ from xtream_transport import configure_session
 MAX_SAMPLE_BYTES = 4 * 1024 * 1024
 MAX_SAMPLE_SECONDS = 15
 MAX_PROBE_ACCOUNTS = 1
+PROBE_INTERVAL_SECONDS = 30
+FAILED_PROBE_PAUSE_SECONDS = 120
+
+
+class QualityProbeDeferred(XtreamError):
+    def __init__(self, retry_after, *, busy=False):
+        self.retry_after = max(1, math.ceil(retry_after))
+        message = ("Another resolution check is running." if busy else
+                   "Resolution checks are paused to limit provider requests.")
+        super().__init__(f"{message} Try again in {self.retry_after} seconds.")
+
+
+@contextmanager
+def quality_probe_guard(db_path):
+    """Serialize optional probes across workers; preserve pacing across restarts.
+
+    This is separate from playback leases and does not change account health.
+    The route holds the guard during catalog validation too, before any HTTP.
+    """
+    path = Path(db_path)
+    directory = path.parent / (path.name + ".xtream-locks")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(directory / "quality-probe-gate", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise QualityProbeDeferred(5, busy=True) from None
+        # A curl/FFmpeg child can retain its media lease after its Python
+        # worker exits. Reap only unlocked leases before allowing a new probe.
+        if any(lease["source"] == "quality_probe"
+               for lease in XtreamPool(path).status()["leases"]):
+            raise QualityProbeDeferred(5, busy=True)
+        try:
+            next_allowed = float(os.read(fd, 128) or b"0")
+        except ValueError:
+            next_allowed = 0
+        remaining = next_allowed - time.time()
+        if math.isfinite(remaining) and remaining > 0:
+            raise QualityProbeDeferred(remaining)
+        succeeded = False
+        try:
+            yield
+            succeeded = True
+        finally:
+            delay = PROBE_INTERVAL_SECONDS if succeeded else FAILED_PROBE_PAUSE_SECONDS
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, str(time.time() + delay).encode("ascii"))
+            os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _parse_probe_output(output: bytes) -> dict:
@@ -60,9 +117,15 @@ def _probe_bytes(sample: bytes, runner=subprocess.run) -> dict:
 
 
 def measure_stream_quality(stream_id, extension="ts", *, pool=None,
-                           session_factory=requests.Session, runner=subprocess.run) -> dict:
+                           session_factory=requests.Session, runner=subprocess.run,
+                           guarded=True) -> dict:
     """Reserve one playback slot, sample media, then release it before returning."""
     pool = pool or XtreamPool(resolve_db_path())
+    if guarded:
+        with quality_probe_guard(pool.db_path):
+            return measure_stream_quality(stream_id, extension, pool=pool,
+                                          session_factory=session_factory,
+                                          runner=runner, guarded=False)
     # A quality check is diagnostic. Do not recheck every account or try the
     # entire pool when a single stream cannot be measured; playback must keep
     # its slots and health state even if this optional sample fails.
