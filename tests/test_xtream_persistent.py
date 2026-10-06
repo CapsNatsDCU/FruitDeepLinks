@@ -487,6 +487,24 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
         })
         self.assertEqual(400, invalid.status_code)
 
+    def test_configured_channel_quality_uses_saved_identity_without_catalog_requests(self):
+        created = self.client.post("/api/xtream/persistent-channels", json={
+            "category_id": "410", "stream_id": "1904224",
+            "display_name": "Washington Nationals", "channel_number": "22",
+        })
+        self.assertEqual(201, created.status_code)
+        with (patch("server.routes.api.xtream._configured_client",
+                    side_effect=AssertionError("Catalog must not be queried")),
+              patch("server.services.xtream_quality.measure_stream_quality", return_value={
+                  "width": 1280, "height": 720, "fps": 60.0, "codec": "h264",
+              }) as probe):
+            result = self.client.post("/api/xtream/persistent-channels/quality", json={
+                "category_id": "410", "stream_id": "1904224",
+            })
+        self.assertEqual(200, result.status_code, result.get_data(as_text=True))
+        probe.assert_called_once_with("1904224", "ts")
+        self.assertEqual(720, result.get_json()["measured_quality"]["height"])
+
     def test_quality_endpoint_reports_busy_pool_without_a_retry_storm(self):
         with patch("server.services.xtream_quality.measure_stream_quality",
                    side_effect=PoolUnavailable("All Xtream playback slots are occupied or unavailable")):

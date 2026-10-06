@@ -62,7 +62,7 @@ class QualityProbeTest(unittest.TestCase):
         self.assertIn(".ts", fallback.call_args.args[0])
         curl.close.assert_called_once()
 
-    def test_failed_curl_retry_cools_down_account_and_releases_lease(self):
+    def test_failed_probe_uses_one_account_without_cooling_down_playback(self):
         session = Mock()
         session.get.return_value = FakeMedia(status=403)
         curl = Mock()
@@ -73,10 +73,11 @@ class QualityProbeTest(unittest.TestCase):
                                        session_factory=lambda: session)
         state = self.pool.status()
         self.assertEqual(0, state["active"])
-        self.assertTrue(all(account["health"] == "degraded" for account in state["accounts"]))
-        self.assertEqual(0, state["available"])
-        self.assertEqual(3, session.get.call_count)
-        curl.close.assert_called()
+        self.assertTrue(all(account["health"] == "healthy" for account in state["accounts"]))
+        self.assertEqual(3, state["available"])
+        self.assertEqual(1, session.get.call_count)
+        self.assertEqual(1, curl.close.call_count)
+        self.assertEqual("quality_probe", state["recent_streams"][0]["source"])
 
 
 if __name__ == "__main__":

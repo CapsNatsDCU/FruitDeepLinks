@@ -19,6 +19,7 @@ from xtream_transport import configure_session
 
 MAX_SAMPLE_BYTES = 4 * 1024 * 1024
 MAX_SAMPLE_SECONDS = 15
+MAX_PROBE_ACCOUNTS = 1
 
 
 def _parse_probe_output(output: bytes) -> dict:
@@ -62,9 +63,13 @@ def measure_stream_quality(stream_id, extension="ts", *, pool=None,
                            session_factory=requests.Session, runner=subprocess.run) -> dict:
     """Reserve one playback slot, sample media, then release it before returning."""
     pool = pool or XtreamPool(resolve_db_path())
-    pool.check_accounts(due_only=True)
+    # A quality check is diagnostic. Do not recheck every account or try the
+    # entire pool when a single stream cannot be measured; playback must keep
+    # its slots and health state even if this optional sample fails.
+    if any(account["health"] == "unknown" for account in pool.status()["accounts"]):
+        pool.check_accounts(due_only=True)
     excluded = set()
-    while len(excluded) < len(pool.accounts):
+    while len(excluded) < min(MAX_PROBE_ACCOUNTS, len(pool.accounts)):
         try:
             lease = pool.acquire(stream_id, "quality_probe", excluded=excluded)
         except PoolUnavailable:
@@ -130,6 +135,4 @@ def measure_stream_quality(stream_id, extension="ts", *, pool=None,
             _close(upstream)
             _close(session)
             lease.release(outcome)
-        if account_failure:
-            pool.fail_account(lease.account.id)
     raise XtreamError("Video resolution could not be measured; check the stream and account pool")

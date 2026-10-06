@@ -335,11 +335,14 @@ async function detectAllPersistentQuality() {
           await requestPersistentQuality(stream);
         } catch (err) {
           failed++;
+          checked++;
+          batch.stopped = true;
           if (err.code === 'capacity_unavailable') {
-            batch.stopped = true;
             persistentError(`Quality detection paused: ${err.message}`);
-            break;
+          } else {
+            persistentError(`Quality detection stopped after one failed stream: ${err.message}`);
           }
+          break;
         }
         checked++;
         if (!batch.stopped) {

@@ -479,21 +479,33 @@ def api_xtream_persistent_quality():
     _ensure_database()
     try:
         with get_conn() as conn:
-            _, client = _configured_client(conn)
-            try:
-                categories = client.get_live_categories()
-                if category_id not in {str(row.get("category_id")) for row in categories}:
-                    raise PersistentChannelError("The selected category is not currently available")
-                stream = next((row for row in client.get_live_streams(category_id)
-                               if str(row.get("stream_id")) == stream_id), None)
-                if stream is None:
-                    raise PersistentChannelError("The selected stream is not currently available")
-            finally:
-                session = getattr(client, "session", None)
-                if session is not None:
-                    session.close()
+            ensure_persistent_schema(conn)
+            saved = conn.execute(
+                "SELECT stream_extension FROM xtream_persistent_channels "
+                "WHERE category_id=? AND stream_id=?",
+                (category_id, stream_id),
+            ).fetchone()
+            if saved is not None:
+                extension = saved[0]
+            else:
+                # Search results are not yet configured. Verify their identity
+                # with the provider before accepting an arbitrary stream ID.
+                _, client = _configured_client(conn)
+                try:
+                    categories = client.get_live_categories()
+                    if category_id not in {str(row.get("category_id")) for row in categories}:
+                        raise PersistentChannelError("The selected category is not currently available")
+                    stream = next((row for row in client.get_live_streams(category_id)
+                                   if str(row.get("stream_id")) == stream_id), None)
+                    if stream is None:
+                        raise PersistentChannelError("The selected stream is not currently available")
+                    extension = stream.get("container_extension")
+                finally:
+                    session = getattr(client, "session", None)
+                    if session is not None:
+                        session.close()
         from server.services.xtream_quality import measure_stream_quality
-        measured = measure_stream_quality(stream_id, stream.get("container_extension") or "ts")
+        measured = measure_stream_quality(stream_id, extension or "ts")
         with get_conn() as conn:
             saved = save_stream_quality(conn, category_id, stream_id, measured)
         return jsonify({"status": "success", "category_id": category_id,
