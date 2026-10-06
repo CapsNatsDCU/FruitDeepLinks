@@ -338,11 +338,13 @@ class XtreamParsingTest(unittest.TestCase):
         workers = []
 
         class Worker:
-            def __init__(self):
+            def __init__(self, initial):
                 self.session = Mock()
+                self.initial = initial
 
             def get_live_streams(self, category_id):
-                barrier.wait()
+                if self.initial:
+                    barrier.wait()
                 if category_id == "20":
                     raise XtreamError("Category request failed")
                 return [{"stream_id": "55", "name": "NHL game"}]
@@ -356,7 +358,7 @@ class XtreamParsingTest(unittest.TestCase):
             client.get_short_epg = lambda _stream_id: []
 
             def make_worker():
-                worker = Worker()
+                worker = Worker(initial=len(workers) < 3)
                 workers.append(worker)
                 return worker
 
@@ -369,7 +371,7 @@ class XtreamParsingTest(unittest.TestCase):
         self.assertEqual(["10"], list(streams))
         self.assertEqual(["20"], diagnostics["failed_category_ids"])
         self.assertEqual(["10"], diagnostics["fetched_category_ids"])
-        self.assertEqual(3, len(workers))
+        self.assertEqual(4, len(workers))
         for worker in workers:
             worker.session.close.assert_called_once_with()
 
@@ -408,6 +410,44 @@ class XtreamParsingTest(unittest.TestCase):
             client.session.close()
         self.assertEqual(["10", "20"], list(streams))
         self.assertLess(stages.index(("ready", "10")), stages.index(("epg", "20")))
+
+    def test_transient_category_failure_retries_after_other_categories(self):
+        calls = []
+        lock = threading.Lock()
+
+        class Worker:
+            def __init__(self):
+                self.session = Mock()
+
+            def get_live_streams(self, category_id):
+                with lock:
+                    calls.append(category_id)
+                    attempt = calls.count(category_id)
+                if category_id == "20" and attempt == 1:
+                    raise XtreamError("Provider timed out")
+                return [{"stream_id": category_id, "name": "NHL game"}]
+
+            def get_short_epg(self, _stream_id):
+                return []
+
+        selected = config(category_ids=("10", "20", "30"))
+        client = XtreamClient(selected)
+        try:
+            client.get_live_categories = lambda: [
+                {"category_id": category_id, "category_name": "Sports"}
+                for category_id in selected.category_ids
+            ]
+            client.metadata_worker = Worker
+            diagnostics = {}
+            with patch("xtream_ingest.time.sleep") as pause:
+                _, streams = fetch_snapshot(client, selected, diagnostics)
+        finally:
+            client.session.close()
+        self.assertEqual(["10", "20", "30"], list(streams))
+        self.assertEqual([], diagnostics["failed_category_ids"])
+        self.assertEqual(2, calls.count("20"))
+        self.assertLess(calls.index("30"), len(calls) - 1)
+        pause.assert_called_with(5)
 
     def test_repeated_category_failures_log_safe_reasons_and_back_off(self):
         class Worker:

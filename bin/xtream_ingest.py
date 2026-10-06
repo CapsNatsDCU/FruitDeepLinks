@@ -1599,6 +1599,8 @@ def fetch_snapshot(client: XtreamClient, config: XtreamConfig,
             with (ThreadPoolExecutor(max_workers=fetch_workers) as fetch_executor,
                     ThreadPoolExecutor(max_workers=1) as epg_executor):
                 remaining_categories = list(available_selected)
+                retry_categories = []
+                retried = set()
                 pending_fetch = {}
                 pending_epg = {}
                 backoff_pending = False
@@ -1618,7 +1620,7 @@ def fetch_snapshot(client: XtreamClient, config: XtreamConfig,
 
                 for _ in range(fetch_workers):
                     submit_next()
-                while pending_fetch or pending_epg or remaining_categories:
+                while pending_fetch or pending_epg or remaining_categories or retry_categories:
                     if pending_fetch or pending_epg:
                         done, _ = wait(set(pending_fetch) | set(pending_epg), return_when=FIRST_COMPLETED)
                     else:
@@ -1632,7 +1634,13 @@ def fetch_snapshot(client: XtreamClient, config: XtreamConfig,
                             pending_epg[epg_executor.submit(enrich_category, category_id, rows)] = category_id
                             consecutive_failures = 0
                         except XtreamError as exc:
-                            failed_fetch(category_id, exc)
+                            if category_id not in retried:
+                                retry_categories.append(category_id)
+                                if progress_reporter:
+                                    progress_reporter("xtream_category_update", category_id=category_id,
+                                                      status="queued", detail="Retrying after other categories")
+                            else:
+                                failed_fetch(category_id, exc)
                             consecutive_failures += 1
                         if consecutive_failures >= CATEGORY_FAILURE_BACKOFF_AFTER and remaining_categories:
                             backoff_pending = True
@@ -1644,6 +1652,16 @@ def fetch_snapshot(client: XtreamClient, config: XtreamConfig,
                                          key=lambda item: selected_order[pending_epg[item]]):
                         category_id = pending_epg.pop(future)
                         ready(category_id, future.result())
+                    if not pending_fetch and not remaining_categories and retry_categories:
+                        # A transient provider stall may clear while later
+                        # categories are fetched. Retry once at the tail,
+                        # rather than immediately hammering the same endpoint.
+                        time.sleep(CATEGORY_FAILURE_BACKOFF_SECONDS)
+                        for _ in range(min(fetch_workers, len(retry_categories))):
+                            category_id = retry_categories.pop(0)
+                            retried.add(category_id)
+                            started_fetch(category_id)
+                            pending_fetch[fetch_executor.submit(fetch_with_worker, category_id)] = category_id
                     if backoff_pending and not pending_fetch and not pending_epg:
                         # Complete every ready category before provider pacing
                         # pauses the next fetch submission.
@@ -1654,6 +1672,7 @@ def fetch_snapshot(client: XtreamClient, config: XtreamConfig,
         finally:
             epg_client.session.close()
     else:
+        retry_categories = []
         for category_id in available_selected:
             started_fetch(category_id)
             try:
@@ -1665,10 +1684,26 @@ def fetch_snapshot(client: XtreamClient, config: XtreamConfig,
                 ready(category_id, rows)
                 consecutive_failures = 0
             except XtreamError as exc:
-                failed_fetch(category_id, exc)
+                retry_categories.append(category_id)
+                if progress_reporter:
+                    progress_reporter("xtream_category_update", category_id=category_id,
+                                      status="queued", detail="Retrying after other categories")
                 consecutive_failures += 1
                 if consecutive_failures >= CATEGORY_FAILURE_BACKOFF_AFTER and len(streams) + len(failed) < len(available_selected):
                     back_off_if_needed()
+        if retry_categories:
+            time.sleep(CATEGORY_FAILURE_BACKOFF_SECONDS)
+        for category_id in retry_categories:
+            started_fetch(category_id)
+            try:
+                rows = client.get_live_streams(category_id)
+                fetched(category_id, rows)
+                _enrich_streams_with_epg(client, {category_id: rows},
+                                         progress_callback=report_epg,
+                                         epg_cache=epg_cache, provider_state=epg_state)
+                ready(category_id, rows)
+            except XtreamError as exc:
+                failed_fetch(category_id, exc)
     if not streams:
         raise XtreamError("Could not fetch any currently available configured Xtream categories")
     # Reconciliation and diagnostics retain configured order, even when network
