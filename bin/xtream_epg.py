@@ -89,7 +89,8 @@ def _provider_xmltv_one(client, wanted, config):
     """Parse one account's XMLTV response, retaining explicitly wanted IDs."""
     result = {guide: [] for guide in wanted}
     response = None
-    session = client.session if config is client.config else requests.Session()
+    from xtream_transport import configure_session
+    session = client.session if config is client.config else configure_session(requests.Session())
     try:
         response = session.get(f"{config.server_url}/xmltv.php",
                                       params={"username": config.username, "password": config.password},

@@ -271,6 +271,12 @@ Server URL setting in the UI. Settings → **Xtream Account Pool** shows capacit
 health, active streams and account controls. Persistent and dynamic Xtream tunes
 use the same atomic allocator; unavailable capacity returns 503.
 
+If Xtream must use a Gluetun HTTP proxy, set `XTREAM_HTTP_PROXY=http://HOST:PORT`
+in Fruit's container environment. It applies to Xtream account checks, catalogue,
+EPG, and media requests, without proxying other Fruit integrations. The
+[Channels DVR middleware guide](docs/CHANNELS_DVR_MIDDLEWARE.md) has the TrueNAS
+network setup and playback verification steps.
+
 The [Channels DVR middleware guide](docs/CHANNELS_DVR_MIDDLEWARE.md) includes the
 account configuration example, migration, Docker/TrueNAS update commands, proxy
 behavior, tests, limitations, and the parallel testing checklist for safely

@@ -5,15 +5,26 @@ the authenticated URL over stdin so it is absent from process arguments/logs.
 """
 from __future__ import annotations
 
+import os
 import select
 import subprocess
 
 from xtream_process import close_media_process
+from xtream_transport import proxy_url
 
 
 class HLSStream:
     def __init__(self, url: str, idle_timeout: float, lease_fd: int):
         self.idle_timeout = idle_timeout
+        proxy = proxy_url()
+        child_env = None
+        if proxy:
+            # FFmpeg's HLS demuxer opens nested playlist/segment URLs itself.
+            # Its HTTP protocol reads http_proxy from the child environment;
+            # an -http_proxy input option does not reach those nested requests.
+            child_env = {**os.environ, "http_proxy": proxy, "https_proxy": proxy,
+                         "HTTP_PROXY": proxy, "HTTPS_PROXY": proxy,
+                         "no_proxy": "", "NO_PROXY": ""}
         self.process = subprocess.Popen(
             ["ffmpeg", "-nostats", "-hide_banner", "-loglevel", "quiet",
              "-protocol_whitelist", "pipe,http,https,tcp,tls,crypto",
@@ -22,6 +33,7 @@ class HLSStream:
              "-c", "copy", "-f", "mpegts", "pipe:1"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             bufsize=0,
+            **({"env": child_env} if child_env else {}),
             # Keep the reservation alive if the Python worker dies before
             # FFmpeg notices its broken stdout pipe or upstream idle timeout.
             pass_fds=(lease_fd,),

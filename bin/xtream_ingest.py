@@ -29,6 +29,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 
+from xtream_transport import configure_session, curl_proxy_args
+
 try:
     from db.preferences import get_setting
 except ImportError:
@@ -331,7 +333,7 @@ class XtreamClient:
         self.metadata_configs = (config,)
         from xtream_logging import protect_http_logs
         protect_http_logs(config)
-        self.session = session or requests.Session()
+        self.session = configure_session(session or requests.Session())
         self.timeout = timeout
         if catalog_timeout is None:
             raw_catalog_timeout = os.getenv(
@@ -403,7 +405,7 @@ class XtreamClient:
         if stream_id is not None:
             params["stream_id"] = str(stream_id)
         # A fallback account must not inherit cookies from the first account.
-        session = self.session if config is self.config else requests.Session()
+        session = self.session if config is self.config else configure_session(requests.Session())
         self._last_request_failure = None
         response = None
         try:
@@ -463,6 +465,7 @@ class XtreamClient:
             "-L",
             "--max-time",
             str(timeout),
+            *curl_proxy_args(),
             "--get",
             f"{config.server_url}/player_api.php",
             "--config", "-",

@@ -14,6 +14,7 @@ from xtream_curl import CurlStream
 from xtream_hls import HLSStream
 from xtream_ingest import XtreamError, build_stream_url
 from xtream_pool import PoolUnavailable, XtreamPool
+from xtream_transport import configure_session
 
 
 MAX_SAMPLE_BYTES = 4 * 1024 * 1024
@@ -77,7 +78,7 @@ def measure_stream_quality(stream_id, extension="ts", *, pool=None,
         try:
             from xtream_logging import protect_http_logs
             protect_http_logs(lease.account.config)
-            session = session_factory()
+            session = configure_session(session_factory())
             url = build_stream_url(lease.account.config, stream_id, "ts")
             upstream = session.get(
                 url,

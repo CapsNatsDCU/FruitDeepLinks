@@ -12,6 +12,7 @@ from xtream_curl import CurlStream
 from xtream_hls import HLSStream
 from xtream_ingest import build_stream_url
 from xtream_pool import PoolUnavailable, XtreamPool
+from xtream_transport import configure_session
 
 
 def _timeout():
@@ -102,7 +103,7 @@ def proxy_stream(stream_id, source, extension="ts", *, pool=None):
         try:
             from xtream_logging import protect_http_logs
             protect_http_logs(lease.account.config)
-            session = requests.Session()
+            session = configure_session(requests.Session())
             # This provider's root-path .ts endpoint redirects to MPEG-TS,
             # even when catalogue metadata advertises m3u8.
             url = build_stream_url(lease.account.config, stream_id, "ts")

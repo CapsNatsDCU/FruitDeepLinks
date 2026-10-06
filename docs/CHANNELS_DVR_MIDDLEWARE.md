@@ -80,6 +80,7 @@ Environment settings:
 | `XTREAM_ACCOUNTS_JSON` | Alternative JSON supplied by the deployment secret/environment system |
 | `XTREAM_CAPACITY_OVERRIDE` | Optional override for the legacy single-account fallback |
 | `XTREAM_STREAM_IDLE_TIMEOUT=60` | Media inactivity timeout, bounded to 10–600 seconds |
+| `XTREAM_HTTP_PROXY=http://172.16.6.1:8888` | Optional HTTP proxy for Xtream account checks, catalogue, EPG, and media only; use an address reachable from the Fruit container |
 | `FRUIT_LANES=50` | Initial virtual lane count, 1–750; the saved Settings value takes precedence |
 
 Configure **one** of FILE or JSON. A configured but malformed/missing file fails
@@ -97,6 +98,17 @@ For example, discovered capacities 1 + 1 + 1 produce 3; overrides 2 + 1 + 4
 produce 7. SQLite UI overrides take precedence over file overrides; clearing a
 UI override returns to the file override/discovered limit. Provider checks never
 overwrite either override.
+
+For a separate Gluetun container, enable its HTTP proxy and allow port 8888
+through the Gluetun firewall. Publish the proxy on a private Docker-facing host
+address, then set `XTREAM_HTTP_PROXY` on Fruit to that address. The example IP
+above is specific to one Docker network; check Fruit's current gateway before
+using it, and update the value if that network is recreated. Fruit sends only
+Xtream provider traffic through this setting; Channels, ESPN, and other local
+integrations keep their existing routes. The proxy URL must have no credentials
+or path. Restart Fruit after changing the environment value. A healthy account
+check confirms provider metadata access; verify a real `GET` tune in Channels
+separately to confirm video playback.
 
 Settings → **Xtream Account Pool** shows health, discovered and effective limits,
 active/available capacity, last successful check, leases with stream IDs/ages,
@@ -249,6 +261,7 @@ data volume. No deployment is performed by the implementation task.
    XTREAM_ENABLED=true
    SERVER_URL=http://YOUR_TRUENAS_LAN_IP:6655
    XTREAM_STREAM_IDLE_TIMEOUT=60
+   XTREAM_HTTP_PROXY=http://YOUR_FRUIT_DOCKER_GATEWAY:8888
    ```
 
    If the account file uses another mounted path, set `XTREAM_ACCOUNTS_FILE`
