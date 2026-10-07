@@ -6,25 +6,19 @@ import fcntl
 import math
 import os
 import subprocess
+import signal
+import sys
 import time
 from contextlib import contextmanager
 from fractions import Fraction
 from pathlib import Path
 
-import requests
-
 from db.connection import resolve_db_path
-from server.services.xtream_proxy import _close
-from xtream_curl import CurlStream
-from xtream_hls import HLSStream
 from xtream_ingest import XtreamError, build_stream_url
 from xtream_pool import PoolUnavailable, XtreamPool
-from xtream_transport import configure_session
+from xtream_quality_sample import MAX_SAMPLE_BYTES, MAX_SAMPLE_SECONDS
 
 
-MAX_SAMPLE_BYTES = 4 * 1024 * 1024
-MAX_SAMPLE_SECONDS = 15
-MAX_PROBE_ACCOUNTS = 1
 PROBE_INTERVAL_SECONDS = 30
 FAILED_PROBE_PAUSE_SECONDS = 120
 
@@ -116,89 +110,78 @@ def _probe_bytes(sample: bytes, runner=subprocess.run) -> dict:
         raise XtreamError("Video resolution could not be measured from this stream") from None
 
 
+def _sample_media(lease, stream_id, extension):
+    """Kill all sample transports at a wall deadline, even on worker shutdown."""
+    deadline = time.monotonic() + MAX_SAMPLE_SECONDS
+    arguments = {
+        "ts_url": build_stream_url(lease.account.config, stream_id, "ts"),
+        "hls_url": build_stream_url(lease.account.config, stream_id, "m3u8"),
+        "extension": extension,
+    }
+    process = subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve().parents[2] / "xtream_quality_sample.py"),
+         str(deadline), str(lease.fd)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        pass_fds=(lease.fd,), start_new_session=True,
+    )
+    try:
+        try:
+            sample, _ = process.communicate(
+                input=json.dumps(arguments).encode(),
+                timeout=max(0.001, deadline - time.monotonic()),
+            )
+        except subprocess.TimeoutExpired:
+            raise TimeoutError("Resolution sample deadline reached") from None
+        if process.returncode in {3, -signal.SIGKILL}:
+            raise TimeoutError("Resolution sample deadline reached")
+        if process.returncode or not sample or sample[0] != 0x47:
+            raise OSError("Provider returned no usable resolution sample")
+        if len(sample) > MAX_SAMPLE_BYTES:
+            raise OSError("Resolution sample exceeded its byte limit")
+        return sample
+    finally:
+        # Kill the private group before making its lease reusable. This also
+        # catches a curl/FFmpeg child left behind after the sampler has exited.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=2)
+        for pipe in (process.stdin, process.stdout):
+            if pipe and not pipe.closed:
+                pipe.close()
+
+
 def measure_stream_quality(stream_id, extension="ts", *, pool=None,
-                           session_factory=requests.Session, runner=subprocess.run,
-                           guarded=True) -> dict:
-    """Reserve one playback slot, sample media, then release it before returning."""
+                           runner=subprocess.run, guarded=True) -> dict:
+    """Sample in a bounded worker; close media and release its slot before analysis."""
     pool = pool or XtreamPool(resolve_db_path())
     if guarded:
         with quality_probe_guard(pool.db_path):
             return measure_stream_quality(stream_id, extension, pool=pool,
-                                          session_factory=session_factory,
                                           runner=runner, guarded=False)
-    # A quality check is diagnostic. Do not recheck every account or try the
-    # entire pool when a single stream cannot be measured; playback must keep
-    # its slots and health state even if this optional sample fails.
     if any(account["health"] == "unknown" for account in pool.status()["accounts"]):
         pool.check_accounts(due_only=True)
-    excluded = set()
-    while len(excluded) < min(MAX_PROBE_ACCOUNTS, len(pool.accounts)):
-        try:
-            lease = pool.acquire(stream_id, "quality_probe", excluded=excluded)
-        except PoolUnavailable:
-            raise PoolUnavailable("All Xtream playback slots are occupied or unavailable") from None
-        excluded.add(lease.account.id)
-        session = upstream = None
-        outcome = "tune_failed"
-        authentication = False
-        account_failure = False
-        validated_media = False
-        try:
-            from xtream_logging import protect_http_logs
-            protect_http_logs(lease.account.config)
-            session = configure_session(session_factory())
-            url = build_stream_url(lease.account.config, stream_id, "ts")
-            upstream = session.get(
-                url,
-                stream=True, timeout=(5, 5), headers={"Accept-Encoding": "identity"},
-                allow_redirects=True,
-            )
-            authentication = upstream.status_code in {401, 403}
-            account_failure = upstream.status_code in {429, 500, 502, 503, 504}
-            if authentication:
-                _close(upstream)
-                upstream = CurlStream(url, 5, lease.fd)
-                chunks = iter(upstream.chunks())
-                first = next(chunks, b"")
-                use_hls = first.lstrip().startswith(b"#EXTM3U")
-            else:
-                use_hls = upstream.status_code in {404, 415} and str(extension).lower() == "m3u8"
-            if not authentication and not use_hls:
-                upstream.raise_for_status()
-                chunks = iter(upstream.iter_content(chunk_size=64 * 1024))
-                first = next(chunks, b"")
-                use_hls = first.lstrip().startswith(b"#EXTM3U")
-            if use_hls:
-                _close(upstream)
-                upstream = HLSStream(build_stream_url(lease.account.config, stream_id, "m3u8"), 5, lease.fd)
-                chunks = iter(upstream.chunks())
-                first = next(chunks, b"")
-            if not first or first[0] != 0x47:
-                outcome = "unsupported_transport"
-                raise OSError("Provider returned no transport stream")
-            validated_media = True
-            sample = bytearray(first[:MAX_SAMPLE_BYTES])
-            deadline = time.monotonic() + MAX_SAMPLE_SECONDS
-            for chunk in chunks:
-                if time.monotonic() >= deadline or len(sample) >= MAX_SAMPLE_BYTES:
-                    break
-                sample.extend(chunk[:MAX_SAMPLE_BYTES - len(sample)])
-            measured = _probe_bytes(bytes(sample), runner)
-            outcome = "client_closed"
-            return measured
-        except Exception as error:
-            account_failure = (
-                account_failure
-                or isinstance(error, (requests.ConnectionError, requests.Timeout, TimeoutError))
-                or (authentication and not validated_media)
-            )
-            if outcome == "tune_failed" and account_failure:
-                outcome = "upstream_timeout" if isinstance(error, (requests.Timeout, TimeoutError)) else "upstream_error"
-        finally:
-            _close(upstream)
-            _close(session)
-            lease.release(outcome)
-    raise XtreamError(
-        "Video resolution could not be measured on this attempt; playback accounts were not changed. "
-        "Resolution checks are paused for two minutes before another attempt."
-    )
+    try:
+        lease = pool.acquire(stream_id, "quality_probe")
+    except PoolUnavailable:
+        raise PoolUnavailable("All Xtream playback slots are occupied or unavailable") from None
+    outcome = "upstream_error"
+    try:
+        sample = _sample_media(lease, stream_id, extension)
+        outcome = "client_closed"
+    except TimeoutError:
+        outcome = "upstream_timeout"
+        raise XtreamError(
+            "Resolution sampling timed out; playback accounts were not changed. "
+            "Resolution checks are paused for two minutes before another attempt."
+        ) from None
+    except Exception:
+        raise XtreamError(
+            "Video resolution could not be measured on this attempt; playback accounts were not changed. "
+            "Resolution checks are paused for two minutes before another attempt."
+        ) from None
+    finally:
+        lease.release(outcome)
+    # ffprobe only sees local bytes; provider media is already closed.
+    return _probe_bytes(sample, runner)

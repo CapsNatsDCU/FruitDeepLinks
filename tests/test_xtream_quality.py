@@ -2,6 +2,11 @@ import json
 import os
 import sys
 import tempfile
+import time
+import threading
+import subprocess
+import signal
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -11,10 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 from server.services.xtream_quality import (
     QualityProbeDeferred, measure_stream_quality, quality_probe_guard,
 )
-from tests.test_xtream_pool import pool_environment
+from tests.test_xtream_pool import account_rows, pool_environment
 from tests.xtream_test_helpers import FakeMedia, HealthyAccountClient
 from xtream_ingest import XtreamError
 from xtream_pool import XtreamPool
+from xtream_quality_sample import capture_sample, MAX_SAMPLE_BYTES
 
 
 class QualityProbeTest(unittest.TestCase):
@@ -26,6 +32,14 @@ class QualityProbeTest(unittest.TestCase):
         with patch.dict(os.environ, environment):
             self.pool = XtreamPool(path, environment, client_factory=HealthyAccountClient)
             self.pool.check_accounts()
+
+    def measure_fake(self, stream_id, *, session_factory, **kwargs):
+        def sample(lease, stream, extension):
+            return capture_sample("http://fixture/stream.ts", "http://fixture/stream.m3u8",
+                                  extension, lease.fd, deadline=time.monotonic() + 8,
+                                  session_factory=session_factory)
+        with patch("server.services.xtream_quality._sample_media", side_effect=sample):
+            return measure_stream_quality(stream_id, **kwargs)
 
     def test_independent_guards_serialize_without_blocking_playback(self):
         with quality_probe_guard(self.pool.db_path):
@@ -80,7 +94,15 @@ class QualityProbeTest(unittest.TestCase):
             {"codec_type": "video", "codec_name": "h264", "width": 1920,
              "height": 1080, "avg_frame_rate": "60000/1001"},
         ]}).encode()))
-        result = measure_stream_quality("437219", pool=self.pool,
+        def analyze(*args, **kwargs):
+            self.assertTrue(media.closed)
+            self.assertEqual(0, self.pool.status()["active"])
+            return Mock(returncode=0, stdout=json.dumps({"streams": [
+                {"codec_type": "video", "width": 1920, "height": 1080,
+                 "codec_name": "h264", "avg_frame_rate": "60000/1001"},
+            ]}).encode())
+        runner.side_effect = analyze
+        result = self.measure_fake("437219", pool=self.pool,
                                         session_factory=lambda: session, runner=runner)
         self.assertEqual({"width": 1920, "height": 1080, "fps": 59.94, "codec": "h264"}, result)
         self.assertEqual(0, self.pool.status()["active"])
@@ -98,8 +120,8 @@ class QualityProbeTest(unittest.TestCase):
         runner = Mock(return_value=Mock(returncode=0, stdout=json.dumps({"streams": [
             {"codec_type": "video", "width": 1280, "height": 720},
         ]}).encode()))
-        with patch("server.services.xtream_quality.CurlStream", return_value=curl) as fallback:
-            result = measure_stream_quality("437219", pool=self.pool,
+        with patch("xtream_curl.CurlStream", return_value=curl) as fallback:
+            result = self.measure_fake("437219", pool=self.pool,
                                             session_factory=lambda: session, runner=runner)
         self.assertEqual(720, result["height"])
         self.assertTrue(first.closed)
@@ -114,9 +136,9 @@ class QualityProbeTest(unittest.TestCase):
         session.get.return_value = FakeMedia(status=403)
         curl = Mock()
         curl.chunks.side_effect = OSError("Curl media transport failed")
-        with patch("server.services.xtream_quality.CurlStream", return_value=curl):
+        with patch("xtream_curl.CurlStream", return_value=curl):
             with self.assertRaises(XtreamError):
-                measure_stream_quality("437219", pool=self.pool,
+                self.measure_fake("437219", pool=self.pool,
                                        session_factory=lambda: session)
         state = self.pool.status()
         self.assertEqual(0, state["active"])
@@ -125,6 +147,110 @@ class QualityProbeTest(unittest.TestCase):
         self.assertEqual(1, session.get.call_count)
         self.assertEqual(1, curl.close.call_count)
         self.assertEqual("quality_probe", state["recent_streams"][0]["source"])
+
+    def test_byte_limit_does_not_read_an_extra_chunk(self):
+        media = FakeMedia([b"\x47" * MAX_SAMPLE_BYTES, RuntimeError("Must not read")])
+        session = Mock()
+        session.get.return_value = media
+        sample = capture_sample("http://fixture/stream.ts", "http://fixture/stream.m3u8",
+                                "ts", 0, deadline=time.monotonic() + 8,
+                                session_factory=lambda: session)
+        self.assertEqual(MAX_SAMPLE_BYTES, len(sample))
+        self.assertEqual(1, media.reads)
+        self.assertTrue(media.closed)
+
+    def test_analysis_failure_has_already_released_media_capacity(self):
+        runner = Mock(side_effect=RuntimeError("Analysis failed"))
+        with patch("server.services.xtream_quality._sample_media", return_value=b"\x47" * 188):
+            with self.assertRaises(RuntimeError):
+                measure_stream_quality("437219", pool=self.pool, runner=runner)
+        self.assertEqual(0, self.pool.status()["active"])
+
+    def test_real_slow_trickle_cannot_extend_the_media_deadline(self):
+        disconnected = threading.Event()
+        class Provider(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                try:
+                    # Every byte arrives before the idle timeout. Only a hard
+                    # wall deadline can stop this incomplete chunk/header sample.
+                    while True:
+                        self.wfile.write(b"\x47")
+                        self.wfile.flush()
+                        time.sleep(0.05)
+                except (BrokenPipeError, ConnectionResetError):
+                    disconnected.set()
+        provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+        provider.daemon_threads = True
+        self.addCleanup(provider.server_close)
+        self.addCleanup(provider.shutdown)
+        threading.Thread(target=provider.serve_forever, daemon=True).start()
+        rows = account_rows((None, None, None))
+        for row in rows:
+            row["server_url"] = f"http://127.0.0.1:{provider.server_port}"
+        self.pool = XtreamPool(self.pool.db_path, pool_environment(rows),
+                               client_factory=HealthyAccountClient)
+        self.pool.check_accounts()
+        before = time.monotonic()
+        with patch("server.services.xtream_quality.MAX_SAMPLE_SECONDS", 1):
+            with self.assertRaises(XtreamError):
+                measure_stream_quality("437219", pool=self.pool)
+        self.assertLess(time.monotonic() - before, 3)
+        self.assertTrue(disconnected.wait(2), "The provider socket must close at the deadline")
+        self.assertEqual(0, self.pool.status()["active"])
+
+    def test_sample_watchdog_stops_curl_without_a_web_worker(self):
+        connected, disconnected = threading.Event(), threading.Event()
+        class Provider(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def do_GET(self):
+                if self.headers.get("User-Agent", "").startswith("python-requests"):
+                    self.send_response(403)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.end_headers()
+                connected.set()
+                try:
+                    while True:
+                        self.wfile.write(b"\x47")
+                        self.wfile.flush()
+                        time.sleep(0.05)
+                except (BrokenPipeError, ConnectionResetError):
+                    disconnected.set()
+        provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+        provider.daemon_threads = True
+        self.addCleanup(provider.server_close)
+        self.addCleanup(provider.shutdown)
+        threading.Thread(target=provider.serve_forever, daemon=True).start()
+        lease = self.pool.acquire("437219", "quality_probe")
+        process = subprocess.Popen([
+            sys.executable, str(Path(__file__).resolve().parents[1] / "bin/xtream_quality_sample.py"),
+            str(time.monotonic() + 2), str(lease.fd),
+        ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, pass_fds=(lease.fd,))
+        try:
+            # Only feed input; no communicate timeout or supervising web worker.
+            url = f"http://127.0.0.1:{provider.server_port}/stream.ts"
+            process.stdin.write(json.dumps({"ts_url": url, "hls_url": url,
+                                            "extension": "ts"}).encode())
+            process.stdin.close()
+            self.assertTrue(connected.wait(1.5), "Curl fallback must actually connect")
+            self.assertEqual(-signal.SIGKILL, process.wait(timeout=3))
+            self.assertTrue(disconnected.wait(2), "Watchdog must kill the curl socket too")
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=2)
+            lease.release()
+        self.assertEqual(0, self.pool.status()["active"])
+
 
 
 if __name__ == "__main__":

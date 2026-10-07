@@ -23,6 +23,7 @@ from werkzeug.serving import make_server
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 from server.app import create_app
 from server.services.xtream_persistent import create_channel
+from server.services.xtream_quality import measure_stream_quality
 from xtream_hls import HLSStream
 from xtream_pool import XtreamPool
 from tests.test_xtream_pool import account_rows, pool_environment
@@ -154,6 +155,20 @@ class SocketIntegrationTests(unittest.TestCase):
         finally:
             response.close()
         self.until(lambda: self.pool.status()['active'] == 0 and self.active == 0)
+
+    def test_resolution_worker_closes_media_before_local_ffprobe(self):
+        subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+                        '-i', 'color=c=blue:s=160x90:r=10', '-t', '2', '-c:v', 'mpeg2video',
+                        '-f', 'mpegts', str(self.root / 'segment.ts')], check=True, capture_output=True)
+        self.pool.check_accounts()
+        def analyze(*args, **kwargs):
+            self.assertEqual(0, self.pool.status()['active'])
+            self.assertNotIn('http', ' '.join(args[0]))
+            return subprocess.run(*args, **kwargs)
+        measured = measure_stream_quality('segment', pool=self.pool, runner=analyze)
+        self.assertEqual((160, 90), (measured['width'], measured['height']))
+        self.assertEqual('mpeg2video', measured['codec'])
+        self.assertEqual(0, self.pool.status()['active'])
 
     def test_real_hls_remux_copies_playable_media_and_releases_process(self):
         self.assertIsNotNone(shutil.which('ffmpeg'), 'Docker/runtime needs FFmpeg for HLS remux')
