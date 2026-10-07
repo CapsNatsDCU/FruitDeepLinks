@@ -118,6 +118,26 @@ class CatalogWorkbenchTests(unittest.TestCase):
         self.assertEqual(1, self.conn.execute("SELECT COUNT(*) FROM catalog_change_proposals WHERE status='pending'").fetchone()[0])
         self.assertEqual(0, self.conn.execute("SELECT COUNT(*) FROM catalog_aliases WHERE alias='AI Stars'").fetchone()[0])
 
+    def test_ai_review_failure_records_safe_transport_reason(self):
+        self.conn.execute("CREATE TABLE IF NOT EXISTS user_preferences (key TEXT PRIMARY KEY, value TEXT, updated_utc TEXT)")
+        for key, value in (
+            ("local_ai_event_parsing_enabled", "true"),
+            ("local_ai_event_parsing_base_url", '"http://local"'),
+            ("local_ai_event_parsing_model", '"test"'),
+        ):
+            self.conn.execute("INSERT INTO user_preferences VALUES (?,?, 'now')", (f"setting:{key}", value))
+
+        def requester(_config, _payload):
+            raise ConnectionRefusedError("private token in low-level error")
+
+        result = run_ai_review(self.conn, requester=requester)
+        self.assertEqual("failed", result["status"])
+        self.assertEqual("connection_refused", result["error_kind"])
+        self.assertEqual("connection_refused", self.conn.execute(
+            "SELECT error_kind FROM catalog_change_runs WHERE id=?", (result["run_id"],)
+        ).fetchone()[0])
+        self.assertNotIn("private token", str(result))
+
     def test_catalog_ai_prompt_requires_both_merge_ids(self):
         system = _catalog_ai_payload([])["messages"][0]["content"]
         self.assertIn("survivor_id", system)

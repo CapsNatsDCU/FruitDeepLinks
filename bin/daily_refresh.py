@@ -1160,13 +1160,13 @@ def main(argv=None):
         ], allow_fail=True)
 
     # Overnight refreshes deliberately let catalog AI drain its entire review
-    # backlog.  It only queues proposals; applying them is always an explicit
-    # catalog-workbench action.
+    # backlog. It only queues proposals; applying them is always an explicit
+    # catalog-workbench action. A review failure must not prevent lane building
+    # and exports, but run_step still records it as a non-fatal failure.
     if args.canonical_ai_mode == "unlimited":
-        if not run_step("8d", total_steps, "Queuing AI Sports Catalog recommendations", [
+        run_step("8d", total_steps, "Queuing AI Sports Catalog recommendations", [
             "python3", "catalog_ai_review.py", "--db", str(DB_PATH), "--source", "scheduled",
-        ], env={"FDL_REFRESH_PROGRESS": "1"}):
-            return 1
+        ], allow_fail=True, env={"FDL_REFRESH_PROGRESS": "1"})
 
 # Step 9: Build virtual lanes (Channels-style direct lanes)
     # num_lanes is a known settings key, so this resolves DB -> FRUIT_LANES env -> default (50).

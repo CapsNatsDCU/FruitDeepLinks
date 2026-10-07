@@ -59,6 +59,15 @@
 .xtream-category-row input { width:17px; height:17px; accent-color:var(--accent); }
 .xtream-category-name { flex:1; min-width:0; overflow-wrap:anywhere; font-size:13px; }
 .xtream-category-id { color:var(--text-muted); font-family:var(--mono); font-size:11px; }
+.xtream-test-feedback { display:inline-flex; align-items:center; gap:7px; margin:8px 0 0; padding:6px 9px; border:1px solid var(--border); border-radius:var(--radius); font-size:12px; }
+.xtream-test-feedback[hidden] { display:none; }
+.xtream-test-feedback.testing { color:var(--text-dim); }
+.xtream-test-feedback.success { color:var(--success); border-color:var(--success); }
+.xtream-test-feedback.warning { color:var(--warning); border-color:var(--warning); }
+.xtream-test-feedback.error { color:var(--danger); border-color:var(--danger); }
+.xtream-test-feedback.testing::before { content:''; width:12px; height:12px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:xtream-test-spin .8s linear infinite; }
+@keyframes xtream-test-spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .xtream-test-feedback.testing::before { animation:none; border-top-color:var(--accent); } }
 details.advanced-section { margin-top: 8px; }
 details.advanced-section summary { font-size: 14px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; padding-bottom: 6px; border-bottom: 1px solid var(--border); cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; user-select: none; }
 details.advanced-section summary::-webkit-details-marker { display: none; }
@@ -103,9 +112,10 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
   <p class="persistent-intro">Persistent channels and Fruit lanes share these accounts. Credentials are supplied through deployment secrets. Account labels, availability and capacity overrides can be managed here.</p>
   <div class="persistent-links"><a href="/m3u/channels">Channels DVR M3U</a><a href="/xmltv/channels">Channels DVR XMLTV</a></div>
   <div class="persistent-toolbar">
-    <button class="btn" type="button" onclick="checkXtreamPool(this)">Test All Accounts</button>
+    <button class="btn" type="button" data-pool-test="all" onclick="checkXtreamPool(this)">Test All Accounts</button>
     <button class="btn btn-secondary" type="button" onclick="loadXtreamPool()">Refresh Status</button>
   </div>
+  <p id="xtream-pool-test-status" class="xtream-test-feedback" role="status" aria-live="polite" hidden></p>
   <div id="xtream-pool-error" class="favorite-alert" role="alert"></div>
   <p id="xtream-pool-summary" aria-live="polite">Loading account pool…</p>
   <div id="xtream-pool-accounts" class="persistent-list"></div>
@@ -161,6 +171,28 @@ function poolError(message = '') {
   box.style.display = message ? 'block' : 'none';
 }
 
+let _xtreamPoolTest = null;
+
+function renderXtreamPoolTestStatus() {
+  const test = _xtreamPoolTest;
+  const busy = test?.state === 'testing';
+  document.querySelectorAll('[data-pool-test]').forEach(button => {
+    const isTarget = test && (test.accountId === null ? button.dataset.poolTest === 'all' : button.form?.dataset.accountId === test.accountId);
+    button.disabled = busy;
+    button.textContent = busy && isTarget ? 'Testing…' : (button.dataset.poolTest === 'all' ? 'Test All Accounts' : 'Test Account');
+    button.setAttribute('aria-busy', busy && isTarget ? 'true' : 'false');
+  });
+  const globalStatus = document.getElementById('xtream-pool-test-status');
+  const accountStatus = test?.accountId ? [...document.querySelectorAll('[data-pool-test-status]')].find(node => node.closest('form')?.dataset.accountId === test.accountId) : null;
+  document.querySelectorAll('.xtream-test-feedback').forEach(node => { node.hidden = true; });
+  const target = test?.accountId ? accountStatus : globalStatus;
+  if (test && target) {
+    target.className = `xtream-test-feedback ${test.state}`;
+    target.textContent = test.message;
+    target.hidden = false;
+  }
+}
+
 async function loadXtreamPool() {
   try {
     const data = await persistentRequest('/api/xtream/pool');
@@ -172,11 +204,13 @@ async function loadXtreamPool() {
           <label><input name="enabled" type="checkbox" ${account.enabled ? 'checked' : ''}> Enabled</label>
           <label>Capacity override <input name="capacity" type="number" min="1" max="10000" placeholder="Automatic" value="${account.configured_override ?? ''}" style="width:110px"></label>
           <button class="btn" type="button" data-save-account onclick="saveXtreamAccount(this.form)">Save Account</button>
-          <button class="btn btn-secondary" type="button" onclick="checkXtreamPool(this,this.form.dataset.accountId)">Test Account</button>
+          <button class="btn btn-secondary" type="button" data-pool-test="account" onclick="checkXtreamPool(this,this.form.dataset.accountId)">Test Account</button>
         </div>
         <p>${escHtml(account.health)} · Discovered: ${account.discovered_capacity ?? 'Unknown'} · Effective: ${account.effective_capacity} · Active: ${account.active} · Available: ${account.available}${account.capacity_source === 'conservative_default' ? ' · Unknown limit: conservatively using 1; set an override if needed.' : ''}</p>
         <p class="status-muted">Last successful check: ${account.last_success ? escHtml(new Date(account.last_success * 1000).toLocaleString()) : 'Not checked'}${account.last_error ? ' · ' + escHtml(account.last_error) : ''}</p>
+        <p class="xtream-test-feedback" data-pool-test-status role="status" aria-live="polite" hidden></p>
       </form>`).join('') : '<p>No accounts configured. Add Xtream accounts to your deployment secrets, then test the pool.</p>';
+    renderXtreamPoolTestStatus();
     document.getElementById('xtream-pool-leases').innerHTML = data.leases.length ? data.leases.map(lease => `<p>${escHtml(lease.account_label)} · ${escHtml(lease.source)} · Stream ${escHtml(lease.stream_id)} · ${Math.floor(lease.age_seconds)} seconds</p>`).join('') : '<p class="status-muted">No active streams.</p>';
     document.getElementById('xtream-pool-history').innerHTML = data.recent_streams.map(item => `<p>${escHtml(new Date(item.ended * 1000).toLocaleString())} · ${escHtml(item.source || '')} · ${escHtml(item.stream_id || '')} · ${escHtml(item.outcome.replaceAll('_', ' '))}</p>`).join('') || '<p>No recent streams.</p>';
     const epg = await persistentRequest('/api/xtream/epg/status');
@@ -186,13 +220,26 @@ async function loadXtreamPool() {
 }
 
 async function checkXtreamPool(button, accountId = null) {
-  button.disabled = true;
+  if (_xtreamPoolTest?.state === 'testing') return;
+  _xtreamPoolTest = {accountId, state:'testing', message:accountId ? 'Testing account…' : 'Testing all enabled accounts…'};
+  poolError();
+  renderXtreamPoolTestStatus();
   try {
     const url = accountId ? `/api/xtream/pool/accounts/${encodeURIComponent(accountId)}/check` : '/api/xtream/pool/check';
-    await persistentRequest(url, {method:'POST'});
+    const data = await persistentRequest(url, {method:'POST'});
+    const checked = accountId ? data.accounts.filter(account => account.id === accountId) : data.accounts.filter(account => account.enabled);
+    if (accountId && !checked.length) throw new Error('Account was not returned by the check');
+    const healthy = checked.filter(account => account.health === 'healthy').length;
+    const account = checked[0];
+    _xtreamPoolTest = accountId
+      ? {accountId, state:healthy ? 'success' : 'warning', message:`Account check complete · ${account.health}${account.last_error ? ' · ' + account.last_error : ''}`}
+      : {accountId:null, state:checked.length && healthy === checked.length ? 'success' : 'warning', message:checked.length ? `Account checks complete · ${healthy} of ${checked.length} healthy` : 'No enabled accounts to test'};
+    renderXtreamPoolTestStatus();
     await loadXtreamPool();
-  } catch (err) { poolError(err.message); }
-  finally { button.disabled = false; }
+  } catch (err) {
+    _xtreamPoolTest = {accountId, state:'error', message:`Account check failed · ${err.message}`};
+    renderXtreamPoolTestStatus();
+  }
 }
 
 async function saveXtreamAccount(form) {

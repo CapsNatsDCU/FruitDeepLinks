@@ -51,6 +51,8 @@ class XtreamOnlyRefreshTest(unittest.TestCase):
         self.db_path = self.data_dir / "fruit_events.db"
         self.xml_path = self.out_dir / "multisource_lanes.xml"
         self.commands = []
+        self.fail_catalog_review = False
+        self.catalog_review_allow_fail = None
 
         conn = sqlite3.connect(self.db_path)
         conn.execute(
@@ -85,10 +87,15 @@ class XtreamOnlyRefreshTest(unittest.TestCase):
         sqlite3.connect(self.data_dir / "espn_graph.db").close()
 
     def _run_step(self, _step, _total, _description, command, allow_fail=False, env=None):
-        del allow_fail, env
+        del env
         command = list(command)
         self.commands.append(command)
         scripts = {Path(part).name for part in command if str(part).endswith(".py")}
+
+        if "catalog_ai_review.py" in scripts:
+            self.catalog_review_allow_fail = allow_fail
+            if self.fail_catalog_review:
+                return False
 
         if "xtream_ingest.py" in scripts:
             now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -236,6 +243,25 @@ class XtreamOnlyRefreshTest(unittest.TestCase):
         self.assertIn("Disabled providers:\nKayo\nFanatiz\nbeIN\nNESN\nVictory+\nGotham\nESPN", log)
         self.assertNotIn("private-user", log)
         self.assertNotIn("private-password", log)
+
+    def test_failed_optional_catalog_review_does_not_block_exports(self):
+        self.fail_catalog_review = True
+        with patch.dict(os.environ, {"DB_MAINTENANCE": "false", "APPLE_AUTH_BOOTSTRAP": "false"}), patch.multiple(
+            daily_refresh,
+            DATA_DIR=self.data_dir,
+            OUT_DIR=self.out_dir,
+            DB_PATH=self.db_path,
+            APPLE_DB_PATH=self.data_dir / "apple_events.db",
+            APPLE_AUTH_PATH=self.data_dir / "apple_uts_auth.json",
+            APPLE_IMPORT_STAMP_PATH=self.data_dir / ".apple_import_stamp.json",
+            run_step=self._run_step,
+        ), redirect_stdout(io.StringIO()):
+            self.assertEqual(0, daily_refresh.main(["--canonical-ai-mode", "unlimited"]))
+
+        self.assertTrue(self.catalog_review_allow_fail)
+        scripts = [Path(part).name for command in self.commands for part in command if str(part).endswith(".py")]
+        self.assertLess(scripts.index("catalog_ai_review.py"), scripts.index("fruit_build_lanes.py"))
+        self.assertIn("fruit_export_adb_lanes.py", scripts)
 
 
 class AppleImportProviderFilterTest(unittest.TestCase):

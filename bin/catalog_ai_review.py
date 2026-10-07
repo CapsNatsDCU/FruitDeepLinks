@@ -31,7 +31,8 @@ def main() -> int:
         result = run_ai_review(conn, source=args.source)
     emit_progress("catalog_ai_done", status=result["status"], proposals=result.get("proposals", 0),
                   run_id=result.get("run_id"), finished_at=datetime.now(timezone.utc).isoformat())
-    print("catalog-ai-review", result["status"], "proposals", result.get("proposals", 0))
+    reason = f" reason={result['error_kind']}" if result.get("error_kind") else ""
+    print(f"catalog-ai-review {result['status']}{reason} proposals {result.get('proposals', 0)}")
     return 0 if result["status"] in {"completed", "disabled"} else 1
 
 

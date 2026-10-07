@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -233,6 +234,19 @@ class EpgLineupTests(unittest.TestCase):
                 self.assertEqual(3, len(metadata.metadata_configs))
                 if selected:
                     self.assertIn('dynamic_error', result)
+
+    def test_dynamic_failure_log_shows_cause_without_credentials(self):
+        metadata = Mock()
+        metadata.get_live_streams.return_value = [{'stream_id':'437219', 'name':'ESPN & Friends'}]
+        clients = [HealthyAccountClient(a.config) for a in self.accounts] + [metadata]
+        output = io.StringIO()
+        with patch('xtream_ingest.fetch_snapshot', side_effect=XtreamError('HTTP 403 private-password/0')), \
+             patch('xtream_epg.refresh_epg', return_value={'programmes':0,'failed':0}), \
+             redirect_stdout(output):
+            result = run(self.path, {**self.env,'XTREAM_CATEGORY_IDS':'20'}, client_factory=Mock(side_effect=clients))
+        self.assertIn('HTTP 403 [REDACTED]', output.getvalue())
+        self.assertNotIn('private-password/0', output.getvalue())
+        self.assertEqual('HTTP 403 [REDACTED]', result['dynamic_error'])
 
     def test_secrets_in_provider_metadata_do_not_escape_exports_or_status(self):
         self.refresh_xml(title='private-user-0 private-password/0')

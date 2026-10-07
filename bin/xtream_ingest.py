@@ -1836,12 +1836,14 @@ def run(db_path: Path, environ: Optional[Mapping[str, str]] = None,
                                                       progress_reporter=emit_progress,
                                                       on_category_ready=import_ready)
                                        if config.category_ids else ([], {}))
-            except XtreamError:
+            except XtreamError as exc:
                 # A failing dynamic category must not suppress a healthy static
-                # guide. Preserve old events and expose the failure explicitly.
+                # guide. Preserve old events and log the credential-free cause.
+                detail = safe_value(str(exc), pool.accounts)
+                print(f"Xtream dynamic category refresh failed: {detail}; previous events preserved", flush=True)
                 categories, streams = [], {}
                 snapshot_diagnostics.update(fetched_category_ids=[], failed_category_ids=list(config.category_ids),
-                                            dynamic_error="Selected category refresh failed; previous events preserved")
+                                            dynamic_error=detail)
         finally:
             deterministic_executor.shutdown(wait=True)
             if ai_executor:

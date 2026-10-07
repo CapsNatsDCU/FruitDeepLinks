@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -689,6 +690,29 @@ def _catalog_ai_payload(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _review_failure_kind(exc: Exception) -> str:
+    """Return an actionable error class without logging endpoint or response data."""
+    if isinstance(exc, HTTPError):
+        return f"http_{exc.code}" if isinstance(exc.code, int) and 400 <= exc.code <= 599 else "http_error"
+    if isinstance(exc, URLError):
+        if isinstance(exc.reason, TimeoutError):
+            return "timeout"
+        if isinstance(exc.reason, ConnectionRefusedError):
+            return "connection_refused"
+        return "transport_error"
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, ConnectionRefusedError):
+        return "connection_refused"
+    if isinstance(exc, json.JSONDecodeError):
+        return "invalid_json"
+    if isinstance(exc, (KeyError, IndexError, TypeError, ValueError)):
+        return "invalid_response"
+    if isinstance(exc, sqlite3.Error):
+        return "database_error"
+    return "unexpected_error"
+
+
 def run_ai_review(conn: sqlite3.Connection, *, source: str = "scheduled", requester=None, resume_run_id: int | None = None) -> dict[str, Any]:
     """Run an unbounded compatible-endpoint review and queue, never apply, proposals.
 
@@ -775,6 +799,7 @@ def run_ai_review(conn: sqlite3.Connection, *, source: str = "scheduled", reques
             conn.execute("UPDATE catalog_change_runs SET progress_current=? WHERE id=?", (min(offset + len(chunk), len(records)), run_id)); conn.commit()
         finish_run(conn, run_id, status="completed", summary={"records": len(records), "proposals": created}); conn.commit()
         return {"status": "completed", "run_id": run_id, "proposals": created}
-    except Exception:
-        finish_run(conn, run_id, status="failed", summary={}, error_kind="transport_or_response_failure"); conn.commit()
-        return {"status": "failed", "run_id": run_id, "proposals": 0}
+    except Exception as exc:
+        error_kind = _review_failure_kind(exc)
+        finish_run(conn, run_id, status="failed", summary={}, error_kind=error_kind); conn.commit()
+        return {"status": "failed", "run_id": run_id, "proposals": 0, "error_kind": error_kind}
