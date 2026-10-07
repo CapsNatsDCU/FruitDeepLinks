@@ -30,6 +30,7 @@ from server.services.xtream_persistent import (
     update_channel,
 )
 from xtream_ingest import XtreamClient, XtreamError, load_metadata_configs
+from xtream_activity import normal_activity_request
 from sports_metadata import coverage, ensure_schema as ensure_sports_schema, utc_now
 
 
@@ -62,8 +63,10 @@ def api_xtream_pool():
 @bp.route("/api/xtream/pool/accounts/<account_id>/check", methods=["POST"])
 def api_xtream_pool_check(account_id=None):
     from xtream_pool import XtreamPool
+    from xtream_activity import normal_activity
     try:
-        return jsonify(XtreamPool(resolve_db_path()).check_accounts(account_id))
+        with normal_activity(resolve_db_path()):
+            return jsonify(XtreamPool(resolve_db_path()).check_accounts(account_id))
     except Exception as exc:
         return _safe_error(exc)
 
@@ -411,6 +414,7 @@ def api_xtream_category_streams(category_id):
 
 
 @bp.route("/api/xtream/persistent-channels/search", methods=["POST"])
+@normal_activity_request
 def api_xtream_persistent_search():
     """Search the provider's live streams across every or selected category."""
     query = request.args.get("q", "").strip()

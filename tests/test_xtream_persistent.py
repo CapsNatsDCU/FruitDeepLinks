@@ -485,6 +485,14 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
         probe.assert_called_once_with("1904224", "ts", guarded=False)
         search = self.client.post("/api/xtream/persistent-channels/search", query_string={"q": "Washington"})
         self.assertEqual(720, search.get_json()["items"][0]["measured_quality"]["height"])
+        paused = self.client.post("/api/xtream/persistent-channels/quality", json={
+            "category_id": "410", "stream_id": "unknown",
+        })
+        self.assertEqual(429, paused.status_code)
+        self.assertEqual("quality_probe_deferred", paused.get_json()["code"])
+        self.assertGreaterEqual(int(paused.headers["Retry-After"]), 599)
+        activity_file = self.db_path.parent / (self.db_path.name + ".xtream-locks") / "normal-activity-until"
+        activity_file.write_text("0", encoding="ascii")
         with patch("server.services.xtream_quality.time.time", return_value=time.time() + 31):
             invalid = self.client.post("/api/xtream/persistent-channels/quality", json={
                 "category_id": "410", "stream_id": "unknown",
@@ -550,33 +558,31 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
                 result = self.client.post("/api/xtream/persistent-channels/quality", json={
                     "category_id": "410", "stream_id": "1904224",
                 })
-            self.assertEqual(503, result.status_code)
+            self.assertEqual(429, result.status_code)
+            self.assertEqual("quality_probe_deferred", result.get_json()["code"])
             catalog.assert_not_called()
             media.assert_not_called()
         finally:
             lease.release()
 
-    def test_quality_catalog_fallback_contains_only_healthy_available_accounts(self):
+    def test_quality_catalog_fallback_contains_only_healthy_accounts(self):
         from tests.test_xtream_pool import pool_environment
         with patch.dict(os.environ, pool_environment()):
             pool = XtreamPool(self.db_path, client_factory=HealthyAccountClient)
             pool.check_accounts()
             with pool.connection() as conn:
                 conn.execute("UPDATE xtream_account_state SET health='degraded' WHERE account_id='account_0'")
-            lease = pool.acquire("playing", "persistent:1", excluded=("account_0",))
-            try:
-                catalog_client = FakeXtreamClient()
-                with (patch("server.routes.api.xtream.XtreamClient", return_value=catalog_client),
-                      patch("server.services.xtream_quality.measure_stream_quality", return_value={
-                          "width": 1280, "height": 720, "fps": 60.0, "codec": "h264",
-                      })):
-                    result = self.client.post("/api/xtream/persistent-channels/quality", json={
-                        "category_id": "410", "stream_id": "1904224",
-                    })
-                self.assertEqual(200, result.status_code, result.get_data(as_text=True))
-                self.assertEqual((pool.accounts[2].config,), catalog_client.metadata_configs)
-            finally:
-                lease.release()
+            catalog_client = FakeXtreamClient()
+            with (patch("server.routes.api.xtream.XtreamClient", return_value=catalog_client),
+                  patch("server.services.xtream_quality.measure_stream_quality", return_value={
+                      "width": 1280, "height": 720, "fps": 60.0, "codec": "h264",
+                  })):
+                result = self.client.post("/api/xtream/persistent-channels/quality", json={
+                    "category_id": "410", "stream_id": "1904224",
+                })
+            self.assertEqual(200, result.status_code, result.get_data(as_text=True))
+            self.assertEqual((pool.accounts[1].config, pool.accounts[2].config),
+                             catalog_client.metadata_configs)
 
     def test_quality_endpoint_reports_busy_pool_without_a_retry_storm(self):
         with patch("server.services.xtream_quality.measure_stream_quality",

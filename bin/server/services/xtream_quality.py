@@ -15,6 +15,7 @@ from pathlib import Path
 
 from db.connection import resolve_db_path
 from xtream_ingest import XtreamError, build_stream_url
+from xtream_activity import normal_activity_remaining, quality_probe_context
 from xtream_hosts import host_configs
 from xtream_pool import PoolUnavailable, XtreamPool
 from xtream_quality_sample import MAX_SAMPLE_BYTES, MAX_SAMPLE_SECONDS
@@ -48,6 +49,15 @@ def _eligible_probe_configs(pool, status=None):
     return tuple(account.config for account in pool.accounts if account.id in available)
 
 
+def _require_quiet(db_path):
+    remaining = normal_activity_remaining(db_path)
+    if remaining > 0:
+        raise QualityProbeDeferred(
+            remaining,
+            message="Resolution checks are paused for 10 minutes after channel or account activity.",
+        )
+
+
 @contextmanager
 def quality_probe_guard(db_path, *, pool=None):
     """Serialize optional probes across workers; preserve pacing across restarts.
@@ -70,6 +80,10 @@ def quality_probe_guard(db_path, *, pool=None):
         status = pool.status()
         if any(lease["source"] == "quality_probe" for lease in status["leases"]):
             raise QualityProbeDeferred(5, busy=True)
+        _require_quiet(path)
+        if status["active"] or any(row["busy"] for row in status["accounts"]):
+            raise QualityProbeDeferred(5, busy=True,
+                message="Resolution checks are paused while channel or account activity is running.")
         try:
             next_allowed = float(os.read(fd, 128) or b"0")
         except ValueError:
@@ -80,7 +94,8 @@ def quality_probe_guard(db_path, *, pool=None):
         configs = _eligible_probe_configs(pool, status)
         succeeded = False
         try:
-            yield configs
+            with quality_probe_context(path):
+                yield configs
             succeeded = True
         finally:
             delay = PROBE_INTERVAL_SECONDS if succeeded else FAILED_PROBE_PAUSE_SECONDS
@@ -150,13 +165,20 @@ def _sample_media(lease, stream_id, extension):
         pass_fds=(lease.fd, lease.gate_fd), start_new_session=True,
     )
     try:
-        try:
-            sample, _ = process.communicate(
-                input=json.dumps(arguments).encode(),
-                timeout=max(0.001, deadline - time.monotonic()),
-            )
-        except subprocess.TimeoutExpired:
-            raise TimeoutError("Resolution sample deadline reached") from None
+        payload = json.dumps(arguments).encode()
+        while True:
+            _require_quiet(lease.pool.db_path)
+            try:
+                sample, _ = process.communicate(
+                    input=payload,
+                    timeout=min(0.25, max(0.001, deadline - time.monotonic())),
+                )
+                break
+            except subprocess.TimeoutExpired:
+                payload = None
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Resolution sample deadline reached") from None
+        _require_quiet(lease.pool.db_path)
         if process.returncode in {3, -signal.SIGKILL}:
             raise TimeoutError("Resolution sample deadline reached")
         if process.returncode or not sample or sample[0] != 0x47:
@@ -186,14 +208,19 @@ def measure_stream_quality(stream_id, extension="ts", *, pool=None,
             return measure_stream_quality(stream_id, extension, pool=pool,
                                           runner=runner, guarded=False)
     _eligible_probe_configs(pool)
+    _require_quiet(pool.db_path)
     try:
         lease = pool.acquire(stream_id, "quality_probe")
     except PoolUnavailable:
         raise PoolUnavailable("All Xtream playback slots are occupied or unavailable") from None
     outcome = "upstream_error"
     try:
+        _require_quiet(pool.db_path)
         sample = _sample_media(lease, stream_id, extension)
         outcome = "client_closed"
+    except QualityProbeDeferred:
+        outcome = "client_closed"
+        raise
     except TimeoutError:
         outcome = "upstream_timeout"
         raise XtreamError(

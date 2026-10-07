@@ -237,7 +237,9 @@ class StreamProxyTests(unittest.TestCase):
                 self.assertEqual(200, response.status_code)
                 response.close()
         self.assertEqual(0, self.pool.status()["active"])
-        self.assertFalse(any(not path.name.startswith("account-") for path in self.pool.lock_dir.iterdir()))
+        self.assertFalse(any(not (path.name.startswith("account-") or
+                                  path.name == "normal-activity-until")
+                             for path in self.pool.lock_dir.iterdir()))
 
     def test_persistent_and_dynamic_routes_share_pool_and_ignore_legacy_xtream_urls(self):
         with sqlite3.connect(self.path) as conn:

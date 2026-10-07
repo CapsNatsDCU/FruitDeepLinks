@@ -373,7 +373,9 @@ class PoolTests(unittest.TestCase):
             for lease in leases:
                 lease.release()
         self.assertEqual(0, self.pool.status()["active"])
-        self.assertFalse(any(not path.name.startswith("account-") for path in self.pool.lock_dir.iterdir()))
+        self.assertFalse(any(not (path.name.startswith("account-") or
+                                  path.name == "normal-activity-until")
+                             for path in self.pool.lock_dir.iterdir()))
 
     def test_sequential_probes_rotate_least_recently_used_accounts(self):
         selected = []

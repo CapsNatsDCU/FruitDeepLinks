@@ -543,6 +543,11 @@ class XtreamClient:
 
     def _get(self, action: str, category_id: Optional[str] = None,
              stream_id: Optional[str] = None) -> list[dict]:
+        from xtream_activity import quality_probe_db_path
+        probe_path = quality_probe_db_path()
+        if probe_path is not None:
+            from server.services.xtream_quality import _require_quiet
+            _require_quiet(probe_path)
         configs = self.metadata_configs
         failures: list[tuple[str, str]] = []
         for config in configs:
@@ -551,17 +556,20 @@ class XtreamClient:
                 with (self.request_gate.hold(config) if self.request_gate else nullcontext()) as gate_fd:
                     hosts = host_configs(config, gate_fd)
                     for host_index, host_config in hosts:
+                        if probe_path is not None:
+                            _require_quiet(probe_path)
                         rows = self._get_with_requests(action, category_id, stream_id, host_config)
                         if rows is not None:
+                            if probe_path is not None:
+                                _require_quiet(probe_path)
                             record_host_success(gate_fd, host_index)
                             self._prefer_metadata_config(config)
                             return rows
                         request_failure = self._last_request_failure or "request error"
+                        if probe_path is not None:
+                            _require_quiet(probe_path)
                         try:
                             rows = self._get_with_curl(action, category_id, stream_id, host_config)
-                            record_host_success(gate_fd, host_index)
-                            self._prefer_metadata_config(config)
-                            return rows
                         except XtreamError as exc:
                             # Curl errors are constructed without response bodies or URLs.
                             # Redact against every account as an additional safeguard.
@@ -569,6 +577,12 @@ class XtreamClient:
                             for account_config in configs:
                                 curl_failure = redact_credentials(curl_failure, account_config)
                             failures.append((request_failure, curl_failure))
+                        else:
+                            if probe_path is not None:
+                                _require_quiet(probe_path)
+                            record_host_success(gate_fd, host_index)
+                            self._prefer_metadata_config(config)
+                            return rows
                     if len(configs) == 1 and len(hosts) == 1:
                         raise XtreamError(f"{curl_failure}; Python HTTP: {request_failure}") from None
             except AccountDisabled:

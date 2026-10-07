@@ -13,6 +13,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 
 from xtream_accounts import config_fingerprint
+from xtream_activity import normal_activity
 
 
 class AccountBusy(Exception):
@@ -49,22 +50,23 @@ class AccountGate:
 
     @contextmanager
     def hold(self, config, *, wait_seconds=2):
-        fd = self.acquire(config, wait_seconds=wait_seconds)
-        try:
-            # Metadata clients can retain a config across a long refresh. A
-            # saved disable must still prevent their next provider request.
+        with normal_activity(self.db_path):
+            fd = self.acquire(config, wait_seconds=wait_seconds)
             try:
-                with closing(sqlite3.connect(self.db_path, timeout=2)) as conn:
-                    disabled = conn.execute(
-                        "SELECT 1 FROM xtream_account_state WHERE fingerprint=? AND enabled_override=0 LIMIT 1",
-                        (config_fingerprint(config),),
-                    ).fetchone()
-            except sqlite3.OperationalError as exc:
-                if "no such table" not in str(exc).lower():
-                    raise AccountBusy("Xtream account state is unavailable") from None
-                disabled = None
-            if disabled:
-                raise AccountDisabled("Xtream account is disabled")
-            yield fd
-        finally:
-            os.close(fd)
+                # Metadata clients can retain a config across a long refresh. A
+                # saved disable must still prevent their next provider request.
+                try:
+                    with closing(sqlite3.connect(self.db_path, timeout=2)) as conn:
+                        disabled = conn.execute(
+                            "SELECT 1 FROM xtream_account_state WHERE fingerprint=? AND enabled_override=0 LIMIT 1",
+                            (config_fingerprint(config),),
+                        ).fetchone()
+                except sqlite3.OperationalError as exc:
+                    if "no such table" not in str(exc).lower():
+                        raise AccountBusy("Xtream account state is unavailable") from None
+                    disabled = None
+                if disabled:
+                    raise AccountDisabled("Xtream account is disabled")
+                yield fd
+            finally:
+                os.close(fd)

@@ -149,6 +149,11 @@ account lease, and two fresh `player_api.php` `active_cons=0` readings two
 seconds apart. Missing, malformed, nonzero or unreachable provider activity
 data skips media. The media sample remains limited to eight seconds and 4 MiB;
 the existing quality-probe lock also prevents overlap with manual checks.
+Manual and background resolution checks pause whenever Fruit starts a channel
+search, provider account check, catalog/EPG request, or media tune. A shared
+on-disk timer keeps them paused for ten minutes after the most recent such
+activity finishes, including across worker restarts. A new activity cancels
+an in-progress media sample; manual checks return HTTP 429 with `Retry-After`.
 Measurements are saved to the same cache shown under Persistent Channels.
 `active_cons` is a provider snapshot, so another external player could start
 after the second reading; exclusive account allocation is the only way to

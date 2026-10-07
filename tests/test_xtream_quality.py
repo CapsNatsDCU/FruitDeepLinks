@@ -14,8 +14,9 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 from server.services.xtream_quality import (
-    QualityProbeDeferred, measure_stream_quality, quality_probe_guard,
+    QualityProbeDeferred, _sample_media, measure_stream_quality, quality_probe_guard,
 )
+from xtream_activity import mark_normal_activity, normal_activity, normal_activity_remaining
 from tests.test_xtream_pool import account_rows, pool_environment
 from tests.xtream_test_helpers import FakeMedia, HealthyAccountClient
 from xtream_ingest import XtreamError
@@ -86,6 +87,70 @@ class QualityProbeTest(unittest.TestCase):
             self.assertEqual(119, deferred.exception.retry_after)
         self.assertEqual(before, self.pool.status()["accounts"])
 
+    def test_normal_activity_extends_quiet_period_after_completion(self):
+        with normal_activity(self.pool.db_path):
+            self.assertGreater(normal_activity_remaining(self.pool.db_path), 599)
+            with self.assertRaises(QualityProbeDeferred):
+                with quality_probe_guard(self.pool.db_path, pool=self.pool):
+                    self.fail("An active account request must prevent probing")
+            with patch("xtream_activity.time.time", return_value=time.time() + 5):
+                mark_normal_activity(self.pool.db_path)
+        self.assertGreater(normal_activity_remaining(self.pool.db_path), 599)
+        with self.assertRaises(QualityProbeDeferred) as deferred:
+            with quality_probe_guard(self.pool.db_path, pool=self.pool):
+                self.fail("The cooldown must survive a new guard instance")
+        self.assertGreaterEqual(deferred.exception.retry_after, 599)
+
+    def test_metadata_requests_pause_probes_but_probe_catalog_does_not_pause_itself(self):
+        config = self.pool.accounts[0].config
+        with quality_probe_guard(self.pool.db_path, pool=self.pool):
+            with self.pool.gate.hold(config):
+                self.assertEqual(0, normal_activity_remaining(self.pool.db_path))
+        activity_file = self.pool.lock_dir / "normal-activity-until"
+        activity_file.write_text("0", encoding="ascii")
+        with self.pool.gate.hold(config):
+            self.assertGreater(normal_activity_remaining(self.pool.db_path), 599)
+
+    def test_new_activity_cancels_in_progress_media_sample(self):
+        lease = self.pool.acquire("probe", "quality_probe")
+        process = Mock(pid=12345, returncode=None)
+        process.stdin.closed = True
+        process.stdout.closed = True
+        def interrupted_sample(**kwargs):
+            mark_normal_activity(self.pool.db_path)
+            raise subprocess.TimeoutExpired("sample", kwargs["timeout"])
+        process.communicate.side_effect = interrupted_sample
+        try:
+            with (patch("server.services.xtream_quality.subprocess.Popen", return_value=process),
+                  patch("server.services.xtream_quality.os.killpg") as kill):
+                with self.assertRaises(QualityProbeDeferred):
+                    _sample_media(lease, "probe", "ts")
+                kill.assert_called_once_with(process.pid, signal.SIGKILL)
+        finally:
+            lease.release()
+
+    def test_normal_tune_waits_briefly_for_probe_to_yield(self):
+        lease = self.pool.acquire("probe", "quality_probe")
+        released = threading.Event()
+        def yield_probe():
+            while normal_activity_remaining(self.pool.db_path) == 0:
+                time.sleep(0.01)
+            lease.release()
+            released.set()
+        worker = threading.Thread(target=yield_probe, daemon=True)
+        worker.start()
+        normal = None
+        try:
+            normal = self.pool.acquire("playing", "persistent:1",
+                                       excluded={"account_1", "account_2"})
+            self.assertEqual("account_0", normal.account.id)
+            self.assertTrue(released.wait(1))
+        finally:
+            if normal:
+                normal.release()
+            lease.release()
+            worker.join(timeout=1)
+
     def test_degraded_account_is_skipped_for_probe_but_available_for_playback(self):
         with self.pool.connection() as conn:
             conn.execute("UPDATE xtream_account_state SET health='degraded' WHERE account_id='account_0'")
@@ -114,21 +179,22 @@ class QualityProbeTest(unittest.TestCase):
                     sample.assert_not_called()
                 self.assertEqual(before, self.pool.status())
 
-    def test_guard_excludes_occupied_and_degraded_accounts_from_catalog_configs(self):
+    def test_guard_defers_while_any_account_has_playback(self):
         lease = self.pool.acquire("playback", "persistent:1")
         try:
             with self.pool.connection() as conn:
                 conn.execute("UPDATE xtream_account_state SET health='degraded' WHERE account_id='account_1'")
-            with quality_probe_guard(self.pool.db_path, pool=self.pool) as configs:
-                self.assertEqual((self.pool.accounts[2].config,), configs)
+            with self.assertRaises(QualityProbeDeferred):
+                with quality_probe_guard(self.pool.db_path, pool=self.pool):
+                    self.fail("Playback on another account must pause resolution checks")
         finally:
             lease.release()
 
-    def test_occupied_healthy_capacity_rejects_probe_before_sampling(self):
+    def test_occupied_healthy_capacity_defers_probe_before_sampling(self):
         leases = [self.pool.acquire(str(i), "playback") for i in range(3)]
         try:
             with patch("server.services.xtream_quality._sample_media") as sample:
-                with self.assertRaises(PoolUnavailable):
+                with self.assertRaises(QualityProbeDeferred):
                     measure_stream_quality("probe", pool=self.pool)
                 sample.assert_not_called()
         finally:

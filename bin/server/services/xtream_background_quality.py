@@ -15,7 +15,7 @@ from server.logging_setup import log
 from server.refresh import refresh_status
 from server.services.xtream_persistent import ensure_schema, save_stream_quality
 from server.services.xtream_quality import (
-    QualityProbeDeferred, _probe_bytes, _sample_media, quality_probe_guard,
+    QualityProbeDeferred, _probe_bytes, _require_quiet, _sample_media, quality_probe_guard,
 )
 from update_protocol import installation_active
 from xtream_ingest import XtreamClient
@@ -144,6 +144,7 @@ def _run_background_quality(db_path: Path | None = None, *, pool=None) -> str:
                     _mark_account_attempt(conn, account, time.time())
                 client = XtreamClient(lease.account.config, timeout=3)
                 try:
+                    _require_quiet(path)
                     first = client.get_probe_active_connections(lease.gate_fd)
                     if first != 0:
                         return "provider_occupied_or_unknown"
@@ -151,6 +152,7 @@ def _run_background_quality(db_path: Path | None = None, *, pool=None) -> str:
                     if (installation_active() or refresh_status["running"] or
                             not _all_other_activity_absent(pool, account.id)):
                         return "local_activity"
+                    _require_quiet(path)
                     second = client.get_probe_active_connections(lease.gate_fd)
                     if second != 0:
                         return "provider_occupied_or_unknown"
@@ -160,6 +162,7 @@ def _run_background_quality(db_path: Path | None = None, *, pool=None) -> str:
                     conn.execute("""INSERT INTO xtream_background_quality_channels(channel_id,last_attempt)
                         VALUES(?,?) ON CONFLICT(channel_id) DO UPDATE SET last_attempt=excluded.last_attempt""",
                         (channel["id"], time.time()))
+                _require_quiet(path)
                 sample = _sample_media(lease, channel["stream_id"], channel["stream_extension"])
             except Exception:
                 outcome = "upstream_error"

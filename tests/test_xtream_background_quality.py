@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 from server.services.xtream_background_quality import run_background_quality
+from server.services.xtream_quality import quality_probe_guard
 from server.services.xtream_persistent import ensure_schema, quality_for_stream
 from tests.test_xtream_pool import account_rows, pool_environment
 from tests.xtream_test_helpers import HealthyAccountClient
@@ -91,6 +92,14 @@ class BackgroundQualityTests(unittest.TestCase):
                 client_type.assert_not_called()
         finally:
             lease.release()
+
+    def test_completed_stream_keeps_background_checks_paused(self):
+        lease = self.pool.acquire("playing", "persistent:1")
+        lease.release()
+        with (patch("server.services.xtream_background_quality.quality_probe_guard", quality_probe_guard),
+              patch("server.services.xtream_background_quality.XtreamClient") as client_type):
+            self.assertEqual("deferred", run_background_quality(self.path, pool=self.pool))
+            client_type.assert_not_called()
 
     def test_provider_failure_releases_lease_and_does_not_open_media(self):
         with patch("server.services.xtream_background_quality.XtreamClient") as client_type, \

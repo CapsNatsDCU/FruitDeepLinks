@@ -18,6 +18,7 @@ from pathlib import Path
 
 from xtream_accounts import Account, capacity, load_accounts, safe_value
 from xtream_gate import AccountBusy, AccountGate
+from xtream_activity import mark_normal_activity
 from xtream_ingest import XtreamClient, XtreamError
 from xtream_pool_schema import ensure_schema
 
@@ -243,13 +244,30 @@ class XtreamPool:
                     continue
                 conn.execute("DELETE FROM xtream_leases WHERE lease_id=?", (row["lease_id"],))
                 self._history(conn, row["account_id"], row["stream_id"], row["source"], row["started"], "worker_stopped")
+                if row["source"] != "quality_probe":
+                    mark_normal_activity(self.db_path)
                 path.unlink(missing_ok=True)
             finally:
                 os.close(fd)
 
     def acquire(self, stream_id, source, *, excluded=()) -> Lease:
+        if source != "quality_probe":
+            mark_normal_activity(self.db_path)
         if not self.enabled:
             raise PoolUnavailable("Xtream is disabled or no accounts are configured")
+        if source != "quality_probe":
+            # A normal tune has priority over an optional resolution sample.
+            # Give the sampler a short chance to see the activity marker,
+            # close its child, and release its account before allocating.
+            deadline = time.monotonic() + 4
+            while time.monotonic() < deadline:
+                status = self.status()
+                probing = any(row["source"] == "quality_probe" for row in status["leases"])
+                other_slot = any(row["id"] not in excluded and row["available"] > 0
+                                 for row in status["accounts"])
+                if not probing or other_slot:
+                    break
+                time.sleep(0.05)
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._reap(conn)
@@ -340,7 +358,11 @@ class XtreamPool:
             # read will reclaim the row once this lock closes.
             if fd >= 0:
                 os.close(fd)
-            os.close(gate_fd)
+            try:
+                if lease.source != "quality_probe":
+                    mark_normal_activity(self.db_path)
+            finally:
+                os.close(gate_fd)
         if child_holds_lock:
             self._log("Xtream media child still holds a stream reservation")
         else:
