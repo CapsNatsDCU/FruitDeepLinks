@@ -207,7 +207,8 @@ async function loadXtreamPool() {
           <button class="btn btn-secondary" type="button" data-pool-test="account" onclick="checkXtreamPool(this,this.form.dataset.accountId)">Test Account</button>
         </div>
         <p>${escHtml(account.health)} · Discovered: ${account.discovered_capacity ?? 'Unknown'} · Effective: ${account.effective_capacity} · Active: ${account.active} · Available: ${account.available}${account.capacity_source === 'conservative_default' ? ' · Unknown limit: conservatively using 1; set an override if needed.' : ''}</p>
-        <p class="status-muted">Last successful check: ${account.last_success ? escHtml(new Date(account.last_success * 1000).toLocaleString()) : 'Not checked'}${account.last_error ? ' · ' + escHtml(account.last_error) : ''}</p>
+        <p class="status-muted">Last checked: ${account.last_checked ? escHtml(new Date(account.last_checked * 1000).toLocaleString()) : 'Not checked'}${account.last_error ? ' · ' + escHtml(account.last_error) : ''}</p>
+        <p class="status-muted">Last successful check: ${account.last_success ? escHtml(new Date(account.last_success * 1000).toLocaleString()) : 'Never'}</p>
         <p class="xtream-test-feedback" data-pool-test-status role="status" aria-live="polite" hidden></p>
       </form>`).join('') : '<p>No accounts configured. Add Xtream accounts to your deployment secrets, then test the pool.</p>';
     renderXtreamPoolTestStatus();
