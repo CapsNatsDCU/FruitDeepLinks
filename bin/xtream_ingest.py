@@ -706,7 +706,8 @@ class XtreamClient:
         """Check configured host, then its alternate, under the caller's gate."""
         gate_fd = getattr(self, "host_gate_fd", None)
         checks = []
-        for host_index, host_config in host_configs(self.config, gate_fd):
+        hosts = host_configs(self.config, gate_fd)
+        for host_index, host_config in hosts:
             maximum, check = self._account_check_one_host(host_config)
             if check["health"] == "healthy":
                 record_host_success(gate_fd, host_index)
@@ -714,7 +715,7 @@ class XtreamClient:
                 self.last_account_check = check
                 return maximum
             checks.append(check)
-        self.last_account_check = checks[-1]
+        self.last_account_check = {**checks[-1], "host_route": "both_failed" if len(hosts) > 1 else "configured_failed"}
         return None
 
 

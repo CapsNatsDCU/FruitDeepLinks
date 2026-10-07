@@ -155,8 +155,7 @@ class XtreamPool:
                 maximum = capacity(client.get_account_max_connections())
                 check = getattr(client, "last_account_check", None) or {
                     "health": "healthy" if maximum else "unreachable", "error": None if maximum else "Provider account check failed"}
-                if check.get("health") == "healthy":
-                    checked_hosts[account.id] = check.get("host_route", "configured")
+                checked_hosts[account.id] = check.get("host_route", "configured" if check.get("health") == "healthy" else "configured_failed")
                 health = check["health"] if check.get("health") in {"healthy", "unhealthy", "unreachable"} else "unreachable"
                 error = None if health == "healthy" else (
                     check.get("error") or ("Account authentication or subscription rejected"

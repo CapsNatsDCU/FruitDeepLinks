@@ -242,6 +242,23 @@ class AccountConfigTests(unittest.TestCase):
         self.assertEqual(1, runner.call_count)
         self.assertEqual("http://alternate.example/player_api.php", alternate.get.call_args.args[0])
 
+    def test_account_check_reports_when_both_hosts_fail(self):
+        rows = account_rows((1,))
+        rows[0]["fallback_server_url"] = "http://alternate.example"
+        config = load_accounts(environ=pool_environment(rows))[0].config
+        primary = Mock()
+        primary.get.side_effect = requests.Timeout()
+        alternate = Mock()
+        alternate.get.side_effect = requests.Timeout()
+        runner = Mock(return_value=Mock(returncode=28, stdout=""))
+        client = XtreamClient(config, session=primary, subprocess_runner=runner)
+        with patch("xtream_ingest.requests.Session", return_value=alternate):
+            self.assertIsNone(client.get_account_max_connections())
+        self.assertEqual("both_failed", client.last_account_check["host_route"])
+        self.assertEqual(1, primary.get.call_count)
+        self.assertEqual(1, alternate.get.call_count)
+        self.assertEqual(2, runner.call_count)
+
     def test_account_discovery_retries_json_rejection_and_unconfirmed_auth(self):
         config = load_accounts(environ=pool_environment())[0].config
         for info in ({"auth": 0}, {"auth": "0", "status": "Active"},

@@ -133,7 +133,7 @@ attempt before trying the second host with the **same account credentials and
 the same account lock**. A successful alternate is preferred for five minutes,
 then the configured primary is tried again. No host is added for other account
 IDs or an unrelated configured host. Test Account reports when its successful
-check used the alternate host; a healthy check still does not prove playback,
+check used the alternate host or both hosts failed; a healthy check still does not prove playback,
 which requires a real media `GET`.
 
 Settings → **Lanes → Number of Lanes** controls how many dynamic lanes appear in
