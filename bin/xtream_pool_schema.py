@@ -16,7 +16,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             last_checked REAL,
             last_success REAL,
             last_error TEXT,
-            retry_after REAL NOT NULL DEFAULT 0
+            retry_after REAL NOT NULL DEFAULT 0,
+            exclusive_for_background INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS xtream_leases (
             lease_id TEXT PRIMARY KEY,
@@ -61,4 +62,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     if "fingerprint" not in columns:
         conn.execute("ALTER TABLE xtream_leases ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''")
         conn.execute("UPDATE xtream_leases SET fingerprint=COALESCE((SELECT fingerprint FROM xtream_account_state a WHERE a.account_id=xtream_leases.account_id),'')")
+    account_columns = {row[1] for row in conn.execute("PRAGMA table_info(xtream_account_state)")}
+    if "exclusive_for_background" not in account_columns:
+        conn.execute("ALTER TABLE xtream_account_state ADD COLUMN exclusive_for_background INTEGER NOT NULL DEFAULT 0")
     conn.commit()

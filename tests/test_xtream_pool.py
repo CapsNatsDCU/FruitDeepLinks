@@ -45,6 +45,34 @@ def hold_in_process(path, env, pipe):
 
 
 class AccountConfigTests(unittest.TestCase):
+    def test_background_reservation_requires_explicit_account_setting_and_resets_on_rotation(self):
+        rows = account_rows((1,))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fruit.db"
+            pool = XtreamPool(path, pool_environment(rows), client_factory=HealthyAccountClient)
+            self.assertFalse(pool.status()["accounts"][0]["reserved_for_fruit"])
+            with self.assertRaises(XtreamError):
+                pool.update("account_0", {"reserved_for_fruit": "true"})
+            pool.update("account_0", {"reserved_for_fruit": True})
+            self.assertTrue(pool.status()["accounts"][0]["reserved_for_fruit"])
+            rows[0]["password"] = "rotated-private-password"
+            rotated = XtreamPool(path, pool_environment(rows), client_factory=HealthyAccountClient)
+            self.assertFalse(rotated.status()["accounts"][0]["reserved_for_fruit"])
+
+    def test_existing_pool_schema_adds_background_reservation_disabled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fruit.db"
+            with sqlite3.connect(path) as conn:
+                conn.execute("""CREATE TABLE xtream_account_state (
+                    account_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
+                    label_override TEXT, enabled_override INTEGER, capacity_override INTEGER,
+                    discovered_capacity INTEGER, health TEXT NOT NULL DEFAULT 'unknown',
+                    last_checked REAL, last_success REAL, last_error TEXT,
+                    retry_after REAL NOT NULL DEFAULT 0)""")
+            pool = XtreamPool(path, pool_environment(account_rows((1,))),
+                              client_factory=HealthyAccountClient)
+            self.assertFalse(pool.status()["accounts"][0]["reserved_for_fruit"])
+
     def test_known_host_pair_is_scoped_to_accounts_two_and_three(self):
         rows = account_rows((1, 1, 1))
         rows[0]["id"] = "account_1"

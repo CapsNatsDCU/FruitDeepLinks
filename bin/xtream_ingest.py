@@ -637,6 +637,11 @@ class XtreamClient:
         if str(info.get("auth", "")) != "1" or status != "active":
             return None, {"health": "unreachable", "error": "Provider did not confirm account authorization"}
         check = {"health": "healthy", "error": None}
+        # This optional Xtream field is only a snapshot. Background probes
+        # require an explicit zero and skip when it is absent or malformed.
+        active = info.get("active_cons")
+        if not isinstance(active, bool) and active is not None and re.fullmatch(r"[0-9]{1,5}", str(active)):
+            check["active_connections"] = int(active)
         try:
             maximum = int(info.get("max_connections"))
         except (ValueError, TypeError, OverflowError):
@@ -717,6 +722,12 @@ class XtreamClient:
             checks.append(check)
         self.last_account_check = {**checks[-1], "host_route": "both_failed" if len(hosts) > 1 else "configured_failed"}
         return None
+
+    def get_probe_active_connections(self, gate_fd: int) -> Optional[int]:
+        """Read one preferred host under a reserved account lease; fail closed."""
+        _, config = host_configs(self.config, gate_fd)[0]
+        _, check = self._account_check_one_host(config)
+        return check.get("active_connections") if check["health"] == "healthy" else None
 
 
 def stable_event_id(category_id: Any, stream_id: Any) -> str:

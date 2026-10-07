@@ -7,6 +7,7 @@ for the configured refresh time, so the DB must be accessible.
 """
 
 import os
+from datetime import datetime, timedelta, timezone
 
 from server.config import cfg
 from server.logging_setup import log
@@ -21,6 +22,7 @@ except ImportError:
 
 _scheduler = None
 _job = None
+_quality_job = None
 
 
 def _get_scheduler():
@@ -29,7 +31,7 @@ def _get_scheduler():
 
 def start(auto_refresh_settings: dict | None = None) -> None:
     """Start APScheduler and schedule the auto-refresh job if enabled."""
-    global _scheduler, _job
+    global _scheduler, _job, _quality_job
 
     if not _AVAILABLE:
         log("APScheduler not installed; auto-refresh disabled", "ERROR")
@@ -41,6 +43,20 @@ def start(auto_refresh_settings: dict | None = None) -> None:
         log("APScheduler started", "INFO")
         if auto_refresh_settings:
             schedule(auto_refresh_settings)
+        if os.getenv("XTREAM_BACKGROUND_QUALITY_ENABLED", "true").lower() not in {"0", "false", "no"}:
+            from server.services.xtream_background_quality import run_background_quality
+            _quality_job = _scheduler.add_job(
+                func=run_background_quality,
+                trigger="interval",
+                seconds=60,
+                next_run_time=datetime.now(timezone.utc) + timedelta(seconds=60),
+                id="xtream_background_quality",
+                replace_existing=True,
+                coalesce=True,
+                max_instances=1,
+                misfire_grace_time=30,
+            )
+            log("Slow Xtream resolution checks scheduled", "INFO")
     except Exception as e:
         log(f"Error starting APScheduler: {e}", "ERROR")
 
@@ -94,10 +110,12 @@ def next_run_iso() -> str | None:
 
 
 def stop() -> None:
-    global _scheduler
+    global _scheduler, _job, _quality_job
     if _scheduler:
         try:
             _scheduler.shutdown(wait=False)
         except Exception:
             pass
         _scheduler = None
+        _job = None
+        _quality_job = None

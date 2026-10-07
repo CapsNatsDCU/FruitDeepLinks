@@ -86,7 +86,8 @@ class XtreamPool:
                 conn.execute("INSERT OR IGNORE INTO xtream_account_state(account_id,fingerprint) VALUES(?,?)",
                              (account.id, account.fingerprint))
                 conn.execute("UPDATE xtream_account_state SET fingerprint=?,health='unknown',discovered_capacity=NULL,"
-                             "last_checked=NULL,last_success=NULL,last_error=NULL,retry_after=0 WHERE account_id=? AND fingerprint<>?",
+                             "last_checked=NULL,last_success=NULL,last_error=NULL,retry_after=0,exclusive_for_background=0 "
+                             "WHERE account_id=? AND fingerprint<>?",
                              (account.fingerprint, account.id, account.fingerprint))
 
     @contextmanager
@@ -190,8 +191,8 @@ class XtreamPool:
         return result
 
     def update(self, account_id, payload):
-        if not isinstance(payload, dict) or set(payload) - {"label", "enabled", "capacity_override"}:
-            raise XtreamError("Only label, enabled and capacity_override can be edited here")
+        if not isinstance(payload, dict) or set(payload) - {"label", "enabled", "capacity_override", "reserved_for_fruit"}:
+            raise XtreamError("Only label, enabled, capacity_override and reserved_for_fruit can be edited here")
         account = next((a for a in self.accounts if a.id == account_id), None)
         if account is None:
             raise XtreamError("Xtream account not found")
@@ -204,6 +205,10 @@ class XtreamPool:
             fields["enabled_override"] = int(payload["enabled"])
         if "capacity_override" in payload:
             fields["capacity_override"] = capacity(payload["capacity_override"])
+        if "reserved_for_fruit" in payload:
+            if not isinstance(payload["reserved_for_fruit"], bool):
+                raise XtreamError("Reserved for Fruit must be true or false")
+            fields["exclusive_for_background"] = int(payload["reserved_for_fruit"])
         if "label" in payload:
             label = payload["label"]
             if not isinstance(label, str) or len(label) > 100 or any(ord(c) < 32 for c in label):
@@ -211,7 +216,7 @@ class XtreamPool:
             fields["label_override"] = safe_value(label.strip(), self.accounts) or None
         if fields:
             gate_fd = -1
-            if "enabled_override" in fields:
+            if "enabled_override" in fields or "exclusive_for_background" in fields:
                 try:
                     gate_fd = self.gate.acquire(account.config)
                 except AccountBusy:
@@ -367,7 +372,8 @@ class XtreamPool:
                     os.close(gate_fd)
                 available = max(0, state["effective_capacity"] - active) if usable and not busy and state["retry_after"] <= time.time() else 0
                 keys = ("id", "label", "enabled", "health", "discovered_capacity", "configured_override", "effective_capacity", "capacity_source", "last_checked", "last_success", "last_error")
-                accounts.append({**{key: state[key] for key in keys}, "active": active, "available": available, "busy": busy,
+                accounts.append({**{key: state[key] for key in keys}, "reserved_for_fruit": bool(state["exclusive_for_background"]),
+                                 "active": active, "available": available, "busy": busy,
                                  "capacity": state["effective_capacity"] if usable else 0})
             history = [dict(row) for row in conn.execute("SELECT * FROM xtream_stream_history ORDER BY id DESC LIMIT 30")]
         labels = {row["id"]: row["label"] for row in accounts}

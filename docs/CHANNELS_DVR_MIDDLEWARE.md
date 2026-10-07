@@ -81,6 +81,7 @@ Environment settings:
 | `XTREAM_ACCOUNTS_JSON` | Alternative JSON supplied by the deployment secret/environment system |
 | `XTREAM_CAPACITY_OVERRIDE` | Optional override for the legacy single-account fallback |
 | `XTREAM_STREAM_IDLE_TIMEOUT=60` | Media inactivity timeout, bounded to 10–600 seconds |
+| `XTREAM_BACKGROUND_QUALITY_ENABLED=false` | Disable the slow automatic resolution sampler (enabled by default) |
 | `XTREAM_HTTP_PROXY=http://172.16.6.1:8888` | Optional HTTP proxy for Xtream account checks, catalogue, EPG, and media only; use an address reachable from the Fruit container |
 | `FRUIT_LANES=50` | Initial virtual lane count, 1–750; the saved Settings value takes precedence |
 
@@ -135,6 +136,23 @@ then the configured primary is tried again. No host is added for other account
 IDs or an unrelated configured host. Test Account reports when its successful
 check used the alternate host or both hosts failed; a healthy check still does not prove playback,
 which requires a real media `GET`.
+
+The background resolution sampler considers only enabled, available **saved
+persistent channels**. It wakes once a minute but attempts at most one channel
+per tick, one provider activity preflight per account per ten minutes, and one
+media sample per channel per ten minutes. It runs only for accounts explicitly
+marked **Reserved for Fruit** in Settings; the default is off per account, and
+the reservation resets if that account's credentials change. Clear the setting
+before using the account elsewhere. It requires no Fruit stream or other
+account operation to be active, a cached healthy account with a free slot, an
+account lease, and two fresh `player_api.php` `active_cons=0` readings two
+seconds apart. Missing, malformed, nonzero or unreachable provider activity
+data skips media. The media sample remains limited to eight seconds and 4 MiB;
+the existing quality-probe lock also prevents overlap with manual checks.
+Measurements are saved to the same cache shown under Persistent Channels.
+`active_cons` is a provider snapshot, so another external player could start
+after the second reading; exclusive account allocation is the only way to
+eliminate that external race.
 
 Settings → **Lanes → Number of Lanes** controls how many dynamic lanes appear in
 the legacy and unified Channels lineups. Use **Save & Rebuild Lanes** to save the
