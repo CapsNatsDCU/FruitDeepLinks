@@ -19,7 +19,7 @@ from server.services.xtream_quality import (
 from tests.test_xtream_pool import account_rows, pool_environment
 from tests.xtream_test_helpers import FakeMedia, HealthyAccountClient
 from xtream_ingest import XtreamError
-from xtream_pool import XtreamPool
+from xtream_pool import PoolUnavailable, XtreamPool
 from xtream_quality_sample import capture_sample, MAX_SAMPLE_BYTES
 
 
@@ -42,9 +42,9 @@ class QualityProbeTest(unittest.TestCase):
             return measure_stream_quality(stream_id, **kwargs)
 
     def test_independent_guards_serialize_without_blocking_playback(self):
-        with quality_probe_guard(self.pool.db_path):
+        with quality_probe_guard(self.pool.db_path, pool=self.pool):
             with self.assertRaises(QualityProbeDeferred) as deferred:
-                with quality_probe_guard(self.pool.db_path):
+                with quality_probe_guard(self.pool.db_path, pool=self.pool):
                     self.fail("A second probe must not run")
             self.assertIn("running", str(deferred.exception))
             lease = self.pool.acquire("playback", "persistent:1")
@@ -55,36 +55,93 @@ class QualityProbeTest(unittest.TestCase):
         lease = self.pool.acquire("probe", "quality_probe")
         try:
             with self.assertRaises(QualityProbeDeferred):
-                with quality_probe_guard(self.pool.db_path):
+                with quality_probe_guard(self.pool.db_path, pool=self.pool):
                     self.fail("An existing probe media lease must prevent overlap")
         finally:
             lease.release()
 
     def test_successful_guard_pacing_survives_a_new_guard_instance(self):
         with patch("server.services.xtream_quality.time.time", return_value=100):
-            with quality_probe_guard(self.pool.db_path):
+            with quality_probe_guard(self.pool.db_path, pool=self.pool):
                 pass
         with patch("server.services.xtream_quality.time.time", return_value=129):
             with self.assertRaises(QualityProbeDeferred) as deferred:
-                with quality_probe_guard(self.pool.db_path):
+                with quality_probe_guard(self.pool.db_path, pool=self.pool):
                     self.fail("Probe spacing must be preserved")
             self.assertEqual(1, deferred.exception.retry_after)
         with patch("server.services.xtream_quality.time.time", return_value=130):
-            with quality_probe_guard(self.pool.db_path):
+            with quality_probe_guard(self.pool.db_path, pool=self.pool):
                 pass
 
     def test_failed_guard_pauses_probes_but_not_playback_accounts(self):
         before = self.pool.status()["accounts"]
         with patch("server.services.xtream_quality.time.time", return_value=100):
             with self.assertRaises(RuntimeError):
-                with quality_probe_guard(self.pool.db_path):
+                with quality_probe_guard(self.pool.db_path, pool=self.pool):
                     raise RuntimeError("Provider failure")
         with patch("server.services.xtream_quality.time.time", return_value=101):
             with self.assertRaises(QualityProbeDeferred) as deferred:
-                with quality_probe_guard(self.pool.db_path):
+                with quality_probe_guard(self.pool.db_path, pool=self.pool):
                     self.fail("Failed probes must pause subsequent probes")
             self.assertEqual(119, deferred.exception.retry_after)
         self.assertEqual(before, self.pool.status()["accounts"])
+
+    def test_degraded_account_is_skipped_for_probe_but_available_for_playback(self):
+        with self.pool.connection() as conn:
+            conn.execute("UPDATE xtream_account_state SET health='degraded' WHERE account_id='account_0'")
+        with (patch("server.services.xtream_quality._sample_media", return_value=b"\x47" * 188) as sample,
+              patch("server.services.xtream_quality._probe_bytes", return_value={"height": 720})):
+            measure_stream_quality("probe", pool=self.pool)
+        self.assertEqual("account_1", sample.call_args.args[0].account.id)
+        self.assertEqual("degraded", self.pool.status()["accounts"][0]["health"])
+        lease = self.pool.acquire("playback", "persistent:1")
+        self.assertEqual("account_0", lease.account.id)
+        lease.release()
+
+    def test_unverified_accounts_never_trigger_verification_or_sampling(self):
+        for health in ("degraded", "unknown", "unreachable", "unhealthy"):
+            with self.subTest(health=health):
+                with self.pool.connection() as conn:
+                    conn.execute("UPDATE xtream_account_state SET health=?", (health,))
+                before = self.pool.status()
+                with (patch.object(self.pool, "check_accounts") as verify,
+                      patch("server.services.xtream_quality._sample_media") as sample):
+                    for guarded in (True, False):
+                        with self.assertRaises(QualityProbeDeferred) as deferred:
+                            measure_stream_quality("probe", pool=self.pool, guarded=guarded)
+                        self.assertIn("verified healthy", str(deferred.exception))
+                    verify.assert_not_called()
+                    sample.assert_not_called()
+                self.assertEqual(before, self.pool.status())
+
+    def test_guard_excludes_occupied_and_degraded_accounts_from_catalog_configs(self):
+        lease = self.pool.acquire("playback", "persistent:1")
+        try:
+            with self.pool.connection() as conn:
+                conn.execute("UPDATE xtream_account_state SET health='degraded' WHERE account_id='account_1'")
+            with quality_probe_guard(self.pool.db_path, pool=self.pool) as configs:
+                self.assertEqual((self.pool.accounts[2].config,), configs)
+        finally:
+            lease.release()
+
+    def test_occupied_healthy_capacity_rejects_probe_before_sampling(self):
+        leases = [self.pool.acquire(str(i), "playback") for i in range(3)]
+        try:
+            with patch("server.services.xtream_quality._sample_media") as sample:
+                with self.assertRaises(PoolUnavailable):
+                    measure_stream_quality("probe", pool=self.pool)
+                sample.assert_not_called()
+        finally:
+            for lease in leases:
+                lease.release()
+
+    def test_allocator_rechecks_health_after_probe_preflight(self):
+        with quality_probe_guard(self.pool.db_path, pool=self.pool):
+            with self.pool.connection() as conn:
+                conn.execute("UPDATE xtream_account_state SET health='degraded'")
+            with self.assertRaises(PoolUnavailable):
+                self.pool.acquire("probe", "quality_probe")
+        self.assertEqual(0, self.pool.status()["active"])
 
     def test_probe_passes_only_media_to_ffprobe_and_releases_capacity(self):
         media = FakeMedia([b"\x47" * 188] * 3)

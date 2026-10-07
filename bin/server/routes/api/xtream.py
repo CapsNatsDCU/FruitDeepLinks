@@ -160,8 +160,8 @@ def _safe_error(exc: Exception, status: int = 400):
     return jsonify({"status": "error", "message": "Persistent Xtream operation failed"}), 500
 
 
-def _configured_client(conn):
-    configs = load_metadata_configs(conn, os.environ)
+def _configured_client(conn, *, configs=None):
+    configs = load_metadata_configs(conn, os.environ) if configs is None else configs
     config = configs[0]
     config.validate(require_categories=False)
     client = XtreamClient(config)
@@ -479,7 +479,7 @@ def api_xtream_persistent_quality():
     _ensure_database()
     try:
         from server.services.xtream_quality import quality_probe_guard
-        with quality_probe_guard(resolve_db_path()):
+        with quality_probe_guard(resolve_db_path()) as probe_configs:
             with get_conn() as conn:
                 ensure_persistent_schema(conn)
                 saved = conn.execute(
@@ -492,7 +492,7 @@ def api_xtream_persistent_quality():
                 else:
                     # Search results are not yet configured. Verify their identity
                     # with the provider before accepting an arbitrary stream ID.
-                    _, client = _configured_client(conn)
+                    _, client = _configured_client(conn, configs=probe_configs)
                     try:
                         categories = client.get_live_categories()
                         if category_id not in {str(row.get("category_id")) for row in categories}:

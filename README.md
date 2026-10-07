@@ -282,6 +282,10 @@ Checks wait 30 seconds after a success; a failure pauses new checks for two
 minutes. The API returns HTTP 429 with `Retry-After` while paused. These local
 limits reduce optional probe traffic; they do not guarantee provider recovery.
 Playback account health and slots are unchanged by a failed resolution check.
+Optional resolution checks require an enabled account whose cached health is
+healthy and whose slot is free. Degraded or unverified accounts are skipped,
+including during catalog validation; probes never automatically verify accounts.
+If none is healthy, Fruit pauses the check locally without contacting the provider.
 Each media sample has an eight-second wall deadline, including connection setup
 and transport fallbacks, and a 4 MiB byte limit. Fruit closes the upstream and
 releases the account slot before analyzing the downloaded bytes. An independent

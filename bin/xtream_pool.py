@@ -218,7 +218,11 @@ class XtreamPool:
             for account in self.accounts:
                 state = self._state(conn, account)
                 active = sum(row["account_id"] == account.id or row["fingerprint"] == account.fingerprint for row in live)
-                if (account.id not in excluded and state["enabled"] and state["health"] in {"healthy", "degraded"}
+                # Optional diagnostics cannot recover or sample degraded accounts.
+                # Enforce this inside the allocation transaction if health changed
+                # after the route's preflight. Playback retains its fallback.
+                allowed_health = {"healthy"} if source == "quality_probe" else {"healthy", "degraded"}
+                if (account.id not in excluded and state["enabled"] and state["health"] in allowed_health
                         and state["retry_after"] <= time.time() and active < state["effective_capacity"]):
                     # A sequential quality scan must not hammer the first
                     # account alphabetically.  Reuse the least recently

@@ -24,15 +24,31 @@ FAILED_PROBE_PAUSE_SECONDS = 120
 
 
 class QualityProbeDeferred(XtreamError):
-    def __init__(self, retry_after, *, busy=False):
+    def __init__(self, retry_after, *, busy=False, message=None):
         self.retry_after = max(1, math.ceil(retry_after))
-        message = ("Another resolution check is running." if busy else
-                   "Resolution checks are paused to limit provider requests.")
+        message = message or ("Another resolution check is running." if busy else
+                              "Resolution checks are paused to limit provider requests.")
         super().__init__(f"{message} Try again in {self.retry_after} seconds.")
 
 
+def _eligible_probe_configs(pool, status=None):
+    """Use cached health only: optional diagnostics must not perform recovery."""
+    status = status if status is not None else pool.status()
+    healthy = [row for row in status["accounts"]
+               if row["enabled"] and row["health"] == "healthy"]
+    if not healthy:
+        raise QualityProbeDeferred(
+            FAILED_PROBE_PAUSE_SECONDS,
+            message="Resolution checks are paused because no enabled account is verified healthy.",
+        )
+    available = {row["id"] for row in healthy if row["available"] > 0}
+    if not available:
+        raise PoolUnavailable("No verified healthy Xtream playback slots are available")
+    return tuple(account.config for account in pool.accounts if account.id in available)
+
+
 @contextmanager
-def quality_probe_guard(db_path):
+def quality_probe_guard(db_path, *, pool=None):
     """Serialize optional probes across workers; preserve pacing across restarts.
 
     This is separate from playback leases and does not change account health.
@@ -49,8 +65,9 @@ def quality_probe_guard(db_path):
             raise QualityProbeDeferred(5, busy=True) from None
         # A curl/FFmpeg child can retain its media lease after its Python
         # worker exits. Reap only unlocked leases before allowing a new probe.
-        if any(lease["source"] == "quality_probe"
-               for lease in XtreamPool(path).status()["leases"]):
+        pool = pool or XtreamPool(path)
+        status = pool.status()
+        if any(lease["source"] == "quality_probe" for lease in status["leases"]):
             raise QualityProbeDeferred(5, busy=True)
         try:
             next_allowed = float(os.read(fd, 128) or b"0")
@@ -59,9 +76,10 @@ def quality_probe_guard(db_path):
         remaining = next_allowed - time.time()
         if math.isfinite(remaining) and remaining > 0:
             raise QualityProbeDeferred(remaining)
+        configs = _eligible_probe_configs(pool, status)
         succeeded = False
         try:
-            yield
+            yield configs
             succeeded = True
         finally:
             delay = PROBE_INTERVAL_SECONDS if succeeded else FAILED_PROBE_PAUSE_SECONDS
@@ -157,11 +175,10 @@ def measure_stream_quality(stream_id, extension="ts", *, pool=None,
     """Sample in a bounded worker; close media and release its slot before analysis."""
     pool = pool or XtreamPool(resolve_db_path())
     if guarded:
-        with quality_probe_guard(pool.db_path):
+        with quality_probe_guard(pool.db_path, pool=pool):
             return measure_stream_quality(stream_id, extension, pool=pool,
                                           runner=runner, guarded=False)
-    if any(account["health"] == "unknown" for account in pool.status()["accounts"]):
-        pool.check_accounts(due_only=True)
+    _eligible_probe_configs(pool)
     try:
         lease = pool.acquire(stream_id, "quality_probe")
     except PoolUnavailable:
