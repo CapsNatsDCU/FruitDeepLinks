@@ -65,6 +65,6 @@ class AccountGate:
                 disabled = None
             if disabled:
                 raise AccountDisabled("Xtream account is disabled")
-            yield
+            yield fd
         finally:
             os.close(fd)

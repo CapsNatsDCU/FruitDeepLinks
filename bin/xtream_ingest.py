@@ -31,6 +31,7 @@ import requests
 
 from xtream_transport import configure_session, curl_proxy_args
 from xtream_gate import AccountBusy, AccountDisabled, AccountGate
+from xtream_hosts import host_configs, record_host_success
 
 try:
     from db.preferences import get_setting
@@ -126,6 +127,7 @@ class XtreamConfig:
     timezone_name: str = "UTC"
     default_duration_minutes: int = DEFAULT_DURATION_MINUTES
     event_window_days: int = 7
+    fallback_server_url: Optional[str] = field(default=None, repr=False)
 
     def validate(self, *, require_categories: bool = True) -> None:
         if not self.enabled:
@@ -134,6 +136,10 @@ class XtreamConfig:
             raise XtreamError("XTREAM_SERVER_URL is required")
         from xtream_accounts import validate_server
         validate_server(self.server_url)
+        if self.fallback_server_url:
+            validate_server(self.fallback_server_url)
+            if self.fallback_server_url == self.server_url:
+                raise XtreamError("Xtream fallback server must differ from the primary server")
         if not self.username:
             raise XtreamError("XTREAM_USERNAME is required")
         if not self.password:
@@ -542,25 +548,29 @@ class XtreamClient:
         for config in configs:
             self._last_request_failure = None
             try:
-                with (self.request_gate.hold(config) if self.request_gate else nullcontext()):
-                    rows = self._get_with_requests(action, category_id, stream_id, config)
-                    if rows is not None:
-                        self._prefer_metadata_config(config)
-                        return rows
-                    request_failure = self._last_request_failure or "request error"
-                    try:
-                        rows = self._get_with_curl(action, category_id, stream_id, config)
-                        self._prefer_metadata_config(config)
-                        return rows
-                    except XtreamError as exc:
-                        # Curl errors are constructed without response bodies or URLs.
-                        # Redact against every account as an additional safeguard.
-                        curl_failure = str(exc)
-                        for account_config in configs:
-                            curl_failure = redact_credentials(curl_failure, account_config)
-                        failures.append((request_failure, curl_failure))
-                        if len(configs) == 1:
-                            raise XtreamError(f"{curl_failure}; Python HTTP: {request_failure}") from None
+                with (self.request_gate.hold(config) if self.request_gate else nullcontext()) as gate_fd:
+                    hosts = host_configs(config, gate_fd)
+                    for host_index, host_config in hosts:
+                        rows = self._get_with_requests(action, category_id, stream_id, host_config)
+                        if rows is not None:
+                            record_host_success(gate_fd, host_index)
+                            self._prefer_metadata_config(config)
+                            return rows
+                        request_failure = self._last_request_failure or "request error"
+                        try:
+                            rows = self._get_with_curl(action, category_id, stream_id, host_config)
+                            record_host_success(gate_fd, host_index)
+                            self._prefer_metadata_config(config)
+                            return rows
+                        except XtreamError as exc:
+                            # Curl errors are constructed without response bodies or URLs.
+                            # Redact against every account as an additional safeguard.
+                            curl_failure = str(exc)
+                            for account_config in configs:
+                                curl_failure = redact_credentials(curl_failure, account_config)
+                            failures.append((request_failure, curl_failure))
+                    if len(configs) == 1 and len(hosts) == 1:
+                        raise XtreamError(f"{curl_failure}; Python HTTP: {request_failure}") from None
             except AccountDisabled:
                 failures.append(("account disabled", "provider request skipped"))
             except AccountBusy:
@@ -633,22 +643,16 @@ class XtreamClient:
             return None, check
         return (maximum if 0 < maximum <= 10000 else None), check
 
-    def get_account_max_connections(self) -> Optional[int]:
-        """Read an optional provider limit without retaining authenticated data.
-
-        Xtream's unactioned player API response commonly contains
-        ``user_info.max_connections``. The numeric limit remains optional;
-        last_account_check separately records authentication/transport health.
-        Use the same curl compatibility fallback as catalogue ingestion.
-        """
+    def _account_check_one_host(self, config: XtreamConfig) -> tuple[Optional[int], dict]:
         maximum = None
         check = {"health": "unreachable", "error": "Provider account check failed"}
         request_error = None
         response = None
+        session = self.session if config is self.config else configure_session(requests.Session())
         try:
-            response = self.session.get(
-                f"{self.config.server_url}/player_api.php",
-                params={"username": self.config.username, "password": self.config.password},
+            response = session.get(
+                f"{config.server_url}/player_api.php",
+                params={"username": config.username, "password": config.password},
                 timeout=self.timeout,
             )
             response.raise_for_status()
@@ -673,7 +677,7 @@ class XtreamClient:
             # Give those responses the same single compatibility retry as an
             # HTTP error. Capacity alone never confirms authorization.
             try:
-                fallback_maximum, fallback_check = self._account_check_result(self._curl_payload(None))
+                fallback_maximum, fallback_check = self._account_check_result(self._curl_payload(None, config=config))
                 # An inconclusive retry must not erase an explicit rejection:
                 # the pool may keep previously authorized accounts usable when
                 # metadata is temporarily unreachable.
@@ -694,8 +698,24 @@ class XtreamClient:
                     check["error"] = "; ".join(value for value in (request_error, "Provider curl request failed") if value)
         if check["health"] != "healthy" and request_error and not check.get("error"):
             check["error"] = request_error
-        self.last_account_check = check
-        return maximum
+        if session is not self.session:
+            session.close()
+        return maximum, check
+
+    def get_account_max_connections(self) -> Optional[int]:
+        """Check configured host, then its alternate, under the caller's gate."""
+        gate_fd = getattr(self, "host_gate_fd", None)
+        checks = []
+        for host_index, host_config in host_configs(self.config, gate_fd):
+            maximum, check = self._account_check_one_host(host_config)
+            if check["health"] == "healthy":
+                record_host_success(gate_fd, host_index)
+                check["host_route"] = "alternate" if host_index else "configured"
+                self.last_account_check = check
+                return maximum
+            checks.append(check)
+        self.last_account_check = checks[-1]
+        return None
 
 
 def stable_event_id(category_id: Any, stream_id: Any) -> str:

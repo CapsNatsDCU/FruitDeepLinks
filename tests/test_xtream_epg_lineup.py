@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -72,6 +73,20 @@ class EpgLineupTests(unittest.TestCase):
             self.client.session.get.assert_not_called()
         finally:
             lease.release()
+
+    def test_xmltv_retries_alternate_host_before_another_account(self):
+        config = replace(self.client.config, fallback_server_url="http://alternate.example")
+        self.client.config = config
+        self.client.session.get.side_effect = OSError("primary unavailable")
+        fallback = Mock()
+        response = Mock()
+        response.raw = io.BytesIO(("<tv>" + self.programme() + "</tv>").encode())
+        fallback.get.return_value = response
+        with patch("xtream_epg.requests.Session", return_value=fallback):
+            result = _provider_xmltv_one(self.client, {"ESPN.us"}, config)
+        self.assertEqual(1, len(result["ESPN.us"]))
+        self.assertEqual("http://alternate.example/xmltv.php", fallback.get.call_args.args[0])
+        fallback.close.assert_called_once()
 
     def test_full_provider_metadata_explicit_identity_and_escaping(self):
         result = self.refresh_xml()

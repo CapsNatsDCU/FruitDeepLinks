@@ -18,6 +18,7 @@ from xtream_accounts import load_accounts
 from db.preferences import get_settings_schema, load_all_settings
 from xtream_ingest import XtreamClient, XtreamConfig, XtreamError, build_stream_url, load_config, load_metadata_configs
 from xtream_pool import PoolUnavailable, XtreamPool, scheduler_capacity
+from xtream_hosts import host_configs, record_host_success
 from tests.xtream_test_helpers import HealthyAccountClient
 
 
@@ -44,6 +45,39 @@ def hold_in_process(path, env, pipe):
 
 
 class AccountConfigTests(unittest.TestCase):
+    def test_known_host_pair_is_scoped_to_accounts_two_and_three(self):
+        rows = account_rows((1, 1, 1))
+        rows[0]["id"] = "account_1"
+        rows[1]["id"] = "account_2"
+        rows[2]["id"] = "account_3"
+        for row in rows:
+            row["server_url"] = "http://cf.gxtrm.xyz"
+        accounts = load_accounts(environ=pool_environment(rows))
+        self.assertIsNone(accounts[0].config.fallback_server_url)
+        self.assertEqual("http://cf.business-cdn-8k.com", accounts[1].config.fallback_server_url)
+        self.assertEqual("http://cf.business-cdn-8k.com", accounts[2].config.fallback_server_url)
+        rows[1]["server_url"] = "http://cf.business-cdn-8k.com"
+        rows[2]["server_url"] = "http://unrelated.example"
+        accounts = load_accounts(environ=pool_environment(rows))
+        self.assertEqual("http://cf.gxtrm.xyz", accounts[1].config.fallback_server_url)
+        self.assertIsNone(accounts[2].config.fallback_server_url)
+
+    def test_fallback_host_preference_is_shared_by_account_lock(self):
+        rows = account_rows((1,))
+        rows[0]["fallback_server_url"] = "http://alternate.example"
+        with tempfile.TemporaryDirectory() as directory:
+            pool = XtreamPool(Path(directory) / "fruit.db", pool_environment(rows),
+                              client_factory=HealthyAccountClient)
+            config = pool.accounts[0].config
+            with pool.gate.hold(config) as fd:
+                self.assertEqual([0, 1], [index for index, _ in host_configs(config, fd)])
+                record_host_success(fd, 1)
+            with XtreamPool(pool.db_path, pool_environment(rows),
+                            client_factory=HealthyAccountClient).gate.hold(config) as fd:
+                self.assertEqual([1, 0], [index for index, _ in host_configs(config, fd)])
+                record_host_success(fd, 0)
+                self.assertEqual([0, 1], [index for index, _ in host_configs(config, fd)])
+
     def test_account_urls_replace_removed_global_server_setting(self):
         conn = sqlite3.connect(":memory:")
         self.addCleanup(conn.close)
@@ -187,6 +221,26 @@ class AccountConfigTests(unittest.TestCase):
         self.assertEqual(3, client.get_account_max_connections())
         self.assertEqual("healthy", client.last_account_check["health"])
         self.assertEqual(1, runner.call_count)
+
+    def test_account_check_uses_alternate_after_primary_host_fails(self):
+        rows = account_rows((1,))
+        rows[0]["fallback_server_url"] = "http://alternate.example"
+        config = load_accounts(environ=pool_environment(rows))[0].config
+        primary = Mock()
+        rejected = primary.get.return_value
+        rejected.status_code = 403
+        rejected.raise_for_status.side_effect = requests.HTTPError(response=rejected)
+        alternate = Mock()
+        alternate.get.return_value.json.return_value = {
+            "user_info": {"auth": 1, "status": "Active", "max_connections": "1"}}
+        runner = Mock(return_value=Mock(returncode=22, stdout=""))
+        client = XtreamClient(config, session=primary, subprocess_runner=runner)
+        with patch("xtream_ingest.requests.Session", return_value=alternate):
+            self.assertEqual(1, client.get_account_max_connections())
+        self.assertEqual("alternate", client.last_account_check["host_route"])
+        self.assertEqual(1, primary.get.call_count)
+        self.assertEqual(1, runner.call_count)
+        self.assertEqual("http://alternate.example/player_api.php", alternate.get.call_args.args[0])
 
     def test_account_discovery_retries_json_rejection_and_unconfirmed_auth(self):
         config = load_accounts(environ=pool_environment())[0].config

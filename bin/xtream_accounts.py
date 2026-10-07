@@ -13,9 +13,26 @@ import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import quote, quote_plus, urlsplit
+from urllib.parse import quote, quote_plus, urlsplit, urlunsplit
 
 DEFAULT_ACCOUNTS_FILE = Path("/run/secrets/xtream-accounts.json")
+_TESTED_HOST_PAIR = {"cf.gxtrm.xyz": "cf.business-cdn-8k.com",
+                     "cf.business-cdn-8k.com": "cf.gxtrm.xyz"}
+
+
+def _tested_fallback(account_id: str, server: str) -> str | None:
+    """The two hosts previously verified with accounts 2/3 on this deployment.
+
+    Restrict the compatibility rule to those IDs and exact hostnames. A changed
+    provider or port/path configuration never sends credentials to a new host.
+    """
+    if account_id not in {"account_2", "account_3"}:
+        return None
+    parsed = urlsplit(server)
+    other = _TESTED_HOST_PAIR.get((parsed.hostname or "").lower())
+    if not other or parsed.path not in {"", "/"} or parsed.port:
+        return None
+    return urlunsplit((parsed.scheme, other, parsed.path, "", "")).rstrip("/")
 
 
 @dataclass(frozen=True)
@@ -104,7 +121,16 @@ def load_accounts(conn=None, environ: Mapping[str, str] | None = None) -> list[A
             raise XtreamError("Each Xtream account requires a server URL, username and password")
         server = row["server_url"].rstrip("/")
         validate_server(server)
-        config = replace(base, server_url=server, username=row["username"], password=row["password"])
+        fallback = row.get("fallback_server_url")
+        if fallback is not None and (not isinstance(fallback, str) or not fallback.strip()):
+            raise XtreamError("Xtream fallback server must be a nonempty URL")
+        fallback = fallback.rstrip("/") if fallback else _tested_fallback(account_id, server)
+        if fallback:
+            validate_server(fallback)
+            if fallback == server:
+                raise XtreamError("Xtream fallback server must differ from the primary server")
+        config = replace(base, server_url=server, fallback_server_url=fallback,
+                         username=row["username"], password=row["password"])
         account = Account(account_id, str(row.get("label") or f"Account {len(result) + 1}")[:100],
                           row.get("enabled", True), config, capacity(row.get("capacity_override")))
         # Duplicate credentials do not create extra physical provider capacity.

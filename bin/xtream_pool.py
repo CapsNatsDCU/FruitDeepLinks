@@ -121,6 +121,7 @@ class XtreamPool:
         if account_id and account_id not in {a.id for a in self.accounts}:
             raise XtreamError("Xtream account not found")
         skipped = {}
+        checked_hosts = {}
         for account in self.accounts:
             if account_id and account.id != account_id:
                 continue
@@ -150,9 +151,12 @@ class XtreamPool:
             client = None
             try:
                 client = self.client_factory(account.config)
+                client.host_gate_fd = gate_fd
                 maximum = capacity(client.get_account_max_connections())
                 check = getattr(client, "last_account_check", None) or {
                     "health": "healthy" if maximum else "unreachable", "error": None if maximum else "Provider account check failed"}
+                if check.get("health") == "healthy":
+                    checked_hosts[account.id] = check.get("host_route", "configured")
                 health = check["health"] if check.get("health") in {"healthy", "unhealthy", "unreachable"} else "unreachable"
                 error = None if health == "healthy" else (
                     check.get("error") or ("Account authentication or subscription rejected"
@@ -183,6 +187,7 @@ class XtreamPool:
                              (maximum, health, now, health, now, error, health, int(due_only), account.id, account.fingerprint))
         result = self.status()
         result["checks_skipped"] = skipped
+        result["checked_hosts"] = checked_hosts
         return result
 
     def update(self, account_id, payload):

@@ -97,6 +97,21 @@ class FakeRunner:
 
 
 class XtreamParsingTest(unittest.TestCase):
+    def test_catalog_retries_alternate_host_with_same_account(self):
+        cfg = config(fallback_server_url="http://alternate.example")
+        primary = FakeSession([])
+        primary.get = lambda *args, **kwargs: FakeResponse([], status_code=403)
+        alternate = Mock()
+        alternate.get.return_value = FakeResponse([{"category_id": "10", "category_name": "Sports"}])
+        runner = FakeRunner(FakeCompleted(returncode=22))
+        client = XtreamClient(cfg, session=primary, subprocess_runner=runner)
+        with patch("xtream_ingest.requests.Session", return_value=alternate):
+            rows = client.get_live_categories()
+        self.assertEqual("10", rows[0]["category_id"])
+        self.assertEqual("http://alternate.example/player_api.php", alternate.get.call_args.args[0])
+        self.assertEqual(1, len(runner.calls))
+        self.assertEqual(cfg.username, alternate.get.call_args.kwargs["params"]["username"])
+
     def test_metadata_requests_try_next_account_and_keep_working_account_first(self):
         first = config(username="first-user", password="first-secret")
         second = config(username="second-user", password="second-secret")

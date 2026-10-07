@@ -188,6 +188,22 @@ class QualityProbeTest(unittest.TestCase):
         self.assertIn(".ts", fallback.call_args.args[0])
         curl.close.assert_called_once()
 
+    def test_quality_sample_retries_alternate_host_after_primary_failure(self):
+        first = FakeMedia(status=404)
+        second = FakeMedia([b"\x47" * 188])
+        session = Mock()
+        session.get.side_effect = [first, second]
+        sample = capture_sample(
+            "http://primary.example/stream.ts", "http://primary.example/stream.m3u8",
+            "ts", 42, deadline=time.monotonic() + 3,
+            alternate_ts_url="http://alternate.example/stream.ts",
+            alternate_hls_url="http://alternate.example/stream.m3u8",
+            session_factory=lambda: session,
+        )
+        self.assertEqual(b"\x47" * 188, sample)
+        self.assertTrue(first.closed)
+        self.assertEqual("http://alternate.example/stream.ts", session.get.call_args_list[1].args[0])
+
     def test_failed_probe_uses_one_account_without_cooling_down_playback(self):
         session = Mock()
         session.get.return_value = FakeMedia(status=403)

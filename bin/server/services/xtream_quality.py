@@ -15,6 +15,7 @@ from pathlib import Path
 
 from db.connection import resolve_db_path
 from xtream_ingest import XtreamError, build_stream_url
+from xtream_hosts import host_configs
 from xtream_pool import PoolUnavailable, XtreamPool
 from xtream_quality_sample import MAX_SAMPLE_BYTES, MAX_SAMPLE_SECONDS
 
@@ -131,11 +132,17 @@ def _probe_bytes(sample: bytes, runner=subprocess.run) -> dict:
 def _sample_media(lease, stream_id, extension):
     """Kill all sample transports at a wall deadline, even on worker shutdown."""
     deadline = time.monotonic() + MAX_SAMPLE_SECONDS
+    hosts = host_configs(lease.account.config, lease.gate_fd)
     arguments = {
-        "ts_url": build_stream_url(lease.account.config, stream_id, "ts"),
-        "hls_url": build_stream_url(lease.account.config, stream_id, "m3u8"),
+        "ts_url": build_stream_url(hosts[0][1], stream_id, "ts"),
+        "hls_url": build_stream_url(hosts[0][1], stream_id, "m3u8"),
+        "primary_host_index": hosts[0][0],
         "extension": extension,
     }
+    if len(hosts) > 1:
+        arguments.update(alternate_ts_url=build_stream_url(hosts[1][1], stream_id, "ts"),
+                         alternate_hls_url=build_stream_url(hosts[1][1], stream_id, "m3u8"),
+                         alternate_host_index=hosts[1][0])
     process = subprocess.Popen(
         [sys.executable, str(Path(__file__).resolve().parents[2] / "xtream_quality_sample.py"),
          str(deadline), str(lease.fd), str(lease.gate_fd)],

@@ -11,6 +11,7 @@ from db.connection import resolve_db_path
 from xtream_curl import CurlStream
 from xtream_hls import HLSStream
 from xtream_ingest import build_stream_url
+from xtream_hosts import host_configs, record_host_success
 from xtream_pool import PoolUnavailable, XtreamPool
 from xtream_transport import configure_session
 
@@ -96,68 +97,69 @@ def proxy_stream(stream_id, source, extension="ts", *, pool=None):
         except Exception:
             return _failure("Xtream capacity reservation failed")
         excluded.add(lease.account.id)
-        session, upstream = None, None
-        authentication = False
-        validated_media = False
         outcome = "tune_failed"
-        try:
-            from xtream_logging import protect_http_logs
-            protect_http_logs(lease.account.config)
-            session = configure_session(requests.Session())
-            # This provider's root-path .ts endpoint redirects to MPEG-TS,
-            # even when catalogue metadata advertises m3u8.
-            url = build_stream_url(lease.account.config, stream_id, "ts")
-            upstream = session.get(url, stream=True, timeout=(10, _timeout()),
-                                   headers={"Accept-Encoding": "identity"}, allow_redirects=True)
-            authentication = upstream.status_code in {401, 403}
-            if authentication:
-                # Some providers accept these credentials through curl but
-                # reject Python's HTTP client for the same live URL.
+        account_failure = False
+        for host_index, host_config in host_configs(lease.account.config, lease.gate_fd):
+            session, upstream = None, None
+            authentication = False
+            validated_media = False
+            try:
+                from xtream_logging import protect_http_logs
+                protect_http_logs(host_config)
+                session = configure_session(requests.Session())
+                # This provider's root-path .ts endpoint redirects to MPEG-TS,
+                # even when catalogue metadata advertises m3u8.
+                url = build_stream_url(host_config, stream_id, "ts")
+                upstream = session.get(url, stream=True, timeout=(10, _timeout()),
+                                       headers={"Accept-Encoding": "identity"}, allow_redirects=True)
+                authentication = upstream.status_code in {401, 403}
+                if authentication:
+                    # Some providers accept these credentials through curl but
+                    # reject Python's HTTP client for the same live URL.
+                    _close(upstream)
+                    upstream = CurlStream(url, _timeout(), lease.fd, lease.gate_fd)
+                    chunks = iter(upstream.chunks())
+                    first = next(chunks, b"")
+                    use_hls = first.lstrip().startswith(b"#EXTM3U")
+                else:
+                    use_hls = upstream.status_code in {404, 415} and str(extension).lower() == "m3u8"
+                if not authentication and not use_hls:
+                    upstream.raise_for_status()
+                    chunks = iter(upstream.iter_content(chunk_size=188 * 64))
+                    first = next(chunks, b"")
+                    if first.lstrip().startswith(b"#EXTM3U"):
+                        use_hls = True
+                if use_hls:
+                    _close(upstream)
+                    upstream = HLSStream(build_stream_url(host_config, stream_id, "m3u8"), _timeout(), lease.fd, lease.gate_fd)
+                    chunks = iter(upstream.chunks())
+                    first = next(chunks, b"")
+                if not first or first[0] != 0x47 or (len(first) > 188 and first[188] != 0x47):
+                    outcome = "unsupported_transport"
+                    raise OSError("Upstream returned no playable media")
+                validated_media = True
+                record_host_success(lease.gate_fd, host_index)
+                body = OwnedStream(lease, upstream, session, chunks, first)
+                response = Response(body, content_type="video/mp2t", headers={
+                    "Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+                response.call_on_close(body.close)
+                return response
+            except Exception as error:
+                last_status = 502
+                account_failure |= (
+                    isinstance(error, (requests.ConnectionError, requests.Timeout, TimeoutError))
+                    or getattr(upstream, "status_code", None) in {429, 500, 502, 503, 504}
+                    or (authentication and not validated_media)
+                )
+                # Never open the other host until this socket/process closes.
                 _close(upstream)
-                upstream = CurlStream(url, _timeout(), lease.fd, lease.gate_fd)
-                chunks = iter(upstream.chunks())
-                first = next(chunks, b"")
-                use_hls = first.lstrip().startswith(b"#EXTM3U")
-            else:
-                use_hls = upstream.status_code in {404, 415} and str(extension).lower() == "m3u8"
-            if not authentication and not use_hls:
-                upstream.raise_for_status()
-                chunks = iter(upstream.iter_content(chunk_size=188 * 64))
-                first = next(chunks, b"")
-                if first.lstrip().startswith(b"#EXTM3U"):
-                    use_hls = True
-            if use_hls:
+                _close(session)
+            except BaseException:
                 _close(upstream)
-                upstream = HLSStream(build_stream_url(lease.account.config, stream_id, "m3u8"), _timeout(), lease.fd, lease.gate_fd)
-                chunks = iter(upstream.chunks())
-                first = next(chunks, b"")
-            if not first or first[0] != 0x47 or (len(first) > 188 and first[188] != 0x47):
-                outcome = "unsupported_transport"
-                raise OSError("Upstream returned no playable media")
-            validated_media = True
-            body = OwnedStream(lease, upstream, session, chunks, first)
-            response = Response(body, content_type="video/mp2t", headers={
-                "Cache-Control": "no-store", "X-Accel-Buffering": "no"})
-            response.call_on_close(body.close)
-            return response
-        except Exception as error:
-            last_status = 502
-            # A failed curl retry after Python's 401/403 needs a cooldown;
-            # otherwise the next tune immediately reopens the same account.
-            account_failure = (
-                isinstance(error, (requests.ConnectionError, requests.Timeout, TimeoutError))
-                or getattr(upstream, "status_code", None) in {429, 500, 502, 503, 504}
-                or (authentication and not validated_media)
-            )
-            # Close network/process resources BEFORE making capacity reusable.
-            _close(upstream)
-            _close(session)
-            lease.release(outcome)
-            if account_failure:
-                pool.fail_account(lease.account.id)
-        except BaseException:
-            _close(upstream)
-            _close(session)
-            lease.release("tune_failed")
-            raise
+                _close(session)
+                lease.release("tune_failed")
+                raise
+        lease.release(outcome)
+        if account_failure:
+            pool.fail_account(lease.account.id)
     return _failure("Xtream upstream tune failed; check pool diagnostics", last_status)

@@ -87,49 +87,51 @@ def api_programme(row, channel, zone):
 
 def _provider_xmltv_one(client, wanted, config):
     """Parse one account's XMLTV response, retaining explicitly wanted IDs."""
-    result = {guide: [] for guide in wanted}
-    response = None
     from contextlib import nullcontext
     from xtream_gate import AccountBusy
+    from xtream_hosts import host_configs, record_host_success
     from xtream_transport import configure_session
-    session = client.session if config is client.config else configure_session(requests.Session())
     try:
         gate = getattr(client, "request_gate", None)
-        with (gate.hold(config) if gate else nullcontext()):
-            try:
-                response = session.get(f"{config.server_url}/xmltv.php",
-                                              params={"username": config.username, "password": config.password},
-                                              stream=True, timeout=(10, 60))
-                response.raise_for_status()
-                response.raw.decode_content = True
-                parser = ET.iterparse(_BoundedReader(response.raw), events=("start", "end"))
-                _, root = next(parser)
-                if root.tag != "tv":
-                    raise ValueError()
-                for event, element in parser:
-                    if event == "end" and element.tag in {"programme", "channel"}:
-                        guide = element.get("channel")
-                        if element.tag == "programme" and guide in wanted:
-                            start, stop = xml_time(element.get("start"), config.timezone_name), xml_time(element.get("stop"), config.timezone_name)
-                            now = datetime.now(timezone.utc)
-                            if (element.findtext("title") and start and stop and stop > start and stop >= now - timedelta(days=1)
-                                    and start <= now + timedelta(days=31) and len(result[guide]) < 10000):
-                                result[guide].append(copy.deepcopy(element))
-                        root.remove(element)
-            finally:
-                if response is not None:
-                    response.close()
-                    response = None
-        return result
+        with (gate.hold(config) if gate else nullcontext()) as gate_fd:
+            for host_index, host_config in host_configs(config, gate_fd):
+                result = {guide: [] for guide in wanted}
+                response = None
+                session = client.session if host_config is client.config else configure_session(requests.Session())
+                try:
+                    response = session.get(f"{host_config.server_url}/xmltv.php",
+                                           params={"username": host_config.username, "password": host_config.password},
+                                           stream=True, timeout=(10, 60))
+                    response.raise_for_status()
+                    response.raw.decode_content = True
+                    parser = ET.iterparse(_BoundedReader(response.raw), events=("start", "end"))
+                    _, root = next(parser)
+                    if root.tag != "tv":
+                        raise ValueError()
+                    for event, element in parser:
+                        if event == "end" and element.tag in {"programme", "channel"}:
+                            guide = element.get("channel")
+                            if element.tag == "programme" and guide in wanted:
+                                start, stop = xml_time(element.get("start"), host_config.timezone_name), xml_time(element.get("stop"), host_config.timezone_name)
+                                now = datetime.now(timezone.utc)
+                                if (element.findtext("title") and start and stop and stop > start and stop >= now - timedelta(days=1)
+                                        and start <= now + timedelta(days=31) and len(result[guide]) < 10000):
+                                    result[guide].append(copy.deepcopy(element))
+                            root.remove(element)
+                    record_host_success(gate_fd, host_index)
+                    return result
+                except Exception:
+                    pass
+                finally:
+                    if response is not None:
+                        response.close()
+                    if session is not client.session:
+                        session.close()
+        raise XtreamError("Provider XMLTV unavailable or malformed")
     except AccountBusy:
         raise XtreamError("Provider XMLTV skipped because account is occupied") from None
     except Exception:
         raise XtreamError("Provider XMLTV unavailable or malformed") from None
-    finally:
-        if response is not None:
-            response.close()
-        if session is not client.session:
-            session.close()
 
 
 def provider_xmltv(client, wanted):

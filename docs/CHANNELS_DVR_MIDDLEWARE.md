@@ -68,6 +68,7 @@ with these fields:
 | `label` | Friendly account name |
 | `enabled` | Boolean, defaults to true; deployment-disabled accounts cannot be re-enabled by UI |
 | `server_url` | HTTP(S) provider base URL, no userinfo/query/fragment |
+| `fallback_server_url` | Optional second base URL for the same account and catalogue; tried only when the first host fails |
 | `username`, `password` | Deployment-only credentials |
 | `capacity_override` | Optional positive integer; omit to discover the provider limit |
 
@@ -121,6 +122,19 @@ requires the account to be idle before that change succeeds, then sends no new
 account checks, catalog/EPG requests, quality probes or streams on it. Test
 Account reports when a test was skipped because the account is disabled or
 occupied. Re-enable it only after the other app has stopped.
+
+For `account_2` and `account_3`, the previously tested
+`cf.gxtrm.xyz`/`cf.business-cdn-8k.com` pair is recognized automatically when
+`server_url` is exactly one of those hosts. The file's `server_url` remains the
+configured primary; either host can be primary. An explicit
+`fallback_server_url` in the secret file takes precedence. Account checks,
+catalogue requests, XMLTV, quality samples and media tunes close a failed
+attempt before trying the second host with the **same account credentials and
+the same account lock**. A successful alternate is preferred for five minutes,
+then the configured primary is tried again. No host is added for other account
+IDs or an unrelated configured host. Test Account reports when its successful
+check used the alternate host; a healthy check still does not prove playback,
+which requires a real media `GET`.
 
 Settings → **Lanes → Number of Lanes** controls how many dynamic lanes appear in
 the legacy and unified Channels lineups. Use **Save & Rebuild Lanes** to save the

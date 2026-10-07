@@ -237,7 +237,7 @@ async function checkXtreamPool(button, accountId = null) {
     _xtreamPoolTest = accountId
       ? skipped[accountId]
         ? {accountId, state:'warning', message:`Account test skipped · ${skipped[accountId] === 'occupied' ? 'account is in use; no provider request was sent' : 'account is disabled; no provider request was sent'}`}
-        : {accountId, state:healthy ? 'success' : 'warning', message:`Account check complete · ${account.health}${account.last_error ? ' · ' + account.last_error : ''}`}
+        : {accountId, state:healthy ? 'success' : 'warning', message:`Account check complete · ${account.health}${data.checked_hosts?.[accountId] === 'alternate' ? ' · alternate host' : ''}${account.last_error ? ' · ' + account.last_error : ''}`}
       : {accountId:null, state:tested.length && healthy === tested.length && !Object.values(skipped).includes('occupied') ? 'success' : 'warning', message:checked.length ? `Account checks complete · ${healthy} of ${tested.length} tested healthy${Object.values(skipped).filter(reason => reason === 'occupied').length ? ' · ' + Object.values(skipped).filter(reason => reason === 'occupied').length + ' occupied account(s) skipped' : ''}` : 'No enabled accounts to test'};
     renderXtreamPoolTestStatus();
     await loadXtreamPool();

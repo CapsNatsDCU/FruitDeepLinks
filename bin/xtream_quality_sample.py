@@ -16,9 +16,8 @@ MAX_SAMPLE_BYTES = 4 * 1024 * 1024
 MAX_SAMPLE_SECONDS = 8
 
 
-def capture_sample(ts_url, hls_url, extension, lease_fd, *, deadline,
-                   gate_fd=None,
-                   session_factory=None):
+def _capture_one(ts_url, hls_url, extension, lease_fd, *, deadline, gate_fd,
+                 session_factory):
     import requests
     from xtream_curl import CurlStream
     from xtream_hls import HLSStream
@@ -70,6 +69,27 @@ def capture_sample(ts_url, hls_url, extension, lease_fd, *, deadline,
                     resource.close()
                 except Exception:
                     pass
+
+
+def capture_sample(ts_url, hls_url, extension, lease_fd, *, deadline,
+                   gate_fd=None, session_factory=None,
+                   primary_host_index=0, alternate_ts_url=None,
+                   alternate_hls_url=None, alternate_host_index=1):
+    from xtream_hosts import record_host_success
+
+    hosts = [(primary_host_index, ts_url, hls_url)]
+    if alternate_ts_url and alternate_hls_url:
+        hosts.append((alternate_host_index, alternate_ts_url, alternate_hls_url))
+    for position, (index, candidate_ts, candidate_hls) in enumerate(hosts):
+        try:
+            sample = _capture_one(candidate_ts, candidate_hls, extension, lease_fd,
+                                  deadline=deadline, gate_fd=gate_fd,
+                                  session_factory=session_factory)
+            record_host_success(gate_fd, index)
+            return sample
+        except Exception:
+            if position == len(hosts) - 1 or time.monotonic() >= deadline:
+                raise
 
 
 def main():

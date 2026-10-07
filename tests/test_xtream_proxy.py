@@ -15,6 +15,7 @@ from server.app import create_app
 from server.services.xtream_persistent import create_channel
 from server.services.xtream_proxy import proxy_stream
 from xtream_pool import XtreamPool
+from xtream_hosts import host_configs
 from tests.test_xtream_pool import account_rows, pool_environment
 from tests.xtream_test_helpers import FakeMedia, HealthyAccountClient, mocked_provider
 
@@ -52,6 +53,31 @@ class StreamProxyTests(unittest.TestCase):
         self.assertTrue(upstream.closed)
         self.assertEqual(0, self.pool.status()["active"])
         self.assertEqual("client_closed", self.pool.status()["recent_streams"][0]["outcome"])
+
+    def test_stream_retries_alternate_host_with_same_lease(self):
+        rows = account_rows((1,))
+        rows[0]["fallback_server_url"] = "http://alternate.example"
+        self.pool = XtreamPool(self.path, pool_environment(rows), client_factory=HealthyAccountClient)
+        self.pool.check_accounts()
+        first = FakeMedia(status=403)
+        second = FakeMedia([b"\x47" * 188])
+        session = Mock()
+        session.get.side_effect = [first, second]
+        curl = Mock()
+        curl.chunks.side_effect = OSError("primary failed")
+        with patch("server.services.xtream_proxy.requests.Session", return_value=session), \
+             patch("server.services.xtream_proxy.CurlStream", return_value=curl):
+            response = self.client.get('/stream', buffered=False)
+            self.assertEqual(200, response.status_code)
+            self.assertEqual(1, self.pool.status()["active"])
+            self.assertEqual("http://alternate.example/private-user-0/private-password%2F0/437219.ts",
+                             session.get.call_args_list[1].args[0])
+            response.close()
+        self.assertTrue(first.closed)
+        curl.close.assert_called_once()
+        self.assertEqual(0, self.pool.status()["active"])
+        with self.pool.gate.hold(self.pool.accounts[0].config) as fd:
+            self.assertEqual(1, host_configs(self.pool.accounts[0].config, fd)[0][0])
 
     def test_live_link_tunes_when_account_api_is_down_but_media_works(self):
         class MetadataUnavailable(HealthyAccountClient):
