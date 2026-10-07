@@ -274,7 +274,7 @@ class PoolTests(unittest.TestCase):
             for lease in leases:
                 lease.release()
         self.assertEqual(0, self.pool.status()["active"])
-        self.assertEqual([], list(self.pool.lock_dir.iterdir()))
+        self.assertFalse(any(not path.name.startswith("account-") for path in self.pool.lock_dir.iterdir()))
 
     def test_sequential_probes_rotate_least_recently_used_accounts(self):
         selected = []
@@ -373,12 +373,15 @@ class PoolTests(unittest.TestCase):
         self.pool.check_accounts()
         self.assertEqual(0, self.pool.status()["accounts"][0]["available"])
 
-    def test_disabling_or_lowering_capacity_does_not_kill_existing_stream(self):
+    def test_disabling_waits_for_existing_stream(self):
         lease = self.pool.acquire("1", "test")
-        self.pool.update(lease.account.id, {"enabled": False})
+        with self.assertRaisesRegex(XtreamError, "Account is in use"):
+            self.pool.update(lease.account.id, {"enabled": False})
         self.assertEqual(1, self.pool.status()["active"])
         lease.release()
+        self.pool.update(lease.account.id, {"enabled": False})
         self.assertEqual(0, self.pool.status()["active"])
+        self.assertFalse(next(row for row in self.pool.status()["accounts"] if row["id"] == lease.account.id)["enabled"])
 
     def test_restart_reclaims_crashed_process_but_keeps_live_worker(self):
         context = multiprocessing.get_context("spawn")
@@ -430,7 +433,7 @@ class PoolTests(unittest.TestCase):
         lease = self.pool.acquire("1", "recording")
         child = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"],
-            pass_fds=(lease.fd,),
+            pass_fds=(lease.fd, lease.gate_fd),
         )
         try:
             lease.release()
@@ -438,6 +441,9 @@ class PoolTests(unittest.TestCase):
             other_accounts = {account.id for account in self.pool.accounts if account.id != lease.account.id}
             with self.assertRaises(PoolUnavailable):
                 self.pool.acquire("2", "retry", excluded=other_accounts)
+            from xtream_gate import AccountBusy
+            with self.assertRaises(AccountBusy):
+                self.pool.gate.acquire(lease.account.config)
             child.terminate()
             child.wait(timeout=5)
             self.assertEqual(0, self.pool.status()["active"])
@@ -446,6 +452,71 @@ class PoolTests(unittest.TestCase):
                 child.kill()
                 child.wait(timeout=5)
 
+    def test_account_check_skips_active_stream_without_contact_or_health_change(self):
+        class CountingClient(HealthyAccountClient):
+            calls = 0
+            def get_account_max_connections(self):
+                type(self).calls += 1
+                return super().get_account_max_connections()
+
+        self.pool.client_factory = CountingClient
+        lease = self.pool.acquire("1", "recording")
+        try:
+            before = next(row for row in self.pool.status()["accounts"] if row["id"] == lease.account.id)
+            result = self.pool.check_accounts(lease.account.id)
+            after = next(row for row in result["accounts"] if row["id"] == lease.account.id)
+            self.assertEqual({lease.account.id: "occupied"}, result["checks_skipped"])
+            self.assertEqual(0, CountingClient.calls)
+            self.assertEqual(before["last_checked"], after["last_checked"])
+            self.assertEqual(before["health"], after["health"])
+        finally:
+            lease.release()
+
+    def test_metadata_skips_busy_account_and_uses_idle_account(self):
+        lease = self.pool.acquire("1", "recording")
+        try:
+            configs = tuple(account.config for account in self.pool.accounts[:2])
+            client = XtreamClient(configs[0])
+            client.metadata_configs = configs
+            client.request_gate = self.pool.gate
+            called = []
+            def request(_action, _category=None, _stream=None, config=None):
+                called.append(config.username)
+                return [{"category_id": "10"}]
+            client._get_with_requests = request
+            self.assertEqual([{"category_id": "10"}], client.get_live_categories())
+            self.assertEqual([configs[1].username], called)
+            client.metadata_configs = (configs[0],)
+            with self.assertRaises(XtreamError):
+                client.get_live_categories()
+            self.assertEqual([configs[1].username], called)
+        finally:
+            lease.release()
+
+    def test_media_cannot_start_during_account_metadata_request(self):
+        account = self.pool.accounts[0]
+        other_accounts = {item.id for item in self.pool.accounts if item.id != account.id}
+        with self.pool.gate.hold(account.config):
+            status = next(row for row in self.pool.status()["accounts"] if row["id"] == account.id)
+            self.assertTrue(status["busy"])
+            self.assertEqual(0, status["available"])
+            with self.assertRaises(PoolUnavailable):
+                self.pool.acquire("2", "lane", excluded=other_accounts)
+        self.pool.acquire("2", "lane", excluded=other_accounts).release()
+
+    def test_queued_metadata_rechecks_enabled_state_before_any_request(self):
+        account = self.pool.accounts[0]
+        client = XtreamClient(account.config)
+        client.metadata_configs = (account.config,)
+        client.request_gate = self.pool.gate
+        client._get_with_requests = Mock(return_value=[{"category_id": "10"}])
+        self.pool.update(account.id, {"enabled": False})
+        with self.assertRaises(XtreamError):
+            client.get_live_categories()
+        client._get_with_requests.assert_not_called()
+        result = self.pool.check_accounts(account.id)
+        self.assertEqual({account.id: "disabled"}, result["checks_skipped"])
+
     def test_renaming_account_id_during_live_stream_does_not_duplicate_capacity(self):
         lease = self.pool.acquire("1", "recording")
         rows = account_rows((1,))
@@ -453,11 +524,12 @@ class PoolTests(unittest.TestCase):
         other = XtreamPool(self.path, pool_environment(rows), client_factory=HealthyAccountClient)
         try:
             state = other.check_accounts()
-            self.assertEqual((1, 1, 0), (state["capacity"], state["active"], state["available"]))
+            self.assertEqual((0, 1, 0), (state["capacity"], state["active"], state["available"]))
             with self.assertRaises(PoolUnavailable):
                 other.acquire("2", "retry")
         finally:
             lease.release()
+        other.check_accounts()
         other.acquire("2", "retry").release()
 
 

@@ -17,14 +17,14 @@ def _config_quote(value: str) -> str:
 
 
 class CurlStream:
-    def __init__(self, url: str, idle_timeout: float, lease_fd: int):
+    def __init__(self, url: str, idle_timeout: float, lease_fd: int, gate_fd: int | None = None):
         self.idle_timeout = idle_timeout
         self.process = subprocess.Popen(
             ["curl", "--silent", "--location", "--fail", "--no-buffer",
              "--connect-timeout", "10", "--proto", "=http,https",
              "--proto-redir", "=http,https", *curl_proxy_args(), "--config", "-"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            bufsize=0, pass_fds=(lease_fd,),
+            bufsize=0, pass_fds=(lease_fd,) if gate_fd is None else (lease_fd, gate_fd),
         )
         try:
             self.process.stdin.write(f'url = "{_config_quote(url)}"\n'.encode())

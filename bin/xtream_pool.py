@@ -17,6 +17,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from xtream_accounts import Account, capacity, load_accounts, safe_value
+from xtream_gate import AccountBusy, AccountGate
 from xtream_ingest import XtreamClient, XtreamError
 from xtream_pool_schema import ensure_schema
 
@@ -57,6 +58,7 @@ class Lease:
     source: str
     started: float
     fd: int = field(repr=False)
+    gate_fd: int = field(repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def release(self, outcome: str = "client_closed") -> None:
@@ -64,7 +66,8 @@ class Lease:
             if self.fd < 0:
                 return
             fd, self.fd = self.fd, -1
-            self.pool.finish(self, outcome, fd)
+            gate_fd, self.gate_fd = self.gate_fd, -1
+            self.pool.finish(self, outcome, fd, gate_fd)
 
 
 class XtreamPool:
@@ -73,6 +76,7 @@ class XtreamPool:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_dir = self.db_path.parent / (self.db_path.name + ".xtream-locks")
         self.lock_dir.mkdir(mode=0o700, exist_ok=True)
+        self.gate = AccountGate(self.db_path)
         self.client_factory = client_factory or XtreamClient
         with self.connection() as conn:
             ensure_schema(conn)
@@ -116,12 +120,14 @@ class XtreamPool:
         """Explicit health check or bounded tune-time recovery; never logs URLs."""
         if account_id and account_id not in {a.id for a in self.accounts}:
             raise XtreamError("Xtream account not found")
+        skipped = {}
         for account in self.accounts:
             if account_id and account.id != account_id:
                 continue
             with self.connection() as conn:
                 state = self._state(conn, account)
             if not state["enabled"]:
+                skipped[account.id] = "disabled"
                 continue
             now = time.time()
             # Authentication failures retry automatically after five minutes;
@@ -129,6 +135,18 @@ class XtreamPool:
             next_check = max(state["retry_after"], (state["last_checked"] or 0) + (300 if state["health"] in {"healthy", "unhealthy"} else 30))
             if due_only and now < next_check:
                 continue
+            try:
+                gate_fd = self.gate.acquire(account.config)
+            except AccountBusy:
+                # A health check must never contact an account during media or
+                # another provider operation, or replace its cached health.
+                skipped[account.id] = "occupied"
+                continue
+            with self.connection() as conn:
+                if not self._state(conn, account)["enabled"]:
+                    os.close(gate_fd)
+                    skipped[account.id] = "disabled"
+                    continue
             client = None
             try:
                 client = self.client_factory(account.config)
@@ -148,6 +166,7 @@ class XtreamPool:
                         client.session.close()
                     except Exception:
                         pass
+                os.close(gate_fd)
             with self.connection() as conn:
                 # A transient metadata outage must not invalidate credentials
                 # that were previously authenticated successfully. Metadata
@@ -162,7 +181,9 @@ class XtreamPool:
                              "last_error=?,retry_after=CASE WHEN ?='healthy' AND ?=0 THEN 0 ELSE retry_after END "
                              "WHERE account_id=? AND fingerprint=?",
                              (maximum, health, now, health, now, error, health, int(due_only), account.id, account.fingerprint))
-        return self.status()
+        result = self.status()
+        result["checks_skipped"] = skipped
+        return result
 
     def update(self, account_id, payload):
         if not isinstance(payload, dict) or set(payload) - {"label", "enabled", "capacity_override"}:
@@ -185,8 +206,18 @@ class XtreamPool:
                 raise XtreamError("Label must be at most 100 printable characters")
             fields["label_override"] = safe_value(label.strip(), self.accounts) or None
         if fields:
-            with self.connection() as conn:
-                conn.execute("UPDATE xtream_account_state SET " + ",".join(f"{k}=?" for k in fields) + " WHERE account_id=?", (*fields.values(), account_id))
+            gate_fd = -1
+            if "enabled_override" in fields:
+                try:
+                    gate_fd = self.gate.acquire(account.config)
+                except AccountBusy:
+                    raise XtreamError("Account is in use; stop its stream or wait for the provider request, then retry") from None
+            try:
+                with self.connection() as conn:
+                    conn.execute("UPDATE xtream_account_state SET " + ",".join(f"{k}=?" for k in fields) + " WHERE account_id=?", (*fields.values(), account_id))
+            finally:
+                if gate_fd >= 0:
+                    os.close(gate_fd)
         return self.status()
 
     def _lock_path(self, lease_id):
@@ -232,31 +263,45 @@ class XtreamPool:
                         (account.id,),
                     ).fetchone()[0]
                     candidates.append((active / state["effective_capacity"], last_used, account.id, account, state))
-            if not candidates:
+            gate_fd = -1
+            selected = None
+            for candidate in sorted(candidates, key=lambda item: item[:3]):
+                try:
+                    gate_fd = self.gate.acquire(candidate[3].config)
+                except AccountBusy:
+                    continue
+                selected = candidate
+                break
+            if selected is None:
                 self._history(conn, None, str(stream_id), source, None, "capacity_unavailable")
                 # Commit diagnostics before raising, rather than rolling back.
                 conn.commit()
                 raise PoolUnavailable("All Xtream capacity is occupied or unavailable")
-            _, _, _, account, state = min(candidates, key=lambda item: item[:3])
+            _, _, _, account, state = selected
             lease_id, started = uuid.uuid4().hex, time.time()
-            fd = os.open(self._lock_path(lease_id), os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            try:
+                fd = os.open(self._lock_path(lease_id), os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            except BaseException:
+                os.close(gate_fd)
+                raise
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 conn.execute("INSERT INTO xtream_leases VALUES(?,?,?,?,?,?)", (lease_id, account.id, str(stream_id), source, started, account.fingerprint))
                 conn.commit()
             except BaseException:
                 os.close(fd)
+                os.close(gate_fd)
                 self._lock_path(lease_id).unlink(missing_ok=True)
                 raise
         self._log(f'Allocated account "{state["label"]}" to stream {safe_value(str(stream_id), self.accounts)}')
-        return Lease(self, lease_id, replace(account, label=state["label"]), str(stream_id), source, started, fd)
+        return Lease(self, lease_id, replace(account, label=state["label"]), str(stream_id), source, started, fd, gate_fd)
 
     def _history(self, conn, account_id, stream_id, source, started, outcome):
         conn.execute("INSERT INTO xtream_stream_history(account_id,stream_id,source,started,ended,outcome) VALUES(?,?,?,?,?,?)",
                      (account_id, safe_value(stream_id, self.accounts), source, started, time.time(), outcome))
         conn.execute("DELETE FROM xtream_stream_history WHERE id NOT IN (SELECT id FROM xtream_stream_history ORDER BY id DESC LIMIT 100)")
 
-    def finish(self, lease, outcome, fd):
+    def finish(self, lease, outcome, fd, gate_fd):
         allowed = {"client_closed", "upstream_eof", "upstream_error", "upstream_timeout", "tune_failed", "authentication_failed", "unsupported_transport"}
         outcome = outcome if outcome in allowed else "upstream_error"
         child_holds_lock = False
@@ -286,6 +331,7 @@ class XtreamPool:
             # read will reclaim the row once this lock closes.
             if fd >= 0:
                 os.close(fd)
+            os.close(gate_fd)
         if child_holds_lock:
             self._log("Xtream media child still holds a stream reservation")
         else:
@@ -308,9 +354,16 @@ class XtreamPool:
                 state = self._state(conn, account)
                 active = sum(row["account_id"] == account.id or row["fingerprint"] == account.fingerprint for row in leases)
                 usable = state["enabled"] and state["health"] in {"healthy", "degraded"}
-                available = max(0, state["effective_capacity"] - active) if usable and state["retry_after"] <= time.time() else 0
+                try:
+                    gate_fd = self.gate.acquire(account.config)
+                except AccountBusy:
+                    busy = True
+                else:
+                    busy = False
+                    os.close(gate_fd)
+                available = max(0, state["effective_capacity"] - active) if usable and not busy and state["retry_after"] <= time.time() else 0
                 keys = ("id", "label", "enabled", "health", "discovered_capacity", "configured_override", "effective_capacity", "capacity_source", "last_checked", "last_success", "last_error")
-                accounts.append({**{key: state[key] for key in keys}, "active": active, "available": available,
+                accounts.append({**{key: state[key] for key in keys}, "active": active, "available": available, "busy": busy,
                                  "capacity": state["effective_capacity"] if usable else 0})
             history = [dict(row) for row in conn.execute("SELECT * FROM xtream_stream_history ORDER BY id DESC LIMIT 30")]
         labels = {row["id"]: row["label"] for row in accounts}

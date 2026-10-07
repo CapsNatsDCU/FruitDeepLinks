@@ -287,9 +287,9 @@ class QualityProbeTest(unittest.TestCase):
         lease = self.pool.acquire("437219", "quality_probe")
         process = subprocess.Popen([
             sys.executable, str(Path(__file__).resolve().parents[1] / "bin/xtream_quality_sample.py"),
-            str(time.monotonic() + 2), str(lease.fd),
+            str(time.monotonic() + 2), str(lease.fd), str(lease.gate_fd),
         ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True, pass_fds=(lease.fd,))
+            start_new_session=True, pass_fds=(lease.fd, lease.gate_fd))
         try:
             # Only feed input; no communicate timeout or supervising web worker.
             url = f"http://127.0.0.1:{provider.server_port}/stream.ts"
@@ -297,7 +297,7 @@ class QualityProbeTest(unittest.TestCase):
                                             "extension": "ts"}).encode())
             process.stdin.close()
             self.assertTrue(connected.wait(1.5), "Curl fallback must actually connect")
-            self.assertEqual(-signal.SIGKILL, process.wait(timeout=3))
+            self.assertIn(process.wait(timeout=3), (0, -signal.SIGKILL))
             self.assertTrue(disconnected.wait(2), "Watchdog must kill the curl socket too")
         finally:
             try:

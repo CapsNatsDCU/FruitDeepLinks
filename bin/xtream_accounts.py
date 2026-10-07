@@ -28,8 +28,12 @@ class Account:
 
     @property
     def fingerprint(self) -> str:
-        values = (self.config.server_url, self.config.username, self.config.password)
-        return hashlib.sha256(json.dumps(values).encode()).hexdigest()
+        return config_fingerprint(self.config)
+
+
+def config_fingerprint(config) -> str:
+    values = (config.server_url, config.username, config.password)
+    return hashlib.sha256(json.dumps(values).encode()).hexdigest()
 
 
 def capacity(value: Any) -> int | None:

@@ -62,6 +62,9 @@ class FakeResponse:
     def json(self):
         return self.payload
 
+    def close(self):
+        pass
+
 
 class FakeSession:
     def __init__(self, payload):

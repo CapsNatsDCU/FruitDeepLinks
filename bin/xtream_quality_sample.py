@@ -17,6 +17,7 @@ MAX_SAMPLE_SECONDS = 8
 
 
 def capture_sample(ts_url, hls_url, extension, lease_fd, *, deadline,
+                   gate_fd=None,
                    session_factory=None):
     import requests
     from xtream_curl import CurlStream
@@ -34,7 +35,7 @@ def capture_sample(ts_url, hls_url, extension, lease_fd, *, deadline,
         authentication = upstream.status_code in {401, 403}
         if authentication:
             upstream.close()
-            upstream = CurlStream(ts_url, 3, lease_fd)
+            upstream = CurlStream(ts_url, 3, lease_fd, gate_fd)
             chunks = iter(upstream.chunks())
             first = next(chunks, b"")
             use_hls = first.lstrip().startswith(b"#EXTM3U")
@@ -47,7 +48,7 @@ def capture_sample(ts_url, hls_url, extension, lease_fd, *, deadline,
             use_hls = first.lstrip().startswith(b"#EXTM3U")
         if use_hls:
             upstream.close()
-            upstream = HLSStream(hls_url, 3, lease_fd)
+            upstream = HLSStream(hls_url, 3, lease_fd, gate_fd)
             chunks = iter(upstream.chunks())
             first = next(chunks, b"")
         if not first or first[0] != 0x47:
@@ -75,7 +76,7 @@ def main():
     if os.getpgrp() != os.getpid():
         # Never allow accidental direct invocation to kill a caller's group.
         return 2
-    deadline, lease_fd = float(sys.argv[1]), int(sys.argv[2])
+    deadline, lease_fd, gate_fd = float(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
     # Default SIGALRM is not reliable inside blocking C calls. A separate thread
     # kills the process group, including any media child holding the lease fd.
     def expire():
@@ -86,7 +87,7 @@ def main():
     watchdog.start()
     try:
         arguments = json.load(sys.stdin)
-        sample = capture_sample(**arguments, lease_fd=lease_fd, deadline=deadline)
+        sample = capture_sample(**arguments, lease_fd=lease_fd, gate_fd=gate_fd, deadline=deadline)
         sys.stdout.buffer.write(sample)
         sys.stdout.buffer.flush()
         return 0

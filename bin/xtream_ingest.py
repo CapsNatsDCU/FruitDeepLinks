@@ -19,7 +19,7 @@ import threading
 import time
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import requests
 
 from xtream_transport import configure_session, curl_proxy_args
+from xtream_gate import AccountBusy, AccountDisabled, AccountGate
 
 try:
     from db.preferences import get_setting
@@ -331,6 +332,7 @@ class XtreamClient:
         config.validate(require_categories=False)
         self.config = config
         self.metadata_configs = (config,)
+        self.request_gate = None
         from xtream_logging import protect_http_logs
         protect_http_logs(config)
         self.session = configure_session(session or requests.Session())
@@ -449,6 +451,8 @@ class XtreamClient:
                 self._last_request_failure = "request error"
             return None
         finally:
+            if response is not None:
+                response.close()
             if session is not self.session:
                 session.close()
 
@@ -537,24 +541,30 @@ class XtreamClient:
         failures: list[tuple[str, str]] = []
         for config in configs:
             self._last_request_failure = None
-            rows = self._get_with_requests(action, category_id, stream_id, config)
-            if rows is not None:
-                self._prefer_metadata_config(config)
-                return rows
-            request_failure = self._last_request_failure or "request error"
             try:
-                rows = self._get_with_curl(action, category_id, stream_id, config)
-                self._prefer_metadata_config(config)
-                return rows
-            except XtreamError as exc:
-                # Curl errors are constructed without response bodies or URLs.
-                # Redact against every account as an additional safeguard.
-                curl_failure = str(exc)
-                for account_config in configs:
-                    curl_failure = redact_credentials(curl_failure, account_config)
-                failures.append((request_failure, curl_failure))
-                if len(configs) == 1:
-                    raise XtreamError(f"{curl_failure}; Python HTTP: {request_failure}") from None
+                with (self.request_gate.hold(config) if self.request_gate else nullcontext()):
+                    rows = self._get_with_requests(action, category_id, stream_id, config)
+                    if rows is not None:
+                        self._prefer_metadata_config(config)
+                        return rows
+                    request_failure = self._last_request_failure or "request error"
+                    try:
+                        rows = self._get_with_curl(action, category_id, stream_id, config)
+                        self._prefer_metadata_config(config)
+                        return rows
+                    except XtreamError as exc:
+                        # Curl errors are constructed without response bodies or URLs.
+                        # Redact against every account as an additional safeguard.
+                        curl_failure = str(exc)
+                        for account_config in configs:
+                            curl_failure = redact_credentials(curl_failure, account_config)
+                        failures.append((request_failure, curl_failure))
+                        if len(configs) == 1:
+                            raise XtreamError(f"{curl_failure}; Python HTTP: {request_failure}") from None
+            except AccountDisabled:
+                failures.append(("account disabled", "provider request skipped"))
+            except AccountBusy:
+                failures.append(("account occupied", "provider request skipped"))
         request_counts = Counter(reason for reason, _ in failures)
         curl_counts = Counter(reason for _, reason in failures)
         def describe(counts: Counter) -> str:
@@ -575,6 +585,7 @@ class XtreamClient:
             curl_binary=self.curl_binary, catalog_timeout=self.catalog_timeout,
         )
         worker.metadata_configs = self.metadata_configs
+        worker.request_gate = self.request_gate
         # Some providers set a cookie during category discovery. Copy that
         # account's session state, rather than sharing its mutable Session.
         if worker.config is self.config and isinstance(self.session, requests.Session):
@@ -633,6 +644,7 @@ class XtreamClient:
         maximum = None
         check = {"health": "unreachable", "error": "Provider account check failed"}
         request_error = None
+        response = None
         try:
             response = self.session.get(
                 f"{self.config.server_url}/player_api.php",
@@ -653,6 +665,9 @@ class XtreamClient:
         except Exception:
             # HTTP errors may include the authenticated URL; never retain them.
             request_error = "Provider HTTP request failed"
+        finally:
+            if response is not None:
+                response.close()
         if check["health"] != "healthy":
             # Some providers reject Python clients with HTTP 200 and auth=0.
             # Give those responses the same single compatibility retry as an
@@ -1734,6 +1749,7 @@ def run(db_path: Path, environ: Optional[Mapping[str, str]] = None,
         config.validate(require_categories=False)
         client = client_factory(config)
         client.metadata_configs = metadata_configs
+        client.request_gate = AccountGate(db_path)
         from xtream_accounts import safe_value
         from server.services.xtream_persistent import list_channels, reconcile_channels
         from sports_metadata import ensure_schema as ensure_sports_schema, sync_legacy_events

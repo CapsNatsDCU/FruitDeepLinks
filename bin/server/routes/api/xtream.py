@@ -166,6 +166,8 @@ def _configured_client(conn, *, configs=None):
     config.validate(require_categories=False)
     client = XtreamClient(config)
     client.metadata_configs = configs
+    from xtream_gate import AccountGate
+    client.request_gate = AccountGate(resolve_db_path())
     return config, client
 
 

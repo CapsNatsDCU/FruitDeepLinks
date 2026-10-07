@@ -138,9 +138,9 @@ def _sample_media(lease, stream_id, extension):
     }
     process = subprocess.Popen(
         [sys.executable, str(Path(__file__).resolve().parents[2] / "xtream_quality_sample.py"),
-         str(deadline), str(lease.fd)],
+         str(deadline), str(lease.fd), str(lease.gate_fd)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        pass_fds=(lease.fd,), start_new_session=True,
+        pass_fds=(lease.fd, lease.gate_fd), start_new_session=True,
     )
     try:
         try:

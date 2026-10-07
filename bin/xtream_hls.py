@@ -14,7 +14,7 @@ from xtream_transport import proxy_url
 
 
 class HLSStream:
-    def __init__(self, url: str, idle_timeout: float, lease_fd: int):
+    def __init__(self, url: str, idle_timeout: float, lease_fd: int, gate_fd: int | None = None):
         self.idle_timeout = idle_timeout
         proxy = proxy_url()
         child_env = None
@@ -36,7 +36,7 @@ class HLSStream:
             **({"env": child_env} if child_env else {}),
             # Keep the reservation alive if the Python worker dies before
             # FFmpeg notices its broken stdout pipe or upstream idle timeout.
-            pass_fds=(lease_fd,),
+            pass_fds=(lease_fd,) if gate_fd is None else (lease_fd, gate_fd),
         )
         try:
             self.process.stdin.write(("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=10000000\n" + url + "\n").encode())

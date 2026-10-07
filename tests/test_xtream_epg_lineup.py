@@ -19,12 +19,13 @@ from server.app import create_app
 from server.services import channels_lineup
 from server.services.xtream_persistent import ChannelNumberConflict, create_channel, get_channel, render_m3u, render_xmltv, update_channel
 from xtream_accounts import load_accounts
-from xtream_epg import api_programme, refresh_epg, xml_time
+from xtream_epg import _provider_xmltv_one, api_programme, refresh_epg, xml_time
 from xtream_ingest import ensure_schema as ingest_schema
 from xtream_ingest import XtreamError, run
 from xtream_pool_schema import ensure_schema
 from tests.test_xtream_pool import pool_environment
 from tests.xtream_test_helpers import HealthyAccountClient
+from xtream_pool import XtreamPool
 
 
 class EpgLineupTests(unittest.TestCase):
@@ -45,6 +46,7 @@ class EpgLineupTests(unittest.TestCase):
         self.channel = create_channel(self.conn, {"stream_id": "437219", "name": "ESPN & Friends", "epg_channel_id": "ESPN.us"}, category_id="10", category_name="Sports", channel_number="9000")
         self.client = Mock()
         self.client.config = self.accounts[0].config
+        self.client.request_gate = None
 
     def response(self, xml):
         response = Mock()
@@ -58,6 +60,18 @@ class EpgLineupTests(unittest.TestCase):
     def refresh_xml(self, **kw):
         self.response('<tv><channel id="ESPN.us"><display-name>Sports</display-name></channel>' + self.programme(**kw) + self.programme(guide="OTHER.us", title="Wrong station") + '</tv>')
         return refresh_epg(self.conn, self.client, self.accounts)
+
+    def test_xmltv_skips_account_occupied_by_stream(self):
+        pool = XtreamPool(self.path, self.env, client_factory=HealthyAccountClient)
+        pool.check_accounts()
+        lease = pool.acquire("437219", "recording")
+        self.client.request_gate = pool.gate
+        try:
+            with self.assertRaisesRegex(XtreamError, "account is occupied"):
+                _provider_xmltv_one(self.client, {"ESPN.us"}, lease.account.config)
+            self.client.session.get.assert_not_called()
+        finally:
+            lease.release()
 
     def test_full_provider_metadata_explicit_identity_and_escaping(self):
         result = self.refresh_xml()

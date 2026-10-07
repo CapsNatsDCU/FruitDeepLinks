@@ -116,6 +116,11 @@ and recent termination/failure reasons. It edits only labels, enabled state and
 capacity. There are no readback password or username fields. Change credentials
 in deployment secrets. Restart after changing environment values; secret files
 are read by new operations. Existing streams finish using their original account.
+To use an account in another app, disable and save it in the pool first. Fruit
+requires the account to be idle before that change succeeds, then sends no new
+account checks, catalog/EPG requests, quality probes or streams on it. Test
+Account reports when a test was skipped because the account is disabled or
+occupied. Re-enable it only after the other app has stopped.
 
 Settings → **Lanes → Number of Lanes** controls how many dynamic lanes appear in
 the legacy and unified Channels lineups. Use **Save & Rebuild Lanes** to save the
@@ -148,12 +153,23 @@ lifetime. The lease remains until the upstream closes, then releases on client
 disconnect, EOF, socket/read errors, exceptions, or unsuccessful tune. WSGI
 `close()` also covers responses whose iterator was never started. Process death
 releases the kernel lock; the next tune/status read reclaims the stale row.
-Elapsed time alone never expires a live lease. Disabling an account or reducing
-its capacity prevents new allocations without interrupting existing recordings.
+Elapsed time alone never expires a live lease. Disabling an account is rejected
+while it is occupied; stop the recording or wait for a provider request to
+finish, then retry. Reducing capacity prevents new allocations without
+interrupting existing recordings.
 An HLS remux child inherits the lease lock: a killed Python worker cannot release
 capacity while its FFmpeg child is still closing the upstream connection. The
 pool also retains the lease row if a curl or FFmpeg child remains alive when
 the parent finishes, so active capacity still reflects that media process.
+Each account also has a credential-fingerprint file lock shared by media,
+account tests, catalog and EPG requests. A provider request holds it until its
+response is finished; a media stream holds it for its full lifetime, including
+inherited curl/FFmpeg children. Requests skip or fail over while the account is
+occupied. A refresh rechecks the saved enabled state before each request, so a
+config selected before an account was disabled cannot contact it. This protects
+activity inside this Fruit deployment. Fruit cannot see another app's connection
+without contacting the provider, and provider-reported connection counts can
+race with a later tune. Manual disable reserves an account for external use.
 
 Use one Fruit deployment with its database and `.xtream-locks` directory on the
 same **local** data filesystem. Workers on that host share reservations; separate

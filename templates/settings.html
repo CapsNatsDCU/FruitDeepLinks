@@ -109,7 +109,7 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
 
 <section class="card" style="margin-bottom:16px" aria-labelledby="xtream-pool-title">
   <h2 id="xtream-pool-title">Xtream Account Pool</h2>
-  <p class="persistent-intro">Persistent channels and Fruit lanes share these accounts. Credentials are supplied through deployment secrets. Account labels, availability and capacity overrides can be managed here.</p>
+  <p class="persistent-intro">Persistent channels and Fruit lanes share these accounts. Credentials are supplied through deployment secrets. Account labels, availability and capacity overrides can be managed here. Disable and save an account before using it in another app; while disabled, Fruit will not test, request guide/catalog data, or start streams on it. Re-enable it only after that other app has stopped.</p>
   <div class="persistent-links"><a href="/m3u/channels">Channels DVR M3U</a><a href="/xmltv/channels">Channels DVR XMLTV</a></div>
   <div class="persistent-toolbar">
     <button class="btn" type="button" data-pool-test="all" onclick="checkXtreamPool(this)">Test All Accounts</button>
@@ -198,7 +198,7 @@ async function loadXtreamPool() {
     const data = await persistentRequest('/api/xtream/pool');
     document.getElementById('xtream-pool-summary').textContent = `${data.enabled ? 'Enabled' : 'Disabled'} · Total capacity: ${data.capacity} · Active: ${data.active} · Available: ${data.available}`;
     document.getElementById('xtream-pool-accounts').innerHTML = data.accounts.length ? data.accounts.map(account => `
-      <form class="persistent-browser" style="margin:8px 0" data-account-id="${escHtml(account.id)}" onsubmit="event.preventDefault();saveXtreamAccount(this)">
+      <form class="persistent-browser" style="margin:8px 0" data-account-id="${escHtml(account.id)}" data-initial-enabled="${account.enabled}" onsubmit="event.preventDefault();saveXtreamAccount(this)">
         <div class="persistent-toolbar">
           <label>Account label <input name="label" type="text" maxlength="100" value="${escHtml(account.label)}"></label>
           <label><input name="enabled" type="checkbox" ${account.enabled ? 'checked' : ''}> Enabled</label>
@@ -206,7 +206,7 @@ async function loadXtreamPool() {
           <button class="btn" type="button" data-save-account onclick="saveXtreamAccount(this.form)">Save Account</button>
           <button class="btn btn-secondary" type="button" data-pool-test="account" onclick="checkXtreamPool(this,this.form.dataset.accountId)">Test Account</button>
         </div>
-        <p>${escHtml(account.health)} · Discovered: ${account.discovered_capacity ?? 'Unknown'} · Effective: ${account.effective_capacity} · Active: ${account.active} · Available: ${account.available}${account.capacity_source === 'conservative_default' ? ' · Unknown limit: conservatively using 1; set an override if needed.' : ''}</p>
+        <p>${escHtml(account.health)} · Discovered: ${account.discovered_capacity ?? 'Unknown'} · Effective: ${account.effective_capacity} · Active: ${account.active} · Available: ${account.available}${account.busy && !account.active ? ' · Provider request in progress' : ''}${account.capacity_source === 'conservative_default' ? ' · Unknown limit: conservatively using 1; set an override if needed.' : ''}</p>
         <p class="status-muted">Last checked: ${account.last_checked ? escHtml(new Date(account.last_checked * 1000).toLocaleString()) : 'Not checked'}${account.last_error ? ' · ' + escHtml(account.last_error) : ''}</p>
         <p class="status-muted">Last successful check: ${account.last_success ? escHtml(new Date(account.last_success * 1000).toLocaleString()) : 'Never'}</p>
         <p class="xtream-test-feedback" data-pool-test-status role="status" aria-live="polite" hidden></p>
@@ -230,11 +230,15 @@ async function checkXtreamPool(button, accountId = null) {
     const data = await persistentRequest(url, {method:'POST'});
     const checked = accountId ? data.accounts.filter(account => account.id === accountId) : data.accounts.filter(account => account.enabled);
     if (accountId && !checked.length) throw new Error('Account was not returned by the check');
-    const healthy = checked.filter(account => account.health === 'healthy').length;
+    const skipped = data.checks_skipped || {};
+    const tested = checked.filter(account => !skipped[account.id]);
+    const healthy = tested.filter(account => account.health === 'healthy').length;
     const account = checked[0];
     _xtreamPoolTest = accountId
-      ? {accountId, state:healthy ? 'success' : 'warning', message:`Account check complete · ${account.health}${account.last_error ? ' · ' + account.last_error : ''}`}
-      : {accountId:null, state:checked.length && healthy === checked.length ? 'success' : 'warning', message:checked.length ? `Account checks complete · ${healthy} of ${checked.length} healthy` : 'No enabled accounts to test'};
+      ? skipped[accountId]
+        ? {accountId, state:'warning', message:`Account test skipped · ${skipped[accountId] === 'occupied' ? 'account is in use; no provider request was sent' : 'account is disabled; no provider request was sent'}`}
+        : {accountId, state:healthy ? 'success' : 'warning', message:`Account check complete · ${account.health}${account.last_error ? ' · ' + account.last_error : ''}`}
+      : {accountId:null, state:tested.length && healthy === tested.length && !Object.values(skipped).includes('occupied') ? 'success' : 'warning', message:checked.length ? `Account checks complete · ${healthy} of ${tested.length} tested healthy${Object.values(skipped).filter(reason => reason === 'occupied').length ? ' · ' + Object.values(skipped).filter(reason => reason === 'occupied').length + ' occupied account(s) skipped' : ''}` : 'No enabled accounts to test'};
     renderXtreamPoolTestStatus();
     await loadXtreamPool();
   } catch (err) {
@@ -249,7 +253,9 @@ async function saveXtreamAccount(form) {
   const button = form.querySelector('[data-save-account]');
   button.disabled = true;
   try {
-    await persistentRequest(`/api/xtream/pool/accounts/${encodeURIComponent(form.dataset.accountId)}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({label:values.get('label'), enabled:values.has('enabled'), capacity_override:values.get('capacity') ? Number(values.get('capacity')) : null})});
+    const payload = {label:values.get('label'), capacity_override:values.get('capacity') ? Number(values.get('capacity')) : null};
+    if (values.has('enabled') !== (form.dataset.initialEnabled === 'true')) payload.enabled = values.has('enabled');
+    await persistentRequest(`/api/xtream/pool/accounts/${encodeURIComponent(form.dataset.accountId)}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
     await loadXtreamPool();
   } catch (err) { poolError(err.message); }
   finally { button.disabled = false; }

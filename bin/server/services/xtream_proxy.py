@@ -114,7 +114,7 @@ def proxy_stream(stream_id, source, extension="ts", *, pool=None):
                 # Some providers accept these credentials through curl but
                 # reject Python's HTTP client for the same live URL.
                 _close(upstream)
-                upstream = CurlStream(url, _timeout(), lease.fd)
+                upstream = CurlStream(url, _timeout(), lease.fd, lease.gate_fd)
                 chunks = iter(upstream.chunks())
                 first = next(chunks, b"")
                 use_hls = first.lstrip().startswith(b"#EXTM3U")
@@ -128,7 +128,7 @@ def proxy_stream(stream_id, source, extension="ts", *, pool=None):
                     use_hls = True
             if use_hls:
                 _close(upstream)
-                upstream = HLSStream(build_stream_url(lease.account.config, stream_id, "m3u8"), _timeout(), lease.fd)
+                upstream = HLSStream(build_stream_url(lease.account.config, stream_id, "m3u8"), _timeout(), lease.fd, lease.gate_fd)
                 chunks = iter(upstream.chunks())
                 first = next(chunks, b"")
             if not first or first[0] != 0x47 or (len(first) > 188 and first[188] != 0x47):
