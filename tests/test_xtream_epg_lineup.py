@@ -186,6 +186,50 @@ class EpgLineupTests(unittest.TestCase):
         self.assertIn('tvg-id="custom.espn"', render_m3u(self.conn, 'http://fruit'))
         self.assertEqual('ESPN.us', get_channel(self.conn, self.channel['id'])['epg_channel_id'])
 
+    def test_setup_epg_search_uses_both_saved_caches_without_provider_calls(self):
+        from server.services.xtream_channel_cache import replace_snapshot
+        from server.services.xtream_epg_index import replace_snapshot as replace_links
+        replace_snapshot(self.conn, [('10', 'Sports')], [
+            ('10', '88', 'US: ESPN HD', 'us: espn hd', None, 'ESPN.us', 'ts'),
+            ('10', '89', 'US: ESPN UHD', 'us: espn uhd', None, 'ESPN.us', 'ts'),
+            ('10', '90', 'US: NBC HD', 'us: nbc hd', None, 'NBC.us', 'ts'),
+        ])
+        client = create_app().test_client()
+        with patch('server.routes.api.xtream._configured_client',
+                   side_effect=AssertionError('Searching EPG links must not call provider')):
+            before = client.get('/api/xtream/epg/links/search?q=ESPN').get_json()
+            self.assertEqual(1, len(before['candidates']))
+            self.assertIsNone(before['candidates'][0]['provider_programmes'])
+            replace_links(self.conn, {'ESPN.us': {'names': ['ESPN'], 'programme_count': 12}})
+            after = client.get('/api/xtream/epg/links/search?q=US:%20ESPN%20HD').get_json()
+            self.assertEqual(['ESPN.us'], [row['guide_id'] for row in after['candidates']])
+            self.assertEqual(12, after['candidates'][0]['provider_programmes'])
+            self.assertEqual(400, client.get('/api/xtream/epg/links/search?q=').status_code)
+        self.assertIsNone(get_channel(self.conn, self.channel['id'])['epg_source_id'])
+
+    def test_alternative_epg_source_replaces_broken_native_link_and_clears_old_schedule(self):
+        self.refresh_xml()
+        original = get_channel(self.conn, self.channel['id'])
+        response = create_app().test_client().patch(
+            f'/api/xtream/persistent-channels/{self.channel["id"]}',
+            json={'epg_source_id': 'ESPN.alternate'})
+        self.assertEqual(200, response.status_code, response.get_data(as_text=True))
+        self.assertEqual(0, self.conn.execute('SELECT COUNT(*) FROM xtream_epg_programmes').fetchone()[0])
+        changed = get_channel(self.conn, self.channel['id'])
+        self.assertEqual(original['epg_channel_id'], changed['epg_channel_id'])
+        self.assertEqual(original['effective_guide_id'], changed['effective_guide_id'])
+        self.response('<tv>' + self.programme(guide='ESPN.alternate', title='Alternative schedule') + '</tv>')
+        refresh_epg(self.conn, self.client, self.accounts)
+        self.assertEqual('Alternative schedule', ET.fromstring(render_xmltv(self.conn)).findtext('programme/title'))
+        self.client.get_epg.assert_not_called()
+        # An unavailable alternative must not silently use the original stream's guide.
+        self.response('<tv/>')
+        refresh_epg(self.conn, self.client, self.accounts)
+        self.client.get_epg.assert_not_called()
+        update_channel(self.conn, self.channel['id'], {'epg_source_id': ''})
+        self.refresh_xml()
+        self.assertEqual('Sports & News', ET.fromstring(render_xmltv(self.conn)).findtext('programme/title'))
+
     def test_missing_guide_id_uses_only_explicit_stream_epg_and_decodes_base64(self):
         channel = create_channel(self.conn, {'stream_id': '88', 'name': 'Local'}, category_id='10', category_name='News', channel_number='11')
         self.response('<tv/>')

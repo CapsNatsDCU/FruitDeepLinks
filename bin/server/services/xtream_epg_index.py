@@ -87,6 +87,37 @@ def _match_name(value: str) -> str:
     return " ".join(token for token in tokens if token not in _NOISE)
 
 
+def search(conn: sqlite3.Connection, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    """Name suggestions only; read cached IDs without fetching or assigning."""
+    from server.services.xtream_channel_cache import all_channels
+    source_name = _match_name(query)
+    if not source_name:
+        return []
+    source_tokens = set(source_name.split())
+    indexed = {item["guide_id"]: item for item in entries(conn)}
+    names = [(item["guide_id"], name, "XMLTV feed")
+             for item in indexed.values() for name in item["display_names"]]
+    names += [(item["epg_channel_id"], item["name"], item["category_name"])
+              for item in all_channels(conn) if item.get("epg_channel_id")]
+    ranked = {}
+    for guide_id, name, source in names:
+        candidate = _match_name(name)
+        if not candidate:
+            continue
+        tokens = set(candidate.split())
+        score = max(SequenceMatcher(None, source_name, candidate).ratio(),
+                    len(source_tokens & tokens) / len(source_tokens | tokens))
+        if score < 0.65 or score <= ranked.get(guide_id, {}).get("similarity", -1):
+            continue
+        ranked[guide_id] = {"guide_id": guide_id, "display_name": name,
+                            "similarity": score, "source": source,
+                            "provider_programmes": indexed[guide_id]["programme_count"] if guide_id in indexed else None}
+    result = sorted(ranked.values(), key=lambda item: (-item["similarity"], item["display_name"].casefold(), item["guide_id"]))
+    for item in result:
+        item["similarity"] = round(item["similarity"], 2)
+    return result[:max(1, min(25, limit))]
+
+
 def suggestions(conn: sqlite3.Connection, *, limit: int = 5) -> list[dict[str, Any]]:
     """Offer name-only candidates for saved channels lacking cached programmes."""
     from xtream_epg import cached_programmes
@@ -118,6 +149,6 @@ def suggestions(conn: sqlite3.Connection, *, limit: int = 5) -> list[dict[str, A
                                "provider_programmes": entry["programme_count"]})
         ranked.sort(key=lambda item: (-item["similarity"], item["display_name"].casefold(), item["guide_id"]))
         result.append({"persistent_id": channel["id"], "channel_name": channel["display_name"],
-                       "current_epg_channel_id": channel.get("epg_channel_id"),
+                       "current_epg_channel_id": channel.get("epg_source_id") or channel.get("epg_channel_id"),
                        "candidates": ranked[:max(1, min(10, limit))]})
     return result

@@ -114,6 +114,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "last_checked_at": "TEXT",
         "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
         "epg_channel_id": "TEXT",
+        "epg_source_id": "TEXT",
     }
     for column, declaration in additions.items():
         if column not in existing:
@@ -283,6 +284,7 @@ def create_channel(
     display_name: Any = None,
     channel_id: Any = None,
     guide_id: Any = None,
+    epg_source_id: Any = None,
     logo_override: Any = None,
     favorite_team: Any = None,
     notes: Any = None,
@@ -334,8 +336,8 @@ def create_channel(
                 now,
             ),
         )
-        conn.execute("UPDATE xtream_persistent_channels SET epg_channel_id=? WHERE id=?",
-                     (_clean_optional(epg_id, limit=512), cursor.lastrowid))
+        conn.execute("UPDATE xtream_persistent_channels SET epg_channel_id=?,epg_source_id=? WHERE id=?",
+                     (_clean_optional(epg_id, limit=512), _clean_optional(epg_source_id, limit=512), cursor.lastrowid))
         conn.commit()
     except sqlite3.IntegrityError as exc:
         conn.rollback()
@@ -345,7 +347,7 @@ def create_channel(
 
 _EDITABLE_FIELDS = {
     "display_name", "channel_number", "channel_id", "guide_id", "logo_override",
-    "favorite_team", "notes", "enabled",
+    "favorite_team", "notes", "enabled", "epg_source_id",
 }
 
 
@@ -370,7 +372,7 @@ def update_channel(conn: sqlite3.Connection, persistent_id: int,
             value = _clean_optional(value, limit=1024)
             if not value:
                 raise PersistentChannelError("Display name is required")
-        elif key in {"channel_id", "guide_id", "favorite_team"}:
+        elif key in {"channel_id", "guide_id", "favorite_team", "epg_source_id"}:
             value = _clean_optional(value, limit=512)
         elif key == "logo_override":
             value = _clean_optional(value, limit=2048)
@@ -388,6 +390,12 @@ def update_channel(conn: sqlite3.Connection, persistent_id: int,
             f"UPDATE xtream_persistent_channels SET {', '.join(assignments)} WHERE id = ?",
             tuple(values),
         )
+        if ("epg_source_id" in updates and
+                _clean_optional(updates["epg_source_id"], limit=512) != current.get("epg_source_id")):
+            # Cached programmes belong to the previously chosen schedule.
+            for table in ("xtream_epg_programmes", "xtream_epg_status"):
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                    conn.execute(f"DELETE FROM {table} WHERE persistent_id=?", (persistent_id,))
         conn.commit()
     except sqlite3.IntegrityError as exc:
         conn.rollback()

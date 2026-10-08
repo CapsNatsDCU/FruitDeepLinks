@@ -199,13 +199,17 @@ def clean_programme(programme, channel, accounts, zone):
     return programme
 
 
+def provider_guide_id(channel):
+    return channel.get("epg_source_id") or channel.get("epg_channel_id") or channel.get("guide_id")
+
+
 def refresh_epg(conn, client, accounts=()):
     from server.services.xtream_persistent import list_channels
     ensure_schema(conn)
     channels = list_channels(conn, enabled_only=True)
     if not channels:
         return {"channels": 0, "programmes": 0, "failed": 0}
-    wanted = {str(c.get("epg_channel_id") or c.get("guide_id")) for c in channels if c.get("epg_channel_id") or c.get("guide_id")}
+    wanted = {str(provider_guide_id(c)) for c in channels if provider_guide_id(c)}
     discovered = {}
     try:
         xml = provider_xmltv(client, wanted, channel_sink=discovered)
@@ -220,10 +224,12 @@ def refresh_epg(conn, client, accounts=()):
     totals = {"channels": len(channels), "programmes": 0, "failed": 0}
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for channel in channels:
-        source_id = str(channel.get("epg_channel_id") or channel.get("guide_id") or "")
+        source_id = str(provider_guide_id(channel) or "")
         programmes = xml.get(source_id, [])
         error = None
-        if not programmes:
+        if not programmes and channel.get("epg_source_id"):
+            error = "Selected EPG link has no usable programmes; retained unexpired cached programmes"
+        elif not programmes:
             try:
                 get_epg = getattr(client, "get_epg", None) or client.get_short_epg
                 rows = get_epg(channel["stream_id"])

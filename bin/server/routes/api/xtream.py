@@ -139,6 +139,23 @@ def api_xtream_epg_link_suggestions():
         return _safe_error(exc)
 
 
+@bp.route("/api/xtream/epg/links/search")
+def api_xtream_epg_link_search():
+    """Browse similar guide links from saved XMLTV and channel snapshots."""
+    from server.services import xtream_epg_index
+    query = request.args.get("q", "").strip()
+    if not query or len(query) > 512:
+        return jsonify({"status": "error", "message": "Enter a channel name of up to 512 characters"}), 400
+    if not db_exists(): return _read_database_error()
+    try:
+        with get_conn() as conn:
+            return jsonify({"status": "success", "cache": xtream_epg_index.status(conn),
+                            "channel_cache": channel_cache.status(conn),
+                            "candidates": xtream_epg_index.search(conn, query)})
+    except Exception as exc:
+        return _safe_error(exc)
+
+
 @bp.route("/api/xtream/epg/links/refresh", methods=["POST"])
 @normal_activity_request
 def api_xtream_epg_links_refresh():
@@ -634,6 +651,7 @@ def api_xtream_persistent_channels():
                 display_name=payload.get("display_name"),
                 channel_id=payload.get("channel_id"),
                 guide_id=payload.get("guide_id"),
+                epg_source_id=payload.get("epg_source_id"),
                 logo_override=payload.get("logo_override"),
                 favorite_team=payload.get("favorite_team"),
                 notes=payload.get("notes"),

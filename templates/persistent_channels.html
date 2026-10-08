@@ -100,6 +100,8 @@ let _favoriteState = {teams:[]};
 const QUALITY_BATCH_DELAY_MS = 30000;
 let _persistentQualityInFlight = false;
 let _epgLinkSuggestions = [];
+let _epgSetupCandidates = [];
+let _epgSetupSequence = 0;
 
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -157,7 +159,7 @@ async function loadEpgLinkSuggestions() {
       <div class="persistent-row-main"><strong>${escHtml(channel.channel_name)}</strong>
         <div class="persistent-row-meta">${channel.candidates.length ? 'Possible guide links for review:' : 'No close XMLTV name match found.'}</div>
         ${channel.candidates.map((item, index) => `<div class="persistent-row-meta">${escHtml(item.display_name)} · XMLTV ID ${escHtml(item.guide_id)} · similarity ${Math.round(item.similarity * 100)}% · ${item.provider_programmes} provider programmes
-          ${channel.current_epg_channel_id ? '' : `<button class="btn btn-secondary" type="button" onclick="applyEpgLink(${channel.persistent_id}, ${index})">Use this guide</button>`}</div>`).join('')}
+          <button class="btn btn-secondary" type="button" onclick="applyEpgLink(${channel.persistent_id}, ${index})">Use this guide</button></div>`).join('')}
       </div>
     </article>`).join('') : '<div class="status-muted">Every enabled persistent channel currently has cached programmes.</div>';
   } catch (err) {
@@ -169,12 +171,12 @@ async function loadEpgLinkSuggestions() {
 async function applyEpgLink(persistentId, candidateIndex) {
   const channel = _epgLinkSuggestions.find(item => item.persistent_id === persistentId);
   const candidate = channel?.candidates?.[candidateIndex];
-  if (!candidate || channel.current_epg_channel_id) return;
+  if (!candidate) return;
   if (!await showConfirm('Use this XMLTV guide?', `Link “${channel.channel_name}” to “${candidate.display_name}” (${candidate.guide_id}). The name match is only a suggestion; check that both feeds carry the same schedule.`)) return;
   try {
     await persistentRequest(`/api/xtream/persistent-channels/${persistentId}`, {
       method:'PATCH', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({guide_id:candidate.guide_id}),
+      body:JSON.stringify({epg_source_id:candidate.guide_id}),
     });
     await loadPersistentChannels();
     try {
@@ -506,6 +508,12 @@ function persistentFormHtml(values, mode) {
       <label>Enabled<select id="persistent-form-enabled"><option value="true" ${values.enabled !== false ? 'selected' : ''}>Enabled</option><option value="false" ${values.enabled === false ? 'selected' : ''}>Disabled</option></select></label>
       <label>Channel ID<input id="persistent-form-channel-id" type="text" value="${escHtml(values.channel_id || '')}" placeholder="Optional"></label>
       <label>XMLTV / guide ID<input id="persistent-form-guide-id" type="text" value="${escHtml(values.guide_id || '')}" placeholder="Optional"></label>
+      <div class="full">
+        <label>Alternative EPG link<input id="persistent-form-epg-source" type="text" value="${escHtml(values.epg_source_id || '')}" placeholder="Use this channel’s provider guide" maxlength="512"></label>
+        <div class="persistent-row-meta">If this channel has no guide, choose a link from a similar channel carrying the same schedule. Leave blank to use its own provider guide.</div>
+        <div class="persistent-toolbar"><label>Search guide names<input id="persistent-form-epg-query" type="text" value="${escHtml((values.original_name || values.display_name || '').slice(0,512))}" maxlength="512"></label><button class="btn btn-secondary" type="button" onclick="findSetupEpgLinks(this)">Find similar EPG links</button></div>
+        <div id="persistent-form-epg-links" class="persistent-results" role="status" aria-live="polite"></div>
+      </div>
       <label class="full">Logo override<input id="persistent-form-logo" type="text" value="${escHtml(values.logo_override || '')}" placeholder="Optional image URL"></label>
       <label class="full">Favorite team association<select id="persistent-form-team">${favoriteTeamOptions(values.favorite_team || '')}</select></label>
       <label class="full">Notes<textarea id="persistent-form-notes" placeholder="Optional label or notes">${escHtml(values.notes || '')}</textarea></label>
@@ -517,6 +525,7 @@ function persistentFormHtml(values, mode) {
 function showPersistentAdd(index) {
   const stream = _persistentResults[index];
   if (!stream) return;
+  _epgSetupSequence++;
   const editor = document.getElementById('persistent-editor');
   editor.dataset.streamIndex = String(index);
   editor.dataset.categoryId = stream.category_id;
@@ -527,8 +536,50 @@ function showPersistentAdd(index) {
 function showPersistentEdit(id) {
   const channel = _persistentChannels.find(item => item.id === id);
   if (!channel) return;
+  _epgSetupSequence++;
   document.getElementById('persistent-editor').innerHTML = persistentFormHtml(channel, 'edit');
   document.getElementById('persistent-editor').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+async function findSetupEpgLinks(button) {
+  const target = document.getElementById('persistent-form-epg-links');
+  const name = document.getElementById('persistent-form-epg-query').value.trim();
+  if (!name) { target.textContent = 'Enter the channel name first.'; return; }
+  const sequence = ++_epgSetupSequence;
+  button.disabled = true;
+  button.textContent = 'Finding EPG links…';
+  target.textContent = 'Looking for similar channel names…';
+  try {
+    const result = await persistentRequest(`/api/xtream/epg/links/search?${new URLSearchParams({q:name})}`);
+    if (sequence !== _epgSetupSequence || !target.isConnected) return;
+    _epgSetupCandidates = result.candidates || [];
+    if (!_epgSetupCandidates.length) {
+      target.textContent = (result.cache?.refreshed_at || result.channel_cache?.refreshed_at)
+        ? 'No similar EPG links found. Try a simpler channel name, or refresh the EPG link index for more links.'
+        : 'No guide links are saved yet. Refresh Channel Cache or the EPG Link Index, then try again.';
+      return;
+    }
+    target.innerHTML = '<div class="persistent-row-meta">Review the channel and schedule before choosing. Your selection is applied when you save this channel.</div>' +
+      _epgSetupCandidates.map((item, index) => `<article class="persistent-row">
+        <div aria-hidden="true"></div><div class="persistent-row-main"><strong>${escHtml(item.display_name)}</strong>
+          <div class="persistent-row-meta">${escHtml(item.source)} · Guide ${escHtml(item.guide_id)} · ${Math.round(item.similarity * 100)}% name match</div>
+          <div class="persistent-row-meta">${item.provider_programmes === null ? 'Guide programmes have not been checked in the saved XMLTV feed.' : `${item.provider_programmes} programmes in the saved XMLTV feed.`}</div></div>
+        <button class="btn btn-secondary" type="button" onclick="selectSetupEpgLink(${index}, this)">Choose this guide</button>
+      </article>`).join('');
+  } catch (err) {
+    if (sequence === _epgSetupSequence && target.isConnected) target.textContent = `Could not find EPG links: ${err.message}`;
+  } finally {
+    if (button.isConnected) { button.disabled = false; button.textContent = 'Find similar EPG links'; }
+  }
+}
+
+function selectSetupEpgLink(index, button) {
+  const candidate = _epgSetupCandidates[index];
+  const input = document.getElementById('persistent-form-epg-source');
+  if (!candidate || !input) return;
+  input.value = candidate.guide_id;
+  document.querySelectorAll('#persistent-form-epg-links button').forEach(item => { item.textContent = 'Choose this guide'; });
+  button.textContent = 'Selected — save channel to apply';
 }
 
 function readPersistentForm() {
@@ -538,6 +589,7 @@ function readPersistentForm() {
     enabled:document.getElementById('persistent-form-enabled').value === 'true',
     channel_id:document.getElementById('persistent-form-channel-id').value.trim(),
     guide_id:document.getElementById('persistent-form-guide-id').value.trim(),
+    epg_source_id:document.getElementById('persistent-form-epg-source').value.trim(),
     logo_override:document.getElementById('persistent-form-logo').value.trim(),
     favorite_team:document.getElementById('persistent-form-team').value,
     notes:document.getElementById('persistent-form-notes').value.trim(),
