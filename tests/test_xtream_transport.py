@@ -16,10 +16,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 from xtream_curl import CurlStream
 from xtream_hls import HLSStream
 from xtream_ingest import XtreamClient, XtreamConfig
-from xtream_transport import configure_session, media_chunks, proxy_url
+from xtream_transport import configure_session, media_chunks, proxy_url, user_agent
 
 
 class XtreamTransportTests(unittest.TestCase):
+    def test_agent_validation_and_override(self):
+        with patch.dict(os.environ, {"XTREAM_USER_AGENT": "FixturePlayer/1.0"}):
+            self.assertEqual("FixturePlayer/1.0", user_agent())
+        for value in ("", "private\r\nAuthorization: secret", "x" * 257, "private\x7fsecret"):
+            with self.subTest(value=value), patch.dict(os.environ, {"XTREAM_USER_AGENT": value}):
+                with self.assertRaisesRegex(ValueError, "XTREAM_USER_AGENT must be") as error:
+                    user_agent()
+                self.assertNotIn("secret", str(error.exception))
+
     def test_media_prefix_is_forwarded_before_large_buffer_fills_without_replay(self):
         release_rest = threading.Event()
         prefix = b"\x47" + b"a" * 187 + b"\x47" + b"b" * 187
@@ -74,6 +83,8 @@ class XtreamTransportTests(unittest.TestCase):
                           "https": "http://127.0.0.1:8888"}, xtream.proxies)
         self.assertFalse(xtream.trust_env)
         self.assertEqual({}, ordinary.proxies)
+        self.assertEqual("KSPlayer", xtream.headers["User-Agent"])
+        self.assertTrue(ordinary.headers["User-Agent"].startswith("python-requests"))
 
     def test_requests_and_curl_account_checks_use_proxy(self):
         if not shutil.which("curl"):
@@ -122,6 +133,7 @@ class XtreamTransportTests(unittest.TestCase):
             with patch("xtream_curl.subprocess.Popen", return_value=process) as popen:
                 stream = CurlStream(url, 5, 42)
             curl_args = popen.call_args.args[0]
+            self.assertEqual("KSPlayer", curl_args[curl_args.index("--user-agent") + 1])
             self.assertEqual("http://127.0.0.1:8888", curl_args[curl_args.index("--proxy") + 1])
             self.assertNotIn("fixture-password", " ".join(curl_args))
             stream.close()
@@ -133,9 +145,17 @@ class XtreamTransportTests(unittest.TestCase):
             with patch("xtream_hls.subprocess.Popen", return_value=process) as popen:
                 stream = HLSStream(url, 5, 42)
             ffmpeg_args = popen.call_args.args[0]
+            self.assertEqual("KSPlayer", ffmpeg_args[ffmpeg_args.index("-user_agent") + 1])
             self.assertEqual("http://127.0.0.1:8888", popen.call_args.kwargs["env"]["http_proxy"])
             self.assertNotIn("fixture-password", " ".join(ffmpeg_args))
+            port = stream.bootstrap.server_port
+            seed_url = ffmpeg_args[ffmpeg_args.index("-i") + 1]
+            self.assertEqual(404, requests.get(f"http://127.0.0.1:{port}/unknown", timeout=2).status_code)
+            self.assertIn(url, requests.get(seed_url, timeout=2).text)
             stream.close()
+            self.assertFalse(stream.bootstrap_thread.is_alive())
+            with self.assertRaises(requests.ConnectionError):
+                requests.get(seed_url, timeout=0.5)
 
     def test_hls_nested_request_reaches_proxy(self):
         if not shutil.which("ffmpeg"):

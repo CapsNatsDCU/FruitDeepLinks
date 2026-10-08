@@ -29,7 +29,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 
-from xtream_transport import configure_session, curl_proxy_args
+from xtream_transport import configure_session, curl_transport_args
 from xtream_gate import AccountBusy, AccountDisabled, AccountGate
 from xtream_hosts import host_configs, record_host_success
 
@@ -475,7 +475,7 @@ class XtreamClient:
             "-L",
             "--max-time",
             str(timeout),
-            *curl_proxy_args(),
+            *curl_transport_args(),
             "--get",
             f"{config.server_url}/player_api.php",
             "--config", "-",

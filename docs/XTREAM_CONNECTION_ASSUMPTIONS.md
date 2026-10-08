@@ -138,6 +138,10 @@ URL formatting, or the provider's failure cause. Compare TS and HLS on the same
 channel/account from Fruit's deployed network with exclusive use before changing
 transport selection or declaring either endpoint unsupported.
 
+The on-demand [playback comparison script](XTREAM_PLAYBACK_COMPARISON.md) now
+provides those three independent tests for a selected account/channel, with a
+pinned configured or alternate host and bounded sequential media workers.
+
 180 focused tests passed for ingestion, EPG, pooling, proxying, media sampling,
 request formatting and real loopback playback. The six outgoing-request tests
 also passed separately with a relative HLS segment after a redirect.

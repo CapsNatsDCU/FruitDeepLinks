@@ -1,8 +1,16 @@
-"""Opt-in HTTP proxy for Xtream provider traffic only."""
+"""Consistent playback headers and opt-in proxy for Xtream traffic only."""
 from __future__ import annotations
 
 import os
 from urllib.parse import urlsplit
+
+
+def user_agent() -> str:
+    """Use the player agent verified against the provider, without header injection."""
+    value = os.getenv("XTREAM_USER_AGENT", "KSPlayer")
+    if not value or len(value) > 256 or any(ord(char) < 32 or ord(char) > 126 for char in value):
+        raise ValueError("XTREAM_USER_AGENT must be 1-256 printable ASCII characters")
+    return value
 
 
 def proxy_url() -> str | None:
@@ -32,7 +40,8 @@ def proxy_url() -> str | None:
 
 
 def configure_session(session):
-    """Apply the explicit Xtream proxy without changing other HTTP clients."""
+    """Apply Xtream headers and the explicit proxy to this session only."""
+    session.headers.update({"User-Agent": user_agent()})
     proxy = proxy_url()
     if proxy:
         session.trust_env = False
@@ -43,6 +52,10 @@ def configure_session(session):
 def curl_proxy_args() -> list[str]:
     proxy = proxy_url()
     return ["--proxy", proxy, "--noproxy", ""] if proxy else []
+
+
+def curl_transport_args() -> list[str]:
+    return ["--user-agent", user_agent(), *curl_proxy_args()]
 
 
 def media_chunks(response):

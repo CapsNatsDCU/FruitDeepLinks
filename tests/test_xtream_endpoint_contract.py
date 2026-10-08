@@ -24,6 +24,7 @@ class EndpointContractTests(unittest.TestCase):
         self.username = 'user +&=%/#?é'
         self.password = 'pass +&=%/#?é\\"'
         self.requests = []
+        self.agents = []
         self.ts_sample = None
         owner = self
 
@@ -32,6 +33,11 @@ class EndpointContractTests(unittest.TestCase):
                 pass
 
             def do_GET(self):
+                owner.agents.append(self.headers.get('User-Agent'))
+                if owner.agents[-1] != 'KSPlayer':
+                    self.send_response(403)
+                    self.end_headers()
+                    return
                 parsed = urlsplit(self.path)
                 params = parse_qs(parsed.query)
                 segments = [unquote(part) for part in parsed.path.split('/')]
@@ -64,7 +70,7 @@ class EndpointContractTests(unittest.TestCase):
                     self.end_headers()
                     return
                 elif parsed.path == '/redirected-media':
-                    body = b'\x47' * 376
+                    body = owner.ts_sample or b'\x47' * 376
                 elif parsed.path == '/redirected-hls':
                     body = b'#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nsegment.ts\n#EXT-X-ENDLIST\n'
                 elif parsed.path == '/segment.ts' and owner.ts_sample:
@@ -86,6 +92,9 @@ class EndpointContractTests(unittest.TestCase):
                                    self.username, self.password, ('10',))
         self.client = XtreamClient(self.config, timeout=2)
         self.addCleanup(self.client.session.close)
+
+    def tearDown(self):
+        self.assertTrue(all(agent == 'KSPlayer' for agent in self.agents), self.agents)
 
     def test_requests_metadata_and_epg_send_exact_decoded_parameters(self):
         self.assertEqual(1, self.client.get_account_max_connections())

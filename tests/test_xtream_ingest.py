@@ -68,6 +68,7 @@ class FakeResponse:
 
 class FakeSession:
     def __init__(self, payload):
+        self.headers = {}
         self.payload = payload
         self.calls = []
 

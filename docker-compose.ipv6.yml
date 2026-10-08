@@ -1,0 +1,14 @@
+# Opt-in after the Docker host has a verified IPv6 internet route.
+# Docker 27+ allocates the bridge's ULA subnet automatically.
+services:
+  fruitdeeplinks:
+    networks:
+      - default
+      - xtream_ipv6
+    volumes:
+      - ./config/xtream-ipv6-gai.conf:/etc/gai.conf:ro
+
+networks:
+  default: {}
+  xtream_ipv6:
+    enable_ipv6: true

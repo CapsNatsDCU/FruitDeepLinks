@@ -65,6 +65,7 @@ services:
       - XTREAM_CATALOG_TIMEOUT_SECONDS=${XTREAM_CATALOG_TIMEOUT_SECONDS:-90}
       # Optional Gluetun/HTTP proxy for Xtream account, catalog, EPG, and media calls only.
       - XTREAM_HTTP_PROXY=${XTREAM_HTTP_PROXY:-}
+      - XTREAM_USER_AGENT=${XTREAM_USER_AGENT:-KSPlayer}
       # Inactivity between media reads, never a maximum recording duration.
       - XTREAM_STREAM_IDLE_TIMEOUT=${XTREAM_STREAM_IDLE_TIMEOUT:-60}
       - XTREAM_CATEGORY_IDS=${XTREAM_CATEGORY_IDS:-}

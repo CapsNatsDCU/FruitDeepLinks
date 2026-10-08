@@ -343,11 +343,15 @@ class QualityProbeTest(unittest.TestCase):
 
     def test_sample_watchdog_stops_curl_without_a_web_worker(self):
         connected, disconnected = threading.Event(), threading.Event()
+        attempted = threading.Event()
         class Provider(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
             def do_GET(self):
-                if self.headers.get("User-Agent", "").startswith("python-requests"):
+                # Deny the first media request so the curl fallback is exercised
+                # even when Python and curl correctly use the same player agent.
+                if not attempted.is_set():
+                    attempted.set()
                     self.send_response(403)
                     self.end_headers()
                     return
