@@ -12,6 +12,7 @@ from flask import Blueprint, Response, jsonify, request
 from db.connection import db_exists, get_conn, resolve_db_path
 from db.preferences import get_setting, save_settings
 from server.logging_setup import log
+from server.services import xtream_channel_cache as channel_cache
 from server.services.xtream_persistent import (
     ChannelNumberConflict,
     DuplicatePersistentChannel,
@@ -21,7 +22,6 @@ from server.services.xtream_persistent import (
     ensure_schema as ensure_persistent_schema,
     get_channel,
     list_channels,
-    normalize_name,
     page_streams,
     quality_for_stream,
     render_m3u,
@@ -110,6 +110,60 @@ def api_xtream_epg_status():
         except sqlite3.OperationalError:
             rows = []
     return jsonify({"status": "success", "channels": rows})
+
+
+@bp.route("/api/xtream/epg/links")
+def api_xtream_epg_links():
+    """Read the saved XMLTV channel identity index without provider traffic."""
+    from server.services import xtream_epg_index
+    if not db_exists(): return _read_database_error()
+    try:
+        with get_conn() as conn:
+            return jsonify({"status": "success", "cache": xtream_epg_index.status(conn),
+                            "links": xtream_epg_index.entries(conn)})
+    except Exception as exc:
+        return _safe_error(exc)
+
+
+@bp.route("/api/xtream/epg/links/suggestions")
+def api_xtream_epg_link_suggestions():
+    """Suggest name-similar guide identities; never assign them automatically."""
+    from server.services import xtream_epg_index
+    if not db_exists(): return _read_database_error()
+    try:
+        with get_conn() as conn:
+            return jsonify({"status": "success", "cache": xtream_epg_index.status(conn),
+                            "channels": xtream_epg_index.suggestions(conn)})
+    except Exception as exc:
+        return _safe_error(exc)
+
+
+@bp.route("/api/xtream/epg/links/refresh", methods=["POST"])
+@normal_activity_request
+def api_xtream_epg_links_refresh():
+    """Index XMLTV channel IDs and names in one deliberate provider feed read."""
+    from server.services import xtream_epg_index
+    from xtream_accounts import load_accounts
+    from xtream_epg import provider_xmltv
+    _ensure_database()
+    try:
+        with get_conn() as conn:
+            _, client = _configured_client(conn)
+            accounts = load_accounts(conn)
+        discovered = {}
+        try:
+            provider_xmltv(client, set(), channel_sink=discovered)
+        finally:
+            session = getattr(client, "session", None)
+            if session is not None:
+                session.close()
+        with get_conn() as conn:
+            cache = xtream_epg_index.replace_snapshot(conn, discovered, accounts)
+        return jsonify({"status": "success", "cache": cache})
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 502
+    except Exception as exc:
+        return _safe_error(exc, 502)
 
 
 @bp.route("/m3u/channels")
@@ -413,61 +467,77 @@ def api_xtream_category_streams(category_id):
         return _safe_error(exc, 502)
 
 
-@bp.route("/api/xtream/persistent-channels/search", methods=["POST"])
+@bp.route("/api/xtream/persistent-channels/catalog")
+def api_xtream_channel_catalog():
+    """Return the complete saved channel catalog without provider traffic."""
+    if not db_exists(): return _read_database_error()
+    try:
+        with get_conn() as conn:
+            return jsonify({"status": "success", "cache": channel_cache.status(conn),
+                            "channels": channel_cache.all_channels(conn)})
+    except Exception as exc:
+        return _safe_error(exc)
+
+
+@bp.route("/api/xtream/persistent-channels/catalog/status")
+def api_xtream_channel_catalog_status():
+    if not db_exists(): return _read_database_error()
+    try:
+        with get_conn() as conn:
+            return jsonify({"status": "success", "cache": channel_cache.status(conn)})
+    except Exception as exc:
+        return _safe_error(exc)
+
+
+@bp.route("/api/xtream/persistent-channels/catalog/refresh", methods=["POST"])
 @normal_activity_request
+def api_xtream_channel_catalog_refresh():
+    """The only channel-browser action that fetches the provider catalog."""
+    _ensure_database()
+    try:
+        from xtream_accounts import load_accounts
+        with get_conn() as conn:
+            _, client = _configured_client(conn)
+            accounts = load_accounts(conn)
+        try:
+            categories, streams = channel_cache.fetch_snapshot(client, accounts)
+        finally:
+            session = getattr(client, "session", None)
+            if session is not None:
+                session.close()
+        with get_conn() as conn:
+            cache = channel_cache.replace_snapshot(conn, categories, streams)
+        return jsonify({"status": "success", "cache": cache})
+    except Exception as exc:
+        return _safe_error(exc, 502)
+
+
+@bp.route("/api/xtream/persistent-channels/search", methods=["GET", "POST"])
 def api_xtream_persistent_search():
-    """Search the provider's live streams across every or selected category."""
+    """Search the saved snapshot without contacting the provider."""
     query = request.args.get("q", "").strip()
     scope = request.args.get("scope", "all")
     if not query or len(query) > 100:
         return jsonify({"status": "error", "message": "Enter a channel name of up to 100 characters"}), 400
     if scope not in {"all", "active"}:
         return jsonify({"status": "error", "message": "Unknown category search scope"}), 400
-    _ensure_database()
+    if not db_exists(): return _read_database_error()
     try:
         with get_conn() as conn:
-            config, client = _configured_client(conn)
-            categories = {
-                str(row["category_id"]): str(row.get("category_name") or f"Category {row['category_id']}")
-                for row in client.get_live_categories() if row.get("category_id") is not None
-            }
-            category_ids = set(categories)
-            if scope == "active":
-                category_ids.intersection_update(config.category_ids)
-            try:
-                streams = client.get_all_live_streams() if category_ids else []
-            except XtreamError:
-                streams = []
-            needle = normalize_name(query)
-            # Some Xtream implementations omit category_id from their full
-            # stream response. Fetch each category only when that prevents an
-            # accurate match; never silently drop matching channels.
-            if category_ids and (not streams or any(
-                not str(row.get("category_id") or "").strip()
-                and needle in normalize_name(row.get("name")) for row in streams
-            )):
-                streams = [
-                    {**row, "category_id": category_id}
-                    for category_id in sorted(category_ids)
-                    for row in client.get_live_streams(category_id)
-                ]
-        scoped = [
-            {**row, "category_id": str(row["category_id"]),
-             "category_name": categories[str(row["category_id"])]}
-            for row in streams if str(row.get("category_id")) in category_ids
-        ]
-        result = page_streams(
-            scoped, query=query,
-            page=request.args.get("page", 1, type=int) or 1,
-            page_size=request.args.get("page_size", 25, type=int) or 25,
-        )
-        with get_conn() as conn:
-            ensure_persistent_schema(conn)
+            cache = channel_cache.status(conn)
+            if not cache["refreshed_at"]:
+                return jsonify({"status": "error", "code": "channel_cache_empty",
+                                "message": "Refresh Channel Cache before searching"}), 409
+            selected_text = str(get_setting(conn, "xtream_category_ids", "") or "")
+            selected = {value.strip() for value in selected_text.split(",") if value.strip()}
+            result = channel_cache.search(conn, query, scope, selected,
+                                          request.args.get("page", 1, type=int) or 1,
+                                          request.args.get("page_size", 25, type=int) or 25)
             for item in result["items"]:
                 item["measured_quality"] = quality_for_stream(
                     conn, item["category_id"], item["stream_id"])
         return jsonify({"status": "success", "scope": scope,
-                        "category_count": len(category_ids), **result})
+                        "cache": cache, **result})
     except Exception as exc:
         return _safe_error(exc, 502)
 
@@ -551,24 +621,14 @@ def api_xtream_persistent_channels():
         category_id = str(payload.get("category_id") or "").strip()
         stream_id = str(payload.get("stream_id") or "").strip()
         with get_conn() as conn:
-            _, client = _configured_client(conn)
-            categories = client.get_live_categories()
-            category = next(
-                (row for row in categories if str(row.get("category_id")) == category_id), None
-            )
-            if category is None:
-                raise PersistentChannelError("The selected category is not currently available")
-            streams = client.get_live_streams(category_id)
-            stream = next(
-                (row for row in streams if str(row.get("stream_id")) == stream_id), None
-            )
+            stream = channel_cache.get_stream(conn, category_id, stream_id)
             if stream is None:
-                raise PersistentChannelError("The selected stream is not currently available")
+                raise PersistentChannelError("The selected stream is not in the saved channel cache; refresh it first")
             channel = create_channel(
                 conn,
                 stream,
                 category_id=category_id,
-                category_name=category.get("category_name"),
+                category_name=stream["category_name"],
                 channel_number=payload.get("channel_number"),
                 display_name=payload.get("display_name"),
                 channel_id=payload.get("channel_id"),

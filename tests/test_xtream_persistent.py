@@ -275,6 +275,10 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
         self.client = create_app().test_client()
         self.pool = XtreamPool(self.db_path, client_factory=HealthyAccountClient)
         self.pool.check_accounts()
+        cache = self.client.post("/api/xtream/persistent-channels/catalog/refresh")
+        self.assertEqual(200, cache.status_code, cache.get_data(as_text=True))
+        activity_file = self.db_path.parent / (self.db_path.name + ".xtream-locks") / "normal-activity-until"
+        activity_file.write_text("0", encoding="ascii")
 
     def test_provider_to_browse_add_database_exports_and_tune(self):
         settings_page = self.client.get("/settings").get_data(as_text=True)
@@ -447,10 +451,12 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
                 return list(FIXTURE["streams"])
 
         with patch("server.routes.api.xtream.XtreamClient", CategorylessClient):
-            response = self.client.post(
-                "/api/xtream/persistent-channels/search",
-                query_string={"q": "Washington", "scope": "all"},
-            )
+            refreshed = self.client.post("/api/xtream/persistent-channels/catalog/refresh")
+        self.assertEqual(200, refreshed.status_code)
+        response = self.client.get(
+            "/api/xtream/persistent-channels/search",
+            query_string={"q": "Washington", "scope": "all"},
+        )
         self.assertEqual(200, response.status_code)
         self.assertEqual({"410", "999"}, {row["category_id"] for row in response.get_json()["items"]})
 
@@ -460,10 +466,12 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
                 raise XtreamError("Provider does not support full live stream lists")
 
         with patch("server.routes.api.xtream.XtreamClient", CategoryOnlyClient):
-            response = self.client.post(
-                "/api/xtream/persistent-channels/search",
-                query_string={"q": "Washington", "scope": "active"},
-            )
+            refreshed = self.client.post("/api/xtream/persistent-channels/catalog/refresh")
+        self.assertEqual(200, refreshed.status_code)
+        response = self.client.get(
+            "/api/xtream/persistent-channels/search",
+            query_string={"q": "Washington", "scope": "active"},
+        )
         self.assertEqual(200, response.status_code)
         self.assertEqual(1, response.get_json()["total"])
         self.assertEqual("410", response.get_json()["items"][0]["category_id"])
@@ -472,6 +480,65 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
         for params in ({"scope": "all"}, {"q": "Washington", "scope": "other"}):
             response = self.client.post("/api/xtream/persistent-channels/search", query_string=params)
             self.assertEqual(400, response.status_code)
+
+    def test_saved_catalog_full_export_search_and_add_never_contact_provider(self):
+        with patch("server.routes.api.xtream._configured_client",
+                   side_effect=AssertionError("Cache reads must not contact Xtream")):
+            complete = self.client.get("/api/xtream/persistent-channels/catalog")
+            status = self.client.get("/api/xtream/persistent-channels/catalog/status")
+            search = self.client.get("/api/xtream/persistent-channels/search", query_string={"q": "Washington"})
+            added = self.client.post("/api/xtream/persistent-channels", json={
+                "category_id": "410", "stream_id": "1904224",
+                "display_name": "Washington Nationals", "channel_number": "22",
+            })
+        self.assertEqual(200, complete.status_code)
+        self.assertEqual(200, status.status_code)
+        self.assertEqual(200, search.status_code)
+        self.assertEqual(201, added.status_code, added.get_data(as_text=True))
+        self.assertEqual(2, complete.get_json()["cache"]["category_count"])
+        self.assertEqual(len(FIXTURE["streams"]) * 2, complete.get_json()["cache"]["stream_count"])
+        self.assertEqual(len(FIXTURE["streams"]) * 2, len(complete.get_json()["channels"]))
+        self.assertEqual(2, search.get_json()["total"])
+        for payload in (complete.get_data(as_text=True), search.get_data(as_text=True)):
+            self.assertNotIn("demo user", payload)
+            self.assertNotIn("secret/pass", payload)
+
+    def test_refresh_uses_full_stream_endpoint_when_categories_are_present(self):
+        class CountingClient(FakeXtreamClient):
+            full_calls = 0
+            category_calls = 0
+            def get_all_live_streams(self):
+                type(self).full_calls += 1
+                return super().get_all_live_streams()
+            def get_live_streams(self, category_id):
+                type(self).category_calls += 1
+                return super().get_live_streams(category_id)
+        with patch("server.routes.api.xtream.XtreamClient", CountingClient):
+            refreshed = self.client.post("/api/xtream/persistent-channels/catalog/refresh")
+        self.assertEqual(200, refreshed.status_code)
+        self.assertEqual(1, CountingClient.full_calls)
+        self.assertEqual(0, CountingClient.category_calls)
+
+    def test_search_requires_explicit_first_refresh(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM xtream_channel_cache_state")
+        with patch("server.routes.api.xtream._configured_client",
+                   side_effect=AssertionError("Empty cache must not fetch provider")):
+            response = self.client.get("/api/xtream/persistent-channels/search", query_string={"q": "Washington"})
+        self.assertEqual(409, response.status_code)
+        self.assertEqual("channel_cache_empty", response.get_json()["code"])
+
+    def test_failed_refresh_keeps_previous_snapshot(self):
+        before = self.client.get("/api/xtream/persistent-channels/catalog").get_json()
+        class FailingClient(FakeXtreamClient):
+            def get_live_categories(self):
+                raise XtreamError("Provider unavailable")
+        with patch("server.routes.api.xtream.XtreamClient", FailingClient):
+            failed = self.client.post("/api/xtream/persistent-channels/catalog/refresh")
+        self.assertEqual(502, failed.status_code)
+        after = self.client.get("/api/xtream/persistent-channels/catalog").get_json()
+        self.assertEqual(before["cache"], after["cache"])
+        self.assertEqual(before["channels"], after["channels"])
 
     def test_quality_endpoint_validates_provider_identity_and_persists_result(self):
         with patch("server.services.xtream_quality.measure_stream_quality", return_value={
@@ -490,7 +557,7 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
         })
         self.assertEqual(429, paused.status_code)
         self.assertEqual("quality_probe_deferred", paused.get_json()["code"])
-        self.assertGreaterEqual(int(paused.headers["Retry-After"]), 599)
+        self.assertGreaterEqual(int(paused.headers["Retry-After"]), 29)
         activity_file = self.db_path.parent / (self.db_path.name + ".xtream-locks") / "normal-activity-until"
         activity_file.write_text("0", encoding="ascii")
         with patch("server.services.xtream_quality.time.time", return_value=time.time() + 31):

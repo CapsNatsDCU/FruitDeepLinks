@@ -83,7 +83,11 @@ def proxy_stream(stream_id, source, extension="ts", *, pool=None):
             state = pool.status()
             return Response(status=200 if state["enabled"] else 503, content_type="video/mp2t",
                             headers={"Cache-Control": "no-store"})
-        pool.check_accounts(due_only=True)
+        # A known usable account can serve media even when player_api.php is
+        # timing out. Do not delay every tune with sequential metadata checks;
+        # use them to bootstrap or recover only when no cached slot is usable.
+        if not any(account["available"] > 0 for account in pool.status()["accounts"]):
+            pool.check_accounts(due_only=True)
     except Exception:
         return _failure("Xtream pool is unavailable; check Settings")
 

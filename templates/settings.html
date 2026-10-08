@@ -196,7 +196,7 @@ function renderXtreamPoolTestStatus() {
 async function loadXtreamPool() {
   try {
     const data = await persistentRequest('/api/xtream/pool');
-    document.getElementById('xtream-pool-summary').textContent = `${data.enabled ? 'Enabled' : 'Disabled'} · Total capacity: ${data.capacity} · Active: ${data.active} · Available: ${data.available}`;
+    document.getElementById('xtream-pool-summary').textContent = `${data.enabled ? 'Enabled' : 'Disabled'} · Total capacity: ${data.capacity} · Active: ${data.active} · Fruit available: ${data.available}`;
     document.getElementById('xtream-pool-accounts').innerHTML = data.accounts.length ? data.accounts.map(account => `
       <form class="persistent-browser" style="margin:8px 0" data-account-id="${escHtml(account.id)}" data-initial-enabled="${account.enabled}" data-initial-reserved="${account.reserved_for_fruit}" onsubmit="event.preventDefault();saveXtreamAccount(this)">
         <div class="persistent-toolbar">
@@ -207,8 +207,8 @@ async function loadXtreamPool() {
           <button class="btn" type="button" data-save-account onclick="saveXtreamAccount(this.form)">Save Account</button>
           <button class="btn btn-secondary" type="button" data-pool-test="account" onclick="checkXtreamPool(this,this.form.dataset.accountId)">Test Account</button>
         </div>
-        <p>${escHtml(account.health)} · Discovered: ${account.discovered_capacity ?? 'Unknown'} · Effective: ${account.effective_capacity} · Active: ${account.active} · Available: ${account.available}${account.busy && !account.active ? ' · Provider request in progress' : ''}${account.capacity_source === 'conservative_default' ? ' · Unknown limit: conservatively using 1; set an override if needed.' : ''}</p>
-        <p class="status-muted">Automatic resolution checks require “Reserved for Fruit.” Select it only while no other app or player uses this account.</p>
+        <p>${escHtml(account.health)} · Discovered: ${account.discovered_capacity ?? 'Unknown'} · Effective: ${account.effective_capacity} · Active: ${account.active} · Fruit available: ${account.available}${account.busy && !account.active ? ' · Provider request in progress' : ''}${account.capacity_source === 'conservative_default' ? ' · Unknown limit: conservatively using 1; set an override if needed.' : ''}</p>
+        <p class="status-muted">Fruit cannot count streams or downloads in other apps. Automatic resolution checks require “Reserved for Fruit”; select it only when this account is exclusive to Fruit.</p>
         <p class="status-muted">Last checked: ${account.last_checked ? escHtml(new Date(account.last_checked * 1000).toLocaleString()) : 'Not checked'}${account.last_error ? ' · ' + escHtml(account.last_error) : ''}</p>
         <p class="status-muted">Last successful check: ${account.last_success ? escHtml(new Date(account.last_success * 1000).toLocaleString()) : 'Never'}</p>
         <p class="xtream-test-feedback" data-pool-test-status role="status" aria-live="polite" hidden></p>

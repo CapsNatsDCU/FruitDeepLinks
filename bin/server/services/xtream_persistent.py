@@ -157,10 +157,15 @@ def advertised_quality(name: Any) -> Optional[str]:
 
 
 def quality_for_stream(conn: sqlite3.Connection, category_id: Any, stream_id: Any) -> Optional[dict[str, Any]]:
-    row = conn.execute(
-        "SELECT width,height,fps,codec,measured_at FROM xtream_stream_quality WHERE category_id=? AND stream_id=?",
-        (str(category_id), str(stream_id)),
-    ).fetchone()
+    try:
+        row = conn.execute(
+            "SELECT width,height,fps,codec,measured_at FROM xtream_stream_quality WHERE category_id=? AND stream_id=?",
+            (str(category_id), str(stream_id)),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
+        return None
     return dict(zip(("width", "height", "fps", "codec", "measured_at"), row)) if row else None
 
 

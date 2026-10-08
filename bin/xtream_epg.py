@@ -85,7 +85,7 @@ def api_programme(row, channel, zone):
     return programme
 
 
-def _provider_xmltv_one(client, wanted, config):
+def _provider_xmltv_one(client, wanted, config, channel_sink=None):
     """Parse one account's XMLTV response, retaining explicitly wanted IDs."""
     from contextlib import nullcontext
     from xtream_gate import AccountBusy
@@ -95,6 +95,8 @@ def _provider_xmltv_one(client, wanted, config):
         gate = getattr(client, "request_gate", None)
         with (gate.hold(config) if gate else nullcontext()) as gate_fd:
             for host_index, host_config in host_configs(config, gate_fd):
+                if channel_sink is not None:
+                    channel_sink.clear()
                 result = {guide: [] for guide in wanted}
                 response = None
                 session = client.session if host_config is client.config else configure_session(requests.Session())
@@ -108,12 +110,24 @@ def _provider_xmltv_one(client, wanted, config):
                     _, root = next(parser)
                     if root.tag != "tv":
                         raise ValueError()
+                    now = datetime.now(timezone.utc)
                     for event, element in parser:
                         if event == "end" and element.tag in {"programme", "channel"}:
+                            if element.tag == "channel" and channel_sink is not None:
+                                guide_id = str(element.get("id") or "").strip()
+                                names = [str(node.text or "").strip() for node in element.findall("display-name")]
+                                if guide_id and names:
+                                    channel_sink[guide_id] = {"names": [name for name in names if name][:8],
+                                                              "programme_count": 0}
                             guide = element.get("channel")
+                            if element.tag == "programme" and channel_sink is not None and guide in channel_sink:
+                                start = xml_time(element.get("start"), host_config.timezone_name)
+                                stop = xml_time(element.get("stop"), host_config.timezone_name)
+                                if (element.findtext("title") and start and stop and stop > start
+                                        and stop >= now - timedelta(days=1) and start <= now + timedelta(days=31)):
+                                    channel_sink[guide]["programme_count"] += 1
                             if element.tag == "programme" and guide in wanted:
                                 start, stop = xml_time(element.get("start"), host_config.timezone_name), xml_time(element.get("stop"), host_config.timezone_name)
-                                now = datetime.now(timezone.utc)
                                 if (element.findtext("title") and start and stop and stop > start and stop >= now - timedelta(days=1)
                                         and start <= now + timedelta(days=31) and len(result[guide]) < 10000):
                                     result[guide].append(copy.deepcopy(element))
@@ -134,22 +148,26 @@ def _provider_xmltv_one(client, wanted, config):
         raise XtreamError("Provider XMLTV unavailable or malformed") from None
 
 
-def provider_xmltv(client, wanted):
+def provider_xmltv(client, wanted, *, channel_sink=None):
     """Use the next enabled account if XMLTV transport or parsing fails."""
-    if not wanted:
+    if not wanted and channel_sink is None:
         return {}
     configs = getattr(client, "metadata_configs", None)
     if not isinstance(configs, (tuple, list)):
         configs = (client.config,)
     for config in configs:
         try:
-            result = _provider_xmltv_one(client, wanted, config)
+            if channel_sink is not None:
+                channel_sink.clear()
+            result = _provider_xmltv_one(client, wanted, config, channel_sink)
             prefer = getattr(type(client), "_prefer_metadata_config", None)
             if callable(prefer):
                 prefer(client, config)
             return result
         except XtreamError:
             continue
+    if channel_sink is not None:
+        channel_sink.clear()
     raise XtreamError("Provider XMLTV unavailable or malformed for all enabled accounts")
 
 
@@ -188,10 +206,17 @@ def refresh_epg(conn, client, accounts=()):
     if not channels:
         return {"channels": 0, "programmes": 0, "failed": 0}
     wanted = {str(c.get("epg_channel_id") or c.get("guide_id")) for c in channels if c.get("epg_channel_id") or c.get("guide_id")}
+    discovered = {}
     try:
-        xml = provider_xmltv(client, wanted)
+        xml = provider_xmltv(client, wanted, channel_sink=discovered)
     except XtreamError:
         xml = {}
+    if discovered:
+        from server.services.xtream_epg_index import replace_snapshot
+        try:
+            replace_snapshot(conn, discovered, accounts)
+        except ValueError:
+            pass
     totals = {"channels": len(channels), "programmes": 0, "failed": 0}
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for channel in channels:

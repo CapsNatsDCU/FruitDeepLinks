@@ -41,7 +41,7 @@
 {% block content %}
 <section class="card" style="margin-bottom:16px" aria-labelledby="persistent-title">
   <h2 id="persistent-title">Persistent Channels</h2>
-  <p class="persistent-intro">Search channels across every provider category or only categories enabled for event ingestion. Add channels that should stay available even without a scheduled event. The XMLTV guide refreshes when channels are saved and during the regular Xtream refresh. Provider credentials remain in deployment secrets.</p>
+  <p class="persistent-intro">Search the saved channel cache across every provider category or only categories enabled for event ingestion. Refresh Channel Cache when you need a new provider snapshot; searching and adding channels do not contact the provider catalog. Cached presence does not verify playback. The XMLTV guide refreshes when channels are saved and during the regular Xtream refresh. Provider credentials remain in deployment secrets.</p>
   <div class="persistent-links">
     <a href="/m3u/persistent">Persistent M3U</a>
     <a href="/xmltv/persistent">Persistent XMLTV</a>
@@ -49,8 +49,10 @@
   <div class="persistent-toolbar">
     <button class="btn" type="button" id="persistent-browse-button" onclick="openPersistentBrowser()">Search Xtream Channels</button>
     <button class="btn btn-secondary" type="button" onclick="loadPersistentChannels()">Refresh List</button>
+    <button class="btn btn-secondary" type="button" id="persistent-cache-refresh" onclick="refreshPersistentChannelCache(this)">Refresh Channel Cache</button>
     <button class="btn btn-secondary" type="button" onclick="refreshPersistentEpg(this)">Refresh Persistent Guide</button>
   </div>
+  <div id="persistent-cache-status" class="status-muted" role="status" aria-live="polite">Checking channel cache…</div>
   <div id="persistent-error" class="favorite-alert" role="alert"></div>
   <div id="persistent-browser" class="persistent-browser" hidden>
     <div class="persistent-toolbar" style="margin-top:0" role="group" aria-label="Category view">
@@ -74,6 +76,16 @@
   <p class="status-muted">For accounts marked “Reserved for Fruit” in Settings, Fruit checks saved channel resolution slowly in the background: at most one channel per free account every 10 minutes. All resolution checks pause during channel or account activity and for 10 minutes afterward. It skips the check if the provider cannot confirm zero active connections.</p>
   <div id="persistent-list" class="persistent-list" aria-live="polite"><span class="status-muted">Loading persistent channels…</span></div>
 </section>
+<section class="card" aria-labelledby="epg-link-index-title">
+  <h2 id="epg-link-index-title">Offline EPG Links</h2>
+  <p class="persistent-intro">Fruit saves XMLTV channel IDs and names from the provider feed. This index helps find possible guide links for saved channels without programme data. Similar names are suggestions only; no guide is assigned automatically. Refreshing the index reads the provider XMLTV feed once. Regular persistent guide refreshes also update it.</p>
+  <div class="persistent-toolbar">
+    <button class="btn btn-secondary" type="button" onclick="refreshEpgLinkIndex(this)">Refresh EPG Link Index</button>
+    <button class="btn btn-secondary" type="button" onclick="loadEpgLinkSuggestions()">Find Possible Matches</button>
+  </div>
+  <div id="epg-link-index-status" class="status-muted" role="status" aria-live="polite">Checking saved EPG links…</div>
+  <div id="epg-link-suggestions" class="persistent-list"></div>
+</section>
 {% endblock %}
 
 {% block extra_script %}
@@ -87,6 +99,7 @@ let _persistentQualityBatch = null;
 let _favoriteState = {teams:[]};
 const QUALITY_BATCH_DELAY_MS = 30000;
 let _persistentQualityInFlight = false;
+let _epgLinkSuggestions = [];
 
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -104,8 +117,76 @@ async function refreshPersistentEpg(button) {
   try {
     const result = await persistentRequest('/api/xtream/epg/refresh', {method:'POST'});
     showToast(`Guide refreshed: ${result.programmes} programmes; ${result.failed} channels need attention.`, result.failed ? 'warning' : 'success', 6000);
+    await loadEpgLinkSuggestions();
   } catch (err) { persistentError(`Could not refresh persistent guide: ${err.message}`); }
   finally { button.disabled = false; }
+}
+
+async function refreshEpgLinkIndex(button) {
+  button.disabled = true;
+  button.textContent = 'Refreshing EPG links…';
+  persistentError('');
+  try {
+    const result = await persistentRequest('/api/xtream/epg/links/refresh', {method:'POST'});
+    showToast(`Saved ${result.cache.channel_count} XMLTV channel links`, 'success');
+    await loadEpgLinkSuggestions();
+  } catch (err) {
+    persistentError(`Could not refresh EPG links: ${err.message}. The previous index was kept.`);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Refresh EPG Link Index';
+  }
+}
+
+async function loadEpgLinkSuggestions() {
+  const status = document.getElementById('epg-link-index-status');
+  const list = document.getElementById('epg-link-suggestions');
+  try {
+    const result = await persistentRequest('/api/xtream/epg/links/suggestions');
+    const cache = result.cache || {};
+    if (!cache.refreshed_at) {
+      status.textContent = 'No saved XMLTV channel index. Select Refresh EPG Link Index.';
+      list.innerHTML = '';
+      return;
+    }
+    const channels = result.channels || [];
+    _epgLinkSuggestions = channels;
+    status.textContent = `${cache.channel_count} XMLTV channels indexed · refreshed ${cache.refreshed_at} · ${channels.length} saved channels have no cached programmes.`;
+    list.innerHTML = channels.length ? channels.map(channel => `<article class="persistent-row">
+      <div aria-hidden="true"></div>
+      <div class="persistent-row-main"><strong>${escHtml(channel.channel_name)}</strong>
+        <div class="persistent-row-meta">${channel.candidates.length ? 'Possible guide links for review:' : 'No close XMLTV name match found.'}</div>
+        ${channel.candidates.map((item, index) => `<div class="persistent-row-meta">${escHtml(item.display_name)} · XMLTV ID ${escHtml(item.guide_id)} · similarity ${Math.round(item.similarity * 100)}% · ${item.provider_programmes} provider programmes
+          ${channel.current_epg_channel_id ? '' : `<button class="btn btn-secondary" type="button" onclick="applyEpgLink(${channel.persistent_id}, ${index})">Use this guide</button>`}</div>`).join('')}
+      </div>
+    </article>`).join('') : '<div class="status-muted">Every enabled persistent channel currently has cached programmes.</div>';
+  } catch (err) {
+    status.textContent = `Could not read saved EPG links: ${err.message}`;
+    list.innerHTML = '';
+  }
+}
+
+async function applyEpgLink(persistentId, candidateIndex) {
+  const channel = _epgLinkSuggestions.find(item => item.persistent_id === persistentId);
+  const candidate = channel?.candidates?.[candidateIndex];
+  if (!candidate || channel.current_epg_channel_id) return;
+  if (!await showConfirm('Use this XMLTV guide?', `Link “${channel.channel_name}” to “${candidate.display_name}” (${candidate.guide_id}). The name match is only a suggestion; check that both feeds carry the same schedule.`)) return;
+  try {
+    await persistentRequest(`/api/xtream/persistent-channels/${persistentId}`, {
+      method:'PATCH', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({guide_id:candidate.guide_id}),
+    });
+    await loadPersistentChannels();
+    try {
+      const guide = await persistentRequest('/api/xtream/epg/refresh', {method:'POST'});
+      showToast(`Guide linked; ${guide.programmes} programmes refreshed`, guide.failed ? 'warning' : 'success');
+    } catch (err) {
+      persistentError(`Guide link saved, but provider EPG refresh failed: ${err.message}`);
+    }
+    await loadEpgLinkSuggestions();
+  } catch (err) {
+    persistentError(`Could not save guide link: ${err.message}`);
+  }
 }
 
 function persistentError(message = '') {
@@ -135,6 +216,40 @@ async function loadPersistentChannels() {
   } catch (err) {
     persistentError(`Could not load persistent channels: ${err.message}`);
     document.getElementById('persistent-list').innerHTML = '<div class="favorite-empty">Persistent channels could not be loaded.</div>';
+  }
+}
+
+function renderPersistentChannelCacheStatus(cache) {
+  const status = document.getElementById('persistent-cache-status');
+  status.textContent = cache?.refreshed_at
+    ? `Channel cache: ${cache.stream_count} channels in ${cache.category_count} categories · refreshed ${cache.refreshed_at}. Search uses this saved snapshot.`
+    : 'Channel cache is empty. Select Refresh Channel Cache before searching.';
+}
+
+async function loadPersistentChannelCacheStatus() {
+  try {
+    const data = await persistentRequest('/api/xtream/persistent-channels/catalog/status');
+    renderPersistentChannelCacheStatus(data.cache);
+  } catch (err) {
+    document.getElementById('persistent-cache-status').textContent = `Could not read channel cache status: ${err.message}`;
+  }
+}
+
+async function refreshPersistentChannelCache(button) {
+  button.disabled = true;
+  button.textContent = 'Refreshing channel cache…';
+  persistentError('');
+  try {
+    const data = await persistentRequest('/api/xtream/persistent-channels/catalog/refresh', {method:'POST'});
+    renderPersistentChannelCacheStatus(data.cache);
+    showToast(`Saved ${data.cache.stream_count} channels from ${data.cache.category_count} categories`, 'success');
+    if (document.getElementById('persistent-search').value.trim()) searchPersistentStreams(1);
+  } catch (err) {
+    persistentError(`Could not refresh channel cache: ${err.message}. The previous snapshot was kept.`);
+    await loadPersistentChannelCacheStatus();
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Refresh Channel Cache';
   }
 }
 
@@ -213,17 +328,17 @@ async function searchPersistentStreams(page = 1) {
   const requestId = ++_persistentSearchSequence;
   document.getElementById('persistent-editor').innerHTML = '';
   document.getElementById('persistent-pagination').innerHTML = '';
-  results.innerHTML = '<span class="status-muted">Searching channels across categories…</span>';
+  results.innerHTML = '<span class="status-muted">Searching saved channels…</span>';
   try {
     const params = new URLSearchParams({q:query, scope:_persistentSearchScope, page:String(page), page_size:'25'});
-    const data = await persistentRequest(`/api/xtream/persistent-channels/search?${params}`, {method:'POST'});
+    const data = await persistentRequest(`/api/xtream/persistent-channels/search?${params}`);
     if (requestId !== _persistentSearchSequence) return;
     _persistentResults = Array.isArray(data.items) ? data.items : [];
     _persistentPage = data.page || 1;
     results.innerHTML = _persistentResults.length ? persistentResultRows() : (data.category_count === 0
       ? (data.scope === 'active'
         ? '<div class="favorite-empty">No active event categories are available. Select categories in Settings or try All Categories.</div>'
-        : '<div class="favorite-empty">The provider returned no categories. Check the Xtream account pool in Settings.</div>')
+        : '<div class="favorite-empty">The channel cache has no categories. Select Refresh Channel Cache.</div>')
       : '<div class="favorite-empty">No matching channels in these categories.</div>');
     const pages = Math.max(1, Math.ceil((data.total || 0) / (data.page_size || 25)));
     document.getElementById('persistent-pagination').innerHTML = `<span class="status-muted">${data.total || 0} result${data.total === 1 ? '' : 's'} · page ${_persistentPage} of ${pages}</span>
@@ -334,7 +449,7 @@ async function detectAllPersistentQuality() {
   try {
     for (let page = 1; !batch.stopped; page++) {
       const params = new URLSearchParams({q:query, scope, page:String(page), page_size:'100'});
-      const data = await persistentRequest(`/api/xtream/persistent-channels/search?${params}`, {method:'POST'});
+      const data = await persistentRequest(`/api/xtream/persistent-channels/search?${params}`);
       total = data.total || 0;
       for (const stream of data.items || []) {
         if (batch.stopped) break;
@@ -479,5 +594,7 @@ async function deletePersistentChannel(id) {
 }
 
 loadPersistentFavoriteTeams().then(loadPersistentChannels);
+loadPersistentChannelCacheStatus();
+loadEpgLinkSuggestions();
 </script>
 {% endblock %}

@@ -118,6 +118,10 @@ and recent termination/failure reasons. It edits only labels, enabled state and
 capacity. There are no readback password or username fields. Change credentials
 in deployment secrets. Restart after changing environment values; secret files
 are read by new operations. Existing streams finish using their original account.
+Pool `available` counts only Fruit's own activity, not streams or downloads in
+other apps. A normal tune uses a cached eligible account without waiting for a
+fresh `player_api.php` check; when no cached slot is usable, Fruit checks due
+accounts to recover capacity before trying media.
 To use an account in another app, disable and save it in the pool first. Fruit
 requires the account to be idle before that change succeeds, then sends no new
 account checks, catalog/EPG requests, quality probes or streams on it. Test
@@ -276,6 +280,16 @@ clears that channel's guide. Use **Refresh Persistent Guide** after adding or
 editing a channel. Regular daily refresh also refreshes persistent EPG, including
 deployments with no dynamic category selection. Missing provider data remains a
 visible empty guide. Dynamic programme generation and provenance gates are reused.
+
+The **Offline EPG Links** index stores XMLTV channel IDs, names, and counts of
+valid programme entries from the same provider XMLTV download. It does not store
+the credential-bearing feed URL. The explicit **Refresh EPG Link Index** action
+can rebuild this index without changing cached programmes. Read it at
+`/api/xtream/epg/links`; `/api/xtream/epg/links/suggestions` compares saved
+channels without cached programmes to indexed XMLTV names. Suggestions are
+advisory. For a channel without a provider EPG ID, an operator can confirm a
+suggested guide in the Persistent Channels UI; Fruit then refreshes its guide
+and exports the mapped programmes through the existing XMLTV endpoints.
 
 ## Exact Docker / TrueNAS update procedure
 

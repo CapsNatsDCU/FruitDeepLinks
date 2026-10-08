@@ -108,6 +108,61 @@ class EpgLineupTests(unittest.TestCase):
         self.assertTrue(self.client.session.get.call_args.kwargs['stream'])
         self.client.session.get.return_value.close.assert_called_once()
 
+    def test_xmltv_guide_link_index_suggests_without_assigning(self):
+        self.refresh_xml()
+        extra = create_channel(self.conn, {"stream_id": "88", "name": "Sports HD"},
+                               category_id="10", category_name="Sports", channel_number="9001")
+        client = create_app().test_client()
+        with patch('server.routes.api.xtream._configured_client',
+                   side_effect=AssertionError('Index reads must not contact provider')):
+            links = client.get('/api/xtream/epg/links')
+            matches = client.get('/api/xtream/epg/links/suggestions')
+        self.assertEqual(200, links.status_code)
+        self.assertEqual(1, links.get_json()['cache']['channel_count'])
+        self.assertEqual(["Sports"], links.get_json()['links'][0]['display_names'])
+        self.assertEqual(1, links.get_json()['links'][0]['programme_count'])
+        self.assertEqual(200, matches.status_code)
+        proposed = next(item for item in matches.get_json()['channels']
+                        if item['persistent_id'] == extra['id'])
+        self.assertEqual('ESPN.us', proposed['candidates'][0]['guide_id'])
+        self.assertIsNone(get_channel(self.conn, extra['id'])['epg_channel_id'])
+        self.assertEqual([], self.conn.execute('SELECT * FROM xtream_epg_programmes WHERE persistent_id=?',
+                                               (extra['id'],)).fetchall())
+        update_channel(self.conn, extra['id'], {'guide_id': 'ESPN.us'})
+        self.refresh_xml()
+        self.assertEqual('ESPN.us', get_channel(self.conn, extra['id'])['effective_guide_id'])
+        self.assertEqual(1, self.conn.execute('SELECT COUNT(*) FROM xtream_epg_programmes WHERE persistent_id=?',
+                                              (extra['id'],)).fetchone()[0])
+
+    def test_explicit_xmltv_link_refresh_keeps_snapshot_on_feed_failure(self):
+        client = create_app().test_client()
+        self.response('<tv><channel id="ESPN.us"><display-name>Sports</display-name></channel>'
+                      + self.programme() + '</tv>')
+        with patch('server.routes.api.xtream._configured_client',
+                   return_value=(self.client.config, self.client)):
+            refreshed = client.post('/api/xtream/epg/links/refresh')
+        self.assertEqual(200, refreshed.status_code, refreshed.get_data(as_text=True))
+        before = client.get('/api/xtream/epg/links').get_json()
+        self.assertEqual(1, before['links'][0]['programme_count'])
+        self.client.session.get.side_effect = OSError('provider unavailable')
+        with patch('server.routes.api.xtream._configured_client',
+                   return_value=(self.client.config, self.client)):
+            failed = client.post('/api/xtream/epg/links/refresh')
+        self.assertEqual(502, failed.status_code)
+        self.assertEqual(before, client.get('/api/xtream/epg/links').get_json())
+
+    def test_xmltv_link_index_redacts_account_credentials_in_names(self):
+        from xml.sax.saxutils import escape
+        secret = self.accounts[0].config.password
+        self.response('<tv><channel id="ESPN.us"><display-name>'
+                      + escape('Sports ' + secret) + '</display-name></channel>'
+                      + self.programme() + '</tv>')
+        refresh_epg(self.conn, self.client, self.accounts)
+        stored = self.conn.execute('SELECT display_names_json FROM xtream_epg_link_index WHERE guide_id=?',
+                                   ('ESPN.us',)).fetchone()[0]
+        self.assertNotIn(secret, stored)
+        self.assertIn('[REDACTED]', stored)
+
     def test_xmltv_failure_uses_next_account_for_programmes(self):
         self.client.metadata_configs = tuple(account.config for account in self.accounts[:2])
         self.client.session.get.side_effect = OSError("private-password/0")

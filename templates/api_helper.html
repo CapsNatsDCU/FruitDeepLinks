@@ -66,6 +66,9 @@ code { font-family:var(--mono); font-size:12px; background:var(--bg-inset); colo
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/xmltv/direct</code> Direct channels XMLTV guide</div>
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/m3u/direct</code> Direct channels M3U playlist</div>
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/xmltv/persistent</code> Persistent Xtream channel XMLTV</div>
+  <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/api/xtream/epg/links</code> Saved provider XMLTV channel IDs and names</div>
+  <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/api/xtream/epg/links/suggestions</code> Possible links for persistent channels without cached programmes</div>
+  <div class="endpoint-line"><span class="tag tag-post">POST</span><code>/api/xtream/epg/links/refresh</code> Refresh the offline XMLTV channel index from one provider feed</div>
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/m3u/persistent</code> Persistent Xtream channel M3U</div>
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/xmltv/lanes</code> Virtual lanes XMLTV guide</div>
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/m3u/lanes</code> Virtual lanes M3U playlist</div>
@@ -107,14 +110,17 @@ curl -o aiv_apple.m3u "$BASE/out/adb_lanes_aiv_apple.m3u"</pre>
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/api/xtream/categories</code> Saved event categories and cached discovery</div>
   <div class="endpoint-line"><span class="tag tag-post">POST</span><code>/api/xtream/categories/live</code> Fetch current provider categories</div>
   <div class="endpoint-line"><span class="tag tag-post">POST</span><code>/api/xtream/categories/&lt;category_id&gt;/streams?q=&amp;page=</code> Browse one provider category</div>
-  <div class="endpoint-line"><span class="tag tag-post">POST</span><code>/api/xtream/persistent-channels/search?q=&amp;scope=all|active&amp;page=</code> Search channels across categories</div>
+  <div class="endpoint-line"><span class="tag tag-post">POST</span><code>/api/xtream/persistent-channels/catalog/refresh</code> Fetch one new provider channel snapshot</div>
+  <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/api/xtream/persistent-channels/catalog</code> Get every cached channel in one response</div>
+  <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/api/xtream/persistent-channels/catalog/status</code> Cache age and counts</div>
+  <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/api/xtream/persistent-channels/search?q=&amp;scope=all|active&amp;page=</code> Search the saved channel cache</div>
   <div class="endpoint-line"><span class="tag tag-post">POST</span><code>/api/xtream/persistent-channels/quality</code> Measure and save actual stream resolution</div>
   <div class="endpoint-line"><span class="tag tag-get">GET</span><code>/api/xtream/persistent-channels</code> List saved channels</div>
-  <div class="endpoint-line"><span class="tag tag-post">POST</span><code>/api/xtream/persistent-channels</code> Add a provider-verified stream</div>
+  <div class="endpoint-line"><span class="tag tag-post">POST</span><code>/api/xtream/persistent-channels</code> Add a stream from the saved channel cache</div>
   <div class="endpoint-line"><span class="tag tag-post">PATCH</span><code>/api/xtream/persistent-channels/&lt;id&gt;</code> Edit or enable/disable a channel</div>
   <div class="endpoint-line"><span class="tag tag-danger">DELETE</span><code>/api/xtream/persistent-channels/&lt;id&gt;</code> Delete a saved channel</div>
   <div class="endpoint-line"><span class="tag tag-get">GET/HEAD</span><code>/xtream/channel/&lt;id&gt;/stream</code> Non-cacheable tune redirect</div>
-  <p class="description">The Persistent Channels page searches by channel name across all provider categories or only saved event categories. Results include their category so a channel can be added without changing event ingestion. Credentials remain server-side and never appear in API output, SQLite rows, M3U, XMLTV, or normal logs.</p>
+  <p class="description">The Persistent Channels page searches a saved provider snapshot by channel name across all provider categories or only saved event categories. A refresh explicitly contacts the provider, while search, pagination, full-catalog reads, and adding a channel use the cache. Cached presence does not prove playback. Credentials remain server-side and never appear in API output, SQLite rows, M3U, XMLTV, or normal logs.</p>
 </div>
 
 <!-- ADB LANES API -->

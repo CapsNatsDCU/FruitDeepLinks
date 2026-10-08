@@ -79,23 +79,29 @@ class StreamProxyTests(unittest.TestCase):
         with self.pool.gate.hold(self.pool.accounts[0].config) as fd:
             self.assertEqual(1, host_configs(self.pool.accounts[0].config, fd)[0][0])
 
-    def test_live_link_tunes_when_account_api_is_down_but_media_works(self):
-        class MetadataUnavailable(HealthyAccountClient):
-            def get_account_max_connections(self):
-                self.last_account_check = {"health": "unreachable", "error": "Provider HTTP 403"}
-                return None
-
-        self.pool.client_factory = MetadataUnavailable
+    def test_degraded_account_tunes_without_waiting_for_account_api(self):
         with self.pool.connection() as conn:
-            conn.execute("UPDATE xtream_account_state SET last_checked=0")
-        with mocked_provider(FakeMedia([b"\x47" * 376])) as upstream:
+            conn.execute("UPDATE xtream_account_state SET health='degraded',last_checked=0")
+        with patch.object(self.pool, "check_accounts") as check, \
+             mocked_provider(FakeMedia([b"\x47" * 376])) as upstream:
             response = self.client.get('/stream', buffered=False)
             self.assertEqual(200, response.status_code)
             self.assertEqual(b"\x47" * 376, response.get_data())
             response.close()
             self.assertEqual(1, upstream.get.call_count)
+            check.assert_not_called()
         self.assertEqual(0, self.pool.status()["active"])
         self.assertTrue(all(account["health"] == "degraded" for account in self.pool.status()["accounts"]))
+
+    def test_unknown_accounts_are_checked_before_first_tune(self):
+        with self.pool.connection() as conn:
+            conn.execute("UPDATE xtream_account_state SET health='unknown',last_success=NULL,last_checked=0")
+        with patch.object(self.pool, "check_accounts", wraps=self.pool.check_accounts) as check, \
+             mocked_provider(FakeMedia([b"\x47" * 376])):
+            response = self.client.get('/stream', buffered=False)
+            self.assertEqual(200, response.status_code)
+            response.close()
+            check.assert_called_once_with(due_only=True)
 
     def test_all_three_live_responses_fourth_rejected_then_reused(self):
         with mocked_provider():

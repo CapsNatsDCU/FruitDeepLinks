@@ -239,11 +239,17 @@ catalogue by default.
 
 ### Persistent Xtream channels
 
-The **Persistent Channels** card on `/settings` is for stable team and network
-feeds whose names do not contain an event date. Click **Browse Xtream
-Channels**, choose one of the category IDs already configured under **Xtream
-IPTV**, search by name, and add the result. Users never need to type a stream
-ID. Each saved channel has a display name, unique channel number, optional
+The **Persistent Channels** page is for stable team and network feeds whose
+names do not contain an event date. Click **Refresh Channel Cache** to save a
+provider snapshot, then **Search Xtream Channels** to search across every
+category or only event-ingestion categories. Search, pagination, and adding a
+channel read the saved snapshot without contacting the provider catalog. The
+refresh first requests the provider's full live stream list; it fetches each
+category separately only when that list lacks category IDs or is unavailable.
+`GET /api/xtream/persistent-channels/catalog` returns the entire cached catalog
+and its refresh timestamp in one response. A cached channel may have gone stale;
+actual playback is checked only when a stream is tuned. Users never need to type
+a stream ID. Each saved channel has a display name, unique channel number, optional
 channel/guide IDs, logo override, favorite-team association, notes, and an
 enabled switch.
 
@@ -258,6 +264,16 @@ credentials. At tune time FruitDeepLinks reads `XTREAM_USERNAME` and
 `XTREAM_PASSWORD` for a legacy deployment, or selects an available pooled account,
 and proxies the provider media. Persistent XMLTV includes cached provider
 programmes when available and channel definitions without invented schedules otherwise.
+The **Offline EPG Links** section stores channel IDs and names from the provider
+XMLTV feed in SQLite, without storing its credential-bearing URL. A normal
+persistent-guide refresh updates this index from the same XMLTV download; **Refresh
+EPG Link Index** also refreshes it explicitly. The saved index is available at
+`GET /api/xtream/epg/links`; `GET /api/xtream/epg/links/suggestions` finds
+name-similar guide IDs for saved channels without cached programmes. Suggestions
+do not change the guide. For channels with no provider-supplied EPG ID, an
+operator can review and choose a suggested XMLTV ID, then Fruit refreshes the
+guide and serves it through the existing `/xmltv/persistent` and
+`/xmltv/channels` URLs. The provider URL and credentials stay server-side.
 
 ### Direct Channels DVR and multiple Xtream accounts
 
