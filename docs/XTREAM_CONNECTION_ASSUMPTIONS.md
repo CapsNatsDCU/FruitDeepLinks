@@ -107,6 +107,41 @@ stream inactivity separate from total recording duration.
 
 ## Local validation
 
+### Outgoing request audit, 2026-10-08
+
+`tests/test_xtream_endpoint_contract.py` checks actual requests received by a
+strict local HTTP server, rather than only checking mocked Python arguments.
+It verifies Python and curl query encoding for usernames/passwords containing
+spaces, plus signs, ampersands, percent signs, slashes, Unicode and quotes.
+Account checks omit `action`; category discovery uses `get_live_categories`;
+catalog requests use `get_live_streams` with the selected `category_id` or no
+filter for the full catalog; EPG requests use `get_short_epg` or
+`get_simple_data_table` with `stream_id`. XMLTV uses the separate `xmltv.php`
+endpoint with query credentials. Root-path media credentials are encoded as
+separate path segments. Requests, curl and FFmpeg follow fixture redirects;
+the FFmpeg test also retrieves a relative HLS segment and remuxes real video.
+
+These checks establish request formatting and local transport behavior. They
+do not establish which endpoints/formats the provider currently supports for
+each channel, or that every pooled account has the same stream IDs. Historical
+provider verification established the root-path TS URL, redirects and account
+API, but is not a current guarantee for every channel. The TS-first path still
+does not try HLS after a TS timeout or a failed curl authentication retry, even
+when HLS might work. Provider XMLTV/full EPG support also requires provider
+responses; local fixtures alone cannot confirm it.
+
+A fresh read-only live pool snapshot during this audit reported three degraded
+accounts, zero leases, and Python/curl account timeouts. The live status API
+reported direct provider transport. No authenticated provider request was
+triggered by this audit. Timeouts do not establish invalid credentials, wrong
+URL formatting, or the provider's failure cause. Compare TS and HLS on the same
+channel/account from Fruit's deployed network with exclusive use before changing
+transport selection or declaring either endpoint unsupported.
+
+180 focused tests passed for ingestion, EPG, pooling, proxying, media sampling,
+request formatting and real loopback playback. The six outgoing-request tests
+also passed separately with a relative HLS segment after a redirect.
+
 104 focused tests passed with the repository's pinned Requests 2.31.0 and
 urllib3 2.1.0. The run included real loopback sockets and FFmpeg, stream lease
 cleanup, host redirects, HLS remuxing, the prefix buffering regression, duplicate
