@@ -13,7 +13,7 @@ from xtream_hls import HLSStream
 from xtream_ingest import build_stream_url
 from xtream_hosts import host_configs, record_host_success
 from xtream_pool import PoolUnavailable, XtreamPool
-from xtream_transport import configure_session
+from xtream_transport import configure_session, media_chunks
 
 
 def _timeout():
@@ -129,7 +129,7 @@ def proxy_stream(stream_id, source, extension="ts", *, pool=None):
                     use_hls = upstream.status_code in {404, 415} and str(extension).lower() == "m3u8"
                 if not authentication and not use_hls:
                     upstream.raise_for_status()
-                    chunks = iter(upstream.iter_content(chunk_size=188 * 64))
+                    chunks = iter(media_chunks(upstream))
                     first = next(chunks, b"")
                     if first.lstrip().startswith(b"#EXTM3U"):
                         use_hls = True
@@ -143,6 +143,8 @@ def proxy_stream(stream_id, source, extension="ts", *, pool=None):
                     raise OSError("Upstream returned no playable media")
                 validated_media = True
                 record_host_success(lease.gate_fd, host_index)
+                if len(first) >= 188:
+                    pool.record_media_success(lease)
                 body = OwnedStream(lease, upstream, session, chunks, first)
                 response = Response(body, content_type="video/mp2t", headers={
                     "Cache-Control": "no-store", "X-Accel-Buffering": "no"})
@@ -163,7 +165,11 @@ def proxy_stream(stream_id, source, extension="ts", *, pool=None):
                 _close(session)
                 lease.release("tune_failed")
                 raise
-        lease.release(outcome)
-        if account_failure:
-            pool.fail_account(lease.account.id)
+        # Keep the account lock until its failed tune has entered cooldown.
+        # Otherwise a concurrent client can reacquire it between these writes.
+        try:
+            if account_failure:
+                pool.fail_account(lease.account.id)
+        finally:
+            lease.release(outcome)
     return _failure("Xtream upstream tune failed; check pool diagnostics", last_status)

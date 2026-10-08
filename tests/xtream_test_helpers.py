@@ -22,13 +22,16 @@ class FakeMedia:
         self.status_code = status
         self.closed = False
         self.reads = 0
+        self.position = 0
 
     def raise_for_status(self):
         if self.status_code >= 400:
             raise OSError("http://provider.example/live/demo%20user/secret%2Fpass/500.ts")
 
     def iter_content(self, chunk_size):
-        for part in self.parts:
+        while self.position < len(self.parts):
+            part = self.parts[self.position]
+            self.position += 1
             self.reads += 1
             if isinstance(part, Exception):
                 raise part

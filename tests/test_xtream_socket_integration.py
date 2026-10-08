@@ -37,6 +37,7 @@ class SocketIntegrationTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.path = self.root / 'fruit.db'
         self.active = 0
+        self.active_accounts = {}
         self.redirects = 0
         self.lock = threading.Lock()
         owner = self
@@ -75,12 +76,20 @@ class SocketIntegrationTests(unittest.TestCase):
                     self.end_headers()
                     self.wfile.write(body)
                     return
-                self.send_response(200)
-                self.send_header('Content-Type', 'video/mp2t')
-                self.end_headers()
+                account = path.split('/')[1]
                 with owner.lock:
-                    owner.active += 1
+                    occupied = owner.active_accounts.get(account, 0) > 0
+                    if not occupied:
+                        owner.active_accounts[account] = 1
+                        owner.active += 1
+                if occupied:
+                    self.send_response(429)
+                    self.end_headers()
+                    return
                 try:
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'video/mp2t')
+                    self.end_headers()
                     while True:
                         self.wfile.write(b'\x47' * (188 * 64))
                         self.wfile.flush()
@@ -90,6 +99,7 @@ class SocketIntegrationTests(unittest.TestCase):
                 finally:
                     with owner.lock:
                         owner.active -= 1
+                        owner.active_accounts.pop(account, None)
 
         self.provider = ThreadingHTTPServer(('127.0.0.1', 0), Provider)
         self.provider.daemon_threads = True
@@ -111,6 +121,7 @@ class SocketIntegrationTests(unittest.TestCase):
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         self.base = f'http://127.0.0.1:{self.server.server_port}'
+        os.environ['SERVER_URL'] = self.base
         self.pool = XtreamPool(self.path)
 
     def until(self, predicate):
@@ -123,15 +134,22 @@ class SocketIntegrationTests(unittest.TestCase):
 
     def test_three_real_connections_disconnect_and_retry(self):
         streams = []
+        playlist = requests.get(self.base + '/m3u/persistent', timeout=10)
+        self.assertEqual(200, playlist.status_code)
+        channel_paths = [line for line in playlist.text.splitlines() if '/xtream/channel/1/stream' in line]
+        self.assertEqual(1, len(channel_paths), 'One channel entry must serve all three clients')
         try:
             for _ in range(3):
-                response = requests.get(self.base + '/xtream/channel/1/stream', stream=True, timeout=10)
+                response = requests.get(channel_paths[0], stream=True, timeout=10)
                 streams.append(response)
                 self.assertEqual(200, response.status_code)
                 self.assertEqual(b'\x47' * 188, response.raw.read(188))
                 self.assertNotIn('Location', response.headers)
             self.assertEqual(3, self.pool.status()['active'])
             self.assertEqual(3, self.active)
+            self.assertEqual(3, len(self.active_accounts))
+            self.assertEqual({1}, set(self.active_accounts.values()))
+            self.assertTrue(all(a['last_media_success'] for a in self.pool.status()['accounts']))
             fourth = requests.get(self.base + '/xtream/channel/1/stream', timeout=10)
             self.assertEqual(503, fourth.status_code)
             streams.pop().close()

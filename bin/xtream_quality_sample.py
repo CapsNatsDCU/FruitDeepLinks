@@ -21,7 +21,7 @@ def _capture_one(ts_url, hls_url, extension, lease_fd, *, deadline, gate_fd,
     import requests
     from xtream_curl import CurlStream
     from xtream_hls import HLSStream
-    from xtream_transport import configure_session
+    from xtream_transport import configure_session, media_chunks
 
     session = upstream = None
     try:
@@ -42,7 +42,7 @@ def _capture_one(ts_url, hls_url, extension, lease_fd, *, deadline, gate_fd,
             use_hls = upstream.status_code in {404, 415} and str(extension).lower() == "m3u8"
         if not authentication and not use_hls:
             upstream.raise_for_status()
-            chunks = iter(upstream.iter_content(chunk_size=64 * 1024))
+            chunks = iter(media_chunks(upstream))
             first = next(chunks, b"")
             use_hls = first.lstrip().startswith(b"#EXTM3U")
         if use_hls:

@@ -53,6 +53,25 @@ def config_fingerprint(config) -> str:
     return hashlib.sha256(json.dumps(values).encode()).hexdigest()
 
 
+def _credential_route_fingerprints(config) -> set[str]:
+    """Compare credentials on primary and explicitly known equivalent routes.
+
+    Unknown host aliases cannot be inferred. Normalize origin spelling so a
+    hostname's case or an explicit default port cannot create extra capacity.
+    """
+    routes = set()
+    for server in (config.server_url, config.fallback_server_url):
+        if not server:
+            continue
+        parsed = urlsplit(server)
+        route = (parsed.scheme.lower(), parsed.hostname.lower(),
+                 parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
+                 parsed.path.rstrip("/"))
+        values = (route, config.username, config.password)
+        routes.add(hashlib.sha256(json.dumps(values).encode()).hexdigest())
+    return routes
+
+
 def capacity(value: Any) -> int | None:
     from xtream_ingest import XtreamError
     if value is None or value == "":
@@ -134,10 +153,11 @@ def load_accounts(conn=None, environ: Mapping[str, str] | None = None) -> list[A
         account = Account(account_id, str(row.get("label") or f"Account {len(result) + 1}")[:100],
                           row.get("enabled", True), config, capacity(row.get("capacity_override")))
         # Duplicate credentials do not create extra physical provider capacity.
-        if account.fingerprint in seen_credentials:
+        credential_routes = _credential_route_fingerprints(config)
+        if credential_routes & seen_credentials:
             raise XtreamError("Duplicate Xtream credentials cannot be configured as separate accounts")
         seen_ids.add(account_id)
-        seen_credentials.add(account.fingerprint)
+        seen_credentials.update(credential_routes)
         result.append(account)
     return result
 

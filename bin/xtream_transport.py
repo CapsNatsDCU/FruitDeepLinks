@@ -43,3 +43,17 @@ def configure_session(session):
 def curl_proxy_args() -> list[str]:
     proxy = proxy_url()
     return ["--proxy", proxy, "--noproxy", ""] if proxy else []
+
+
+def media_chunks(response):
+    """Read enough TS to validate startup, then use larger forwarding chunks.
+
+    urllib3's non-chunked stream reader waits to fill the requested amount.
+    Waiting for 12 KiB before serving a tune adds avoidable startup buffering.
+    Both iterators consume the same response; the second resumes after the
+    prefix rather than replaying it. A short HLS body can still reach EOF.
+    """
+    prefix = next(response.iter_content(chunk_size=188 * 2), b"")
+    if prefix:
+        yield prefix
+        yield from response.iter_content(chunk_size=188 * 64)

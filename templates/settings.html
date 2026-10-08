@@ -110,9 +110,10 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
 <section class="card" style="margin-bottom:16px" aria-labelledby="xtream-pool-title">
   <h2 id="xtream-pool-title">Xtream Account Pool</h2>
   <p class="persistent-intro">Persistent channels and Fruit lanes share these accounts. Credentials are supplied through deployment secrets. Account labels, availability and capacity overrides can be managed here. Disable and save an account before using it in another app; while disabled, Fruit will not test, request guide/catalog data, or start streams on it. Re-enable it only after that other app has stopped.</p>
+  <p class="persistent-intro">Add the combined M3U and XMLTV links below as one source in Channels. Each channel appears once; every tune uses a free account slot. Three independent usable accounts provide up to three simultaneous streams, including viewers on the same channel.</p>
   <div class="persistent-links"><a href="/m3u/channels">Channels DVR M3U</a><a href="/xmltv/channels">Channels DVR XMLTV</a></div>
   <div class="persistent-toolbar">
-    <button class="btn" type="button" data-pool-test="all" onclick="checkXtreamPool(this)">Test All Accounts</button>
+    <button class="btn" type="button" data-pool-test="all" onclick="checkXtreamPool(this)">Check All Account APIs</button>
     <button class="btn btn-secondary" type="button" onclick="loadXtreamPool()">Refresh Status</button>
   </div>
   <p id="xtream-pool-test-status" class="xtream-test-feedback" role="status" aria-live="polite" hidden></p>
@@ -173,6 +174,21 @@ function poolError(message = '') {
 
 let _xtreamPoolTest = null;
 
+function xtreamAvailabilityText(account) {
+  const reasons = {
+    ready: 'Ready to attempt playback',
+    ready_degraded: 'Ready to retry playback · degraded cached health',
+    disabled: 'Disabled',
+    stream_in_use: 'Slot occupied by a stream',
+    provider_request_in_progress: 'Provider request in progress',
+    cooldown: `Playback retry in ${account.retry_after_seconds} seconds`,
+    unknown: 'Account has not been verified · check account API',
+    unreachable: 'Account verification unavailable · check account API',
+    unhealthy: 'Account verification rejected · check account API',
+  };
+  return reasons[account.availability_reason] || 'Refresh status to check availability';
+}
+
 function renderXtreamPoolTestStatus() {
   const test = _xtreamPoolTest;
   const busy = test?.state === 'testing';
@@ -205,12 +221,15 @@ async function loadXtreamPool() {
           <label><input name="reserved" type="checkbox" ${account.reserved_for_fruit ? 'checked' : ''}> Reserved for Fruit</label>
           <label>Capacity override <input name="capacity" type="number" min="1" max="10000" placeholder="Automatic" value="${account.configured_override ?? ''}" style="width:110px"></label>
           <button class="btn" type="button" data-save-account onclick="saveXtreamAccount(this.form)">Save Account</button>
-          <button class="btn btn-secondary" type="button" data-pool-test="account" onclick="checkXtreamPool(this,this.form.dataset.accountId)">Test Account</button>
+          <button class="btn btn-secondary" type="button" data-pool-test="account" onclick="checkXtreamPool(this,this.form.dataset.accountId)">Check Account API</button>
         </div>
-        <p>${escHtml(account.health)} · Discovered: ${account.discovered_capacity ?? 'Unknown'} · Effective: ${account.effective_capacity} · Active: ${account.active} · Fruit available: ${account.available}${account.busy && !account.active ? ' · Provider request in progress' : ''}${account.capacity_source === 'conservative_default' ? ' · Unknown limit: conservatively using 1; set an override if needed.' : ''}</p>
+        <p>${escHtml(xtreamAvailabilityText(account))}</p>
+        <p>Cached health: ${escHtml(account.health)} · Discovered: ${account.discovered_capacity ?? 'Unknown'} · Effective: ${account.effective_capacity} · Active: ${account.active} · Fruit available: ${account.available}${account.capacity_source === 'conservative_default' ? ' · Unknown limit: conservatively using 1.' : ''}</p>
+        ${account.capacity_source === 'local_serialization' ? '<p class="status-muted">Fruit permits one provider operation at a time on this account, even if the provider reports a higher limit.</p>' : ''}
         <p class="status-muted">Fruit cannot count streams or downloads in other apps. Automatic resolution checks require “Reserved for Fruit”; select it only when this account is exclusive to Fruit.</p>
-        <p class="status-muted">Last checked: ${account.last_checked ? escHtml(new Date(account.last_checked * 1000).toLocaleString()) : 'Not checked'}${account.last_error ? ' · ' + escHtml(account.last_error) : ''}</p>
-        <p class="status-muted">Last successful check: ${account.last_success ? escHtml(new Date(account.last_success * 1000).toLocaleString()) : 'Never'}</p>
+        <p class="status-muted">Last health update: ${account.last_checked ? escHtml(new Date(account.last_checked * 1000).toLocaleString()) : 'Not checked'}${account.last_error ? ' · ' + escHtml(account.last_error) : ''}</p>
+        <p class="status-muted">Last successful account API check: ${account.last_success ? escHtml(new Date(account.last_success * 1000).toLocaleString()) : 'Never'}</p>
+        <p class="status-muted">Last playable media tune: ${account.last_media_success ? escHtml(new Date(account.last_media_success * 1000).toLocaleString()) : 'Not observed by Fruit'}. This records the first playable bytes; account API health and sustained playback are separate checks.</p>
         <p class="xtream-test-feedback" data-pool-test-status role="status" aria-live="polite" hidden></p>
       </form>`).join('') : '<p>No accounts configured. Add Xtream accounts to your deployment secrets, then test the pool.</p>';
     renderXtreamPoolTestStatus();
@@ -224,7 +243,7 @@ async function loadXtreamPool() {
 
 async function checkXtreamPool(button, accountId = null) {
   if (_xtreamPoolTest?.state === 'testing') return;
-  _xtreamPoolTest = {accountId, state:'testing', message:accountId ? 'Testing account…' : 'Testing all enabled accounts…'};
+  _xtreamPoolTest = {accountId, state:'testing', message:accountId ? 'Checking account API…' : 'Checking all enabled account APIs…'};
   poolError();
   renderXtreamPoolTestStatus();
   try {
@@ -239,8 +258,8 @@ async function checkXtreamPool(button, accountId = null) {
     _xtreamPoolTest = accountId
       ? skipped[accountId]
         ? {accountId, state:'warning', message:`Account test skipped · ${skipped[accountId] === 'occupied' ? 'account is in use; no provider request was sent' : 'account is disabled; no provider request was sent'}`}
-        : {accountId, state:healthy ? 'success' : 'warning', message:`Account check complete · ${account.health}${data.checked_hosts?.[accountId] === 'alternate' ? ' · alternate host' : data.checked_hosts?.[accountId] === 'both_failed' ? ' · both hosts failed' : ''}${account.last_error ? ' · ' + account.last_error : ''}`}
-      : {accountId:null, state:tested.length && healthy === tested.length && !Object.values(skipped).includes('occupied') ? 'success' : 'warning', message:checked.length ? `Account checks complete · ${healthy} of ${tested.length} tested healthy${Object.values(skipped).filter(reason => reason === 'occupied').length ? ' · ' + Object.values(skipped).filter(reason => reason === 'occupied').length + ' occupied account(s) skipped' : ''}` : 'No enabled accounts to test'};
+        : {accountId, state:healthy ? 'success' : 'warning', message:`Account API check complete · ${account.health}${data.checked_hosts?.[accountId] === 'alternate' ? ' · alternate host' : data.checked_hosts?.[accountId] === 'both_failed' ? ' · both hosts failed' : ''}${account.last_error ? ' · ' + account.last_error : ''} · Playback was not tested`}
+      : {accountId:null, state:tested.length && healthy === tested.length && !Object.values(skipped).includes('occupied') ? 'success' : 'warning', message:checked.length ? `Account API checks complete · ${healthy} of ${tested.length} tested healthy${Object.values(skipped).filter(reason => reason === 'occupied').length ? ' · ' + Object.values(skipped).filter(reason => reason === 'occupied').length + ' occupied account(s) skipped' : ''} · Playback was not tested` : 'No enabled accounts to test'};
     renderXtreamPoolTestStatus();
     await loadXtreamPool();
   } catch (err) {

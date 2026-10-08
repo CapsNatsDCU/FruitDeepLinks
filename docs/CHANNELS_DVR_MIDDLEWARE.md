@@ -95,11 +95,15 @@ still take precedence over environment defaults.
 Capacity is the administrator override, else discovered `max_connections`,
 else a conservative one connection for an authenticated account whose provider
 does not report a usable limit. Zero/unlimited/malformed provider limits do not
-authorize unlimited concurrency. Test accounts and set an override if needed.
-For example, discovered capacities 1 + 1 + 1 produce 3; overrides 2 + 1 + 4
-produce 7. SQLite UI overrides take precedence over file overrides; clearing a
-UI override returns to the file override/discovered limit. Provider checks never
-overwrite either override.
+authorize unlimited concurrency. The local account lock permits one provider
+operation per account, so effective capacity is capped at one even when an
+override or the provider advertises more. Three independent usable accounts
+therefore provide at most three local slots. The discovered value is retained
+for diagnostics. SQLite UI overrides take precedence over file overrides;
+clearing a UI override returns to the file override/discovered limit. Provider
+checks never overwrite either override. Duplicate credentials are rejected
+across primary/fallback routes, including hostname case and default port variants.
+Unknown equivalent host aliases must be configured as one account with a fallback.
 
 For a separate Gluetun container, enable its HTTP proxy and allow port 8888
 through the Gluetun firewall. Publish the proxy on a private Docker-facing host
@@ -188,6 +192,27 @@ tie-breaking. Persistent and dynamic Xtream tunes reserve from exactly the same
 pool. Only successful account checks enable initial allocation; a rejected
 account is skipped while healthy accounts continue.
 
+Use one combined `/m3u/channels` source and `/xmltv/channels` guide in Channels,
+with each persistent channel configured once. Three independent usable
+single-stream accounts can serve three concurrent clients through the same
+channel URL; each client reserves a different account. A fourth client is
+rejected until a slot becomes available.
+
+The pool status reports `availability_reason` for each account: ready, ready
+with degraded cached health, stream occupied, provider request in progress,
+cooldown, disabled, or awaiting/unavailable/rejected account verification.
+`retry_after_seconds` is the remaining local cooldown at the time of the
+snapshot. Refresh Status updates these values without contacting the provider.
+`last_success` records a successful account API check; `last_media_success`
+records the first playable MPEG-TS bytes from a normal media tune. The latter
+does not prove sustained playback or promote cached API health for background
+resolution probes. Both success records reset when credentials change.
+
+Failed account-level tunes enter cooldown while their account lock is still
+held, before the lease is released, so another client cannot immediately select
+that failed account. Success/failure writes match the credential fingerprint;
+a worker using old credentials cannot change a rotated account's state.
+
 SQLite `BEGIN IMMEDIATE` serializes reservations across threads and processes.
 Each live reservation holds a kernel file lock for its complete socket/process
 lifetime. The lease remains until the upstream closes, then releases on client
@@ -220,13 +245,17 @@ backup only while stopped. The standard Docker entrypoint uses threaded Flask.
 If running another WSGI/reverse-proxy stack, enable streaming, enough concurrent
 threads, and no total request timeout; disable response buffering.
 
-The proxy first requests Xtream's `.ts` transport and sends bounded chunks with
+The proxy first requests Xtream's `.ts` transport, reads two TS packets for startup,
+then sends larger bounded chunks with
 backpressure; it does not collect a recording in memory. If a provider returns
-HLS, or its advertised HLS-only stream rejects `.ts`, FFmpeg remuxes into MPEG-TS
+HLS, or `.ts` returns HTTP 404/415 for an entry advertising `m3u8`, FFmpeg remuxes into MPEG-TS
 with codec copy. **No video/audio transcoding occurs.** FFmpeg is the one added OS
 dependency and is included in the Docker image. Bare-host installs need FFmpeg
 on PATH for HLS. Unsupported media fails rather than sending provider HTML,
 JSON, or credential-bearing playlists to Channels.
+Other TS failures, including timeouts, do not currently trigger an HLS attempt.
+Successful HLS playback in another app therefore does not establish that this
+TS-first path works for the same channel/account.
 
 Connect timeout is 10 seconds. Read timeout is inactivity between chunks, **not
 a maximum session duration**; an active recording may run for hours. A stalled
@@ -236,6 +265,13 @@ account gets a cooldown and tune retries another eligible account; a failed
 authentication is rechecked after five minutes or immediately by Test Account.
 Transient errors retry after 30 seconds and do not permanently disable a
 previously healthy account. Automatic health checks are bounded per account.
+The idle timeout also applies during startup; there is no total tune deadline
+across transports, redirects, hosts and accounts. Every retry can add another
+wait. Account/ordinary metadata requests use a 20 second default; curl category
+discovery/full catalog requests use `XTREAM_CATALOG_TIMEOUT_SECONDS` (90 seconds
+by default). These are engineering defaults, not measured provider guarantees.
+See the [connection and capacity assumptions audit](XTREAM_CONNECTION_ASSUMPTIONS.md)
+for the precise timeout semantics and unverified provider behavior.
 
 | Situation | HTTP behavior |
 | --- | --- |

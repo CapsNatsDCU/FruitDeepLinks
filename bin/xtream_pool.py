@@ -7,6 +7,7 @@ be reclaimed without age-based guesses or killing long recordings.
 from __future__ import annotations
 
 import fcntl
+import math
 import os
 import sqlite3
 import threading
@@ -46,7 +47,9 @@ are checked, the derived sum supersedes the historical single-account limit.
         if (row and row[1] == account.fingerprint and account.enabled and account.config.enabled
                 and row[2] != 0 and row[5] in {"healthy", "degraded"}):
             requested = row[3] or account.capacity_override or row[4] or 1
-            total += min(requested, row[4]) if row[4] else requested
+            # The account gate serializes metadata and media together, so the
+            # implemented local capacity is one even if the provider reports more.
+            total += min(requested, row[4] or requested, 1)
     return total
 
 
@@ -87,7 +90,7 @@ class XtreamPool:
                 conn.execute("INSERT OR IGNORE INTO xtream_account_state(account_id,fingerprint) VALUES(?,?)",
                              (account.id, account.fingerprint))
                 conn.execute("UPDATE xtream_account_state SET fingerprint=?,health='unknown',discovered_capacity=NULL,"
-                             "last_checked=NULL,last_success=NULL,last_error=NULL,retry_after=0,exclusive_for_background=0 "
+                             "last_checked=NULL,last_success=NULL,last_media_success=NULL,last_error=NULL,retry_after=0,exclusive_for_background=0 "
                              "WHERE account_id=? AND fingerprint<>?",
                              (account.fingerprint, account.id, account.fingerprint))
 
@@ -112,8 +115,10 @@ class XtreamPool:
                    enabled=self.enabled and account.enabled and row["enabled_override"] != 0)
         row["configured_override"] = row["capacity_override"] if row["capacity_override"] is not None else account.capacity_override
         requested = row["configured_override"] or row["discovered_capacity"] or 1
-        row["effective_capacity"] = min(requested, row["discovered_capacity"]) if row["discovered_capacity"] else requested
-        row["capacity_source"] = ("provider_limit" if row["discovered_capacity"] and requested > row["discovered_capacity"]
+        provider_capacity = min(requested, row["discovered_capacity"] or requested)
+        row["effective_capacity"] = min(provider_capacity, 1)
+        row["capacity_source"] = ("local_serialization" if provider_capacity > 1
+                                  else "provider_limit" if row["discovered_capacity"] and requested > row["discovered_capacity"]
                                   else "override" if row["configured_override"] else "discovered" if row["discovered_capacity"]
                                   else "conservative_default")
         return row
@@ -368,12 +373,26 @@ class XtreamPool:
         else:
             self._log(f'Released account "{safe_value(lease.account.label, self.accounts)}" from stream {safe_value(lease.stream_id, self.accounts)} ({outcome})')
 
+    def record_media_success(self, lease):
+        """Record playable tune evidence without enabling background probes.
+
+        Media success does not establish that the account API is healthy. Match
+        the credential fingerprint so an old worker cannot update rotated secrets.
+        """
+        with self.connection() as conn:
+            conn.execute("UPDATE xtream_account_state SET last_media_success=?,retry_after=0 "
+                         "WHERE account_id=? AND fingerprint=?",
+                         (time.time(), lease.account.id, lease.account.fingerprint))
+
     def fail_account(self, account_id, *, authentication=False):
+        account = next((a for a in self.accounts if a.id == account_id), None)
+        if account is None:
+            return
         now = time.time()
         with self.connection() as conn:
-            conn.execute("UPDATE xtream_account_state SET health=?,last_error=?,retry_after=?,last_checked=? WHERE account_id=?",
+            conn.execute("UPDATE xtream_account_state SET health=?,last_error=?,retry_after=?,last_checked=? WHERE account_id=? AND fingerprint=?",
                          ("unhealthy" if authentication else "degraded", "Stream authentication rejected" if authentication else "Upstream tune failed",
-                          now + (300 if authentication else 30), now, account_id))
+                          now + (300 if authentication else 30), now, account_id, account.fingerprint))
 
     def status(self):
         with self.connection() as conn:
@@ -381,6 +400,7 @@ class XtreamPool:
             self._reap(conn)
             leases = [dict(row) for row in conn.execute("SELECT * FROM xtream_leases ORDER BY started")]
             accounts = []
+            now = time.time()
             for account in self.accounts:
                 state = self._state(conn, account)
                 active = sum(row["account_id"] == account.id or row["fingerprint"] == account.fingerprint for row in leases)
@@ -392,10 +412,24 @@ class XtreamPool:
                 else:
                     busy = False
                     os.close(gate_fd)
-                available = max(0, state["effective_capacity"] - active) if usable and not busy and state["retry_after"] <= time.time() else 0
-                keys = ("id", "label", "enabled", "health", "discovered_capacity", "configured_override", "effective_capacity", "capacity_source", "last_checked", "last_success", "last_error")
+                retry_seconds = max(0, math.ceil(state["retry_after"] - now))
+                available = max(0, state["effective_capacity"] - active) if usable and not busy and not retry_seconds else 0
+                if not state["enabled"]:
+                    reason = "disabled"
+                elif active >= state["effective_capacity"]:
+                    reason = "stream_in_use"
+                elif busy:
+                    reason = "provider_request_in_progress"
+                elif retry_seconds:
+                    reason = "cooldown"
+                elif not usable:
+                    reason = state["health"]
+                else:
+                    reason = "ready_degraded" if state["health"] == "degraded" else "ready"
+                keys = ("id", "label", "enabled", "health", "discovered_capacity", "configured_override", "effective_capacity", "capacity_source", "last_checked", "last_success", "last_media_success", "last_error")
                 accounts.append({**{key: state[key] for key in keys}, "reserved_for_fruit": bool(state["exclusive_for_background"]),
                                  "active": active, "available": available, "busy": busy,
+                                 "availability_reason": reason, "retry_after_seconds": retry_seconds,
                                  "capacity": state["effective_capacity"] if usable else 0})
             history = [dict(row) for row in conn.execute("SELECT * FROM xtream_stream_history ORDER BY id DESC LIMIT 30")]
         labels = {row["id"]: row["label"] for row in accounts}

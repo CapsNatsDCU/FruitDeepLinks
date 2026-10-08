@@ -15,6 +15,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             health TEXT NOT NULL DEFAULT 'unknown',
             last_checked REAL,
             last_success REAL,
+            last_media_success REAL,
             last_error TEXT,
             retry_after REAL NOT NULL DEFAULT 0,
             exclusive_for_background INTEGER NOT NULL DEFAULT 0
@@ -65,4 +66,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     account_columns = {row[1] for row in conn.execute("PRAGMA table_info(xtream_account_state)")}
     if "exclusive_for_background" not in account_columns:
         conn.execute("ALTER TABLE xtream_account_state ADD COLUMN exclusive_for_background INTEGER NOT NULL DEFAULT 0")
+    if "last_media_success" not in account_columns:
+        conn.execute("ALTER TABLE xtream_account_state ADD COLUMN last_media_success REAL")
     conn.commit()

@@ -16,10 +16,45 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 from xtream_curl import CurlStream
 from xtream_hls import HLSStream
 from xtream_ingest import XtreamClient, XtreamConfig
-from xtream_transport import configure_session, proxy_url
+from xtream_transport import configure_session, media_chunks, proxy_url
 
 
 class XtreamTransportTests(unittest.TestCase):
+    def test_media_prefix_is_forwarded_before_large_buffer_fills_without_replay(self):
+        release_rest = threading.Event()
+        prefix = b"\x47" + b"a" * 187 + b"\x47" + b"b" * 187
+        rest = b"\x47" + b"c" * 187
+        body = prefix + rest
+
+        class Provider(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(prefix)
+                self.wfile.flush()
+                if release_rest.wait(2):
+                    self.wfile.write(rest)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        # A reader that still waits for 12 KiB would time out while the
+        # provider deliberately holds back the remaining media.
+        with requests.get(f"http://127.0.0.1:{server.server_port}/stream",
+                          stream=True, timeout=(1, 0.5)) as response:
+            try:
+                chunks = media_chunks(response)
+                self.assertEqual(prefix, next(chunks))
+                release_rest.set()
+                self.assertEqual(body, prefix + b"".join(chunks))
+            finally:
+                release_rest.set()
+
     def test_proxy_validation_never_echoes_invalid_value(self):
         for value in ("http://user:secret@proxy:8888", "https://proxy:8888",
                       "http://proxy:8888/path", "http://proxy:8888?token=secret",

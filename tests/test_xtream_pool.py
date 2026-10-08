@@ -59,6 +59,23 @@ class AccountConfigTests(unittest.TestCase):
             rotated = XtreamPool(path, pool_environment(rows), client_factory=HealthyAccountClient)
             self.assertFalse(rotated.status()["accounts"][0]["reserved_for_fruit"])
 
+    def test_existing_pool_schema_adds_media_evidence_without_changing_api_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fruit.db"
+            with sqlite3.connect(path) as conn:
+                conn.execute("""CREATE TABLE xtream_account_state (
+                    account_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
+                    label_override TEXT, enabled_override INTEGER, capacity_override INTEGER,
+                    discovered_capacity INTEGER, health TEXT NOT NULL DEFAULT 'unknown',
+                    last_checked REAL, last_success REAL, last_error TEXT,
+                    retry_after REAL NOT NULL DEFAULT 0)""")
+            pool = XtreamPool(path, pool_environment(account_rows((1,))),
+                              client_factory=HealthyAccountClient)
+            pool.check_accounts()
+            state = pool.status()["accounts"][0]
+            self.assertIsNotNone(state["last_success"])
+            self.assertIsNone(state["last_media_success"])
+
     def test_existing_pool_schema_adds_background_reservation_disabled(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "fruit.db"
@@ -184,6 +201,25 @@ class AccountConfigTests(unittest.TestCase):
         rows = account_rows((1, 1))
         rows[1].update(username=rows[0]["username"], password=rows[0]["password"])
         with self.assertRaises(XtreamError):
+            load_accounts(environ=pool_environment(rows))
+
+    def test_duplicate_credentials_on_equivalent_routes_cannot_inflate_capacity(self):
+        for second_server, fallback in (("http://PROVIDER.EXAMPLE:8080/", None),
+                                        ("http://alias.example", "http://alias.example")):
+            with self.subTest(second_server=second_server):
+                rows = account_rows((1, 1))
+                rows[1].update(server_url=second_server, username=rows[0]["username"],
+                               password=rows[0]["password"])
+                if fallback:
+                    rows[0]["fallback_server_url"] = fallback
+                with self.assertRaisesRegex(XtreamError, "Duplicate Xtream credentials"):
+                    load_accounts(environ=pool_environment(rows))
+
+        rows = account_rows((1, 1))
+        rows[0]["server_url"] = "http://provider.example"
+        rows[1].update(server_url="http://provider.example:80", username=rows[0]["username"],
+                       password=rows[0]["password"])
+        with self.assertRaisesRegex(XtreamError, "Duplicate Xtream credentials"):
             load_accounts(environ=pool_environment(rows))
 
     def test_explicit_empty_pool_never_reactivates_legacy_credentials(self):
@@ -429,6 +465,27 @@ class PoolTests(unittest.TestCase):
         other = XtreamPool(Path(self.temp.name) / "unknown.db", pool_environment(rows), client_factory=UnknownLimit)
         self.assertEqual((1, "conservative_default"), (other.check_accounts()["capacity"], other.status()["accounts"][0]["capacity_source"]))
 
+    def test_reported_capacity_matches_serialized_account_operations(self):
+        class MultipleConnections(HealthyAccountClient):
+            def get_account_max_connections(self):
+                return 3
+
+        env = pool_environment(account_rows((3,)))
+        pool = XtreamPool(self.path, env, client_factory=MultipleConnections)
+        state = pool.check_accounts()
+        self.assertEqual(3, state["accounts"][0]["discovered_capacity"])
+        self.assertEqual(1, state["capacity"])
+        self.assertEqual("local_serialization", state["accounts"][0]["capacity_source"])
+        with patch.dict(os.environ, env), pool.connection() as conn:
+            self.assertEqual(1, scheduler_capacity(conn))
+        lease = pool.acquire("100", "test")
+        try:
+            self.assertEqual(0, pool.status()["available"])
+            with self.assertRaises(PoolUnavailable):
+                pool.acquire("101", "test")
+        finally:
+            lease.release()
+
     def test_bad_account_skipped_healthy_accounts_remain(self):
         class MixedClient(HealthyAccountClient):
             def get_account_max_connections(self):
@@ -447,6 +504,42 @@ class PoolTests(unittest.TestCase):
         self.assertEqual("degraded", self.pool.status()["accounts"][0]["health"])
         self.assertEqual(2, self.pool.status()["available"])
         self.assertEqual(3, self.pool.check_accounts()["available"])
+
+    def test_status_explains_available_occupied_busy_cooldown_and_disabled_slots(self):
+        self.assertTrue(all(a["availability_reason"] == "ready" for a in self.pool.status()["accounts"]))
+        lease = self.pool.acquire("100", "persistent:1")
+        try:
+            state = self.pool.status()["accounts"][0]
+            self.assertEqual("stream_in_use", state["availability_reason"])
+            self.assertEqual(0, state["available"])
+        finally:
+            lease.release()
+        with self.pool.gate.hold(self.pool.accounts[0].config):
+            self.assertEqual("provider_request_in_progress", self.pool.status()["accounts"][0]["availability_reason"])
+        self.pool.fail_account("account_0")
+        state = self.pool.status()["accounts"][0]
+        self.assertEqual("cooldown", state["availability_reason"])
+        self.assertGreater(state["retry_after_seconds"], 0)
+        self.pool.update("account_0", {"enabled": False})
+        self.assertEqual("disabled", self.pool.status()["accounts"][0]["availability_reason"])
+
+    def test_old_worker_cannot_change_rotated_credentials_health_or_media_evidence(self):
+        lease = self.pool.acquire("100", "persistent:1")
+        self.pool.record_media_success(lease)
+        self.assertIsNotNone(self.pool.status()["accounts"][0]["last_media_success"])
+        rows = account_rows()
+        rows[0]["password"] = "rotated-password"
+        rotated = XtreamPool(self.path, pool_environment(rows), client_factory=HealthyAccountClient)
+        rotated.check_accounts()
+        try:
+            self.pool.record_media_success(lease)
+            self.pool.fail_account("account_0")
+            state = rotated.status()["accounts"][0]
+            self.assertEqual("healthy", state["health"])
+            self.assertIsNone(state["last_media_success"])
+            self.assertEqual(0, state["retry_after_seconds"])
+        finally:
+            lease.release()
 
     def test_metadata_failure_does_not_block_a_previously_working_stream(self):
         class MetadataUnavailable(HealthyAccountClient):

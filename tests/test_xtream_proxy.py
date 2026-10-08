@@ -92,6 +92,35 @@ class StreamProxyTests(unittest.TestCase):
             check.assert_not_called()
         self.assertEqual(0, self.pool.status()["active"])
         self.assertTrue(all(account["health"] == "degraded" for account in self.pool.status()["accounts"]))
+        account = self.pool.status()["accounts"][0]
+        self.assertIsNotNone(account["last_media_success"])
+        self.assertEqual("ready_degraded", account["availability_reason"])
+        self.assertIsNone(self.pool.status()["accounts"][1]["last_media_success"])
+
+    def test_failed_tune_enters_cooldown_before_releasing_account_and_retries_next(self):
+        finish = self.pool.finish
+        failed_accounts = []
+
+        def checked_finish(lease, outcome, fd, gate_fd):
+            if outcome == "tune_failed":
+                state = next(a for a in self.pool.status()["accounts"] if a["id"] == lease.account.id)
+                self.assertGreater(state["retry_after_seconds"], 0)
+                self.assertTrue(state["busy"])
+                failed_accounts.append(lease.account.id)
+            return finish(lease, outcome, fd, gate_fd)
+
+        session = Mock()
+        session.get.side_effect = [FakeMedia(status=503), FakeMedia([b"\x47" * 376])]
+        with patch.object(self.pool, "finish", side_effect=checked_finish), \
+             patch("server.services.xtream_proxy.requests.Session", return_value=session):
+            response = self.client.get('/stream', buffered=False)
+            try:
+                self.assertEqual(200, response.status_code)
+                self.assertEqual(["account_0"], failed_accounts)
+                self.assertEqual("account_1", self.pool.status()["leases"][0]["account_id"])
+            finally:
+                response.close()
+        self.assertEqual(0, self.pool.status()["active"])
 
     def test_unknown_accounts_are_checked_before_first_tune(self):
         with self.pool.connection() as conn:
