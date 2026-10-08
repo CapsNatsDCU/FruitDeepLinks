@@ -230,6 +230,17 @@ class EpgLineupTests(unittest.TestCase):
         self.refresh_xml()
         self.assertEqual('Sports & News', ET.fromstring(render_xmltv(self.conn)).findtext('programme/title'))
 
+    def test_short_station_search_includes_long_names_and_excludes_other_numbers(self):
+        from server.services.xtream_epg_index import replace_snapshot, search
+        replace_snapshot(self.conn, {
+            'WTTG.us': {'names': ['US: FOX 5 LOCAL WASHINGTON DC HD'], 'programme_count': 20},
+            'WUTV.us': {'names': ['US: FOX 29'], 'programme_count': 20},
+            'Fox.us': {'names': ['FOX'], 'programme_count': 20},
+        })
+        matches = search(self.conn, 'FOX 5')
+        self.assertEqual('WTTG.us', matches[0]['guide_id'])
+        self.assertNotIn('WUTV.us', [item['guide_id'] for item in matches])
+
     def test_missing_guide_id_uses_only_explicit_stream_epg_and_decodes_base64(self):
         channel = create_channel(self.conn, {'stream_id': '88', 'name': 'Local'}, category_id='10', category_name='News', channel_number='11')
         self.response('<tv/>')

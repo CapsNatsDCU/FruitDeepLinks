@@ -84,7 +84,7 @@ def _match_name(value: str) -> str:
     text = normalize_name(value)
     text = re.sub(r"^[^:]{1,12}:\s*", "", text)
     tokens = re.findall(r"\w+", text, re.UNICODE)
-    return " ".join(token for token in tokens if token not in _NOISE)
+    return " ".join(token for token in tokens if token not in _NOISE and not re.fullmatch(r"\d+fps", token))
 
 
 def search(conn: sqlite3.Connection, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
@@ -94,6 +94,7 @@ def search(conn: sqlite3.Connection, query: str, *, limit: int = 10) -> list[dic
     if not source_name:
         return []
     source_tokens = set(source_name.split())
+    source_numbers = set(re.findall(r"\d+", source_name))
     indexed = {item["guide_id"]: item for item in entries(conn)}
     names = [(item["guide_id"], name, "XMLTV feed")
              for item in indexed.values() for name in item["display_names"]]
@@ -105,8 +106,17 @@ def search(conn: sqlite3.Connection, query: str, *, limit: int = 10) -> list[dic
         if not candidate:
             continue
         tokens = set(candidate.split())
+        candidate_numbers = set(re.findall(r"\d+", candidate))
+        if source_numbers and candidate_numbers and source_numbers != candidate_numbers:
+            continue
+        shared = len(source_tokens & tokens)
         score = max(SequenceMatcher(None, source_name, candidate).ratio(),
-                    len(source_tokens & tokens) / len(source_tokens | tokens))
+                    shared / len(source_tokens | tokens))
+        # A short station query should find its longer provider label.
+        if shared == len(source_tokens):
+            score = max(score, 0.95)
+        elif len(source_tokens) > 1 and shared / len(source_tokens) >= 0.75:
+            score = max(score, 0.9 * shared / len(source_tokens))
         if score < 0.65 or score <= ranked.get(guide_id, {}).get("similarity", -1):
             continue
         ranked[guide_id] = {"guide_id": guide_id, "display_name": name,
