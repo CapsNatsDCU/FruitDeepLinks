@@ -39,6 +39,9 @@ class SocketIntegrationTests(unittest.TestCase):
         self.active = 0
         self.active_accounts = {}
         self.redirects = 0
+        self.playback_fixture = None
+        self.media_requests = 0
+        self.api_requests = 0
         self.lock = threading.Lock()
         owner = self
 
@@ -51,6 +54,7 @@ class SocketIntegrationTests(unittest.TestCase):
             def do_GET(self):
                 path = urlsplit(self.path).path
                 if path == '/player_api.php':
+                    owner.api_requests += 1
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
                     self.end_headers()
@@ -80,6 +84,7 @@ class SocketIntegrationTests(unittest.TestCase):
                 with owner.lock:
                     occupied = owner.active_accounts.get(account, 0) > 0
                     if not occupied:
+                        owner.media_requests += 1
                         owner.active_accounts[account] = 1
                         owner.active += 1
                 if occupied:
@@ -91,9 +96,9 @@ class SocketIntegrationTests(unittest.TestCase):
                     self.send_header('Content-Type', 'video/mp2t')
                     self.end_headers()
                     while True:
-                        self.wfile.write(b'\x47' * (188 * 64))
+                        self.wfile.write(owner.playback_fixture or b'\x47' * (188 * 64))
                         self.wfile.flush()
-                        time.sleep(0.01)
+                        time.sleep(0.1 if owner.playback_fixture else 0.01)
                 except (BrokenPipeError, ConnectionResetError):
                     pass
                 finally:
@@ -187,6 +192,30 @@ class SocketIntegrationTests(unittest.TestCase):
         self.assertEqual((160, 90), (measured['width'], measured['height']))
         self.assertEqual('mpeg2video', measured['codec'])
         self.assertEqual(0, self.pool.status()['active'])
+
+    def test_manual_buttons_open_real_video_on_every_click(self):
+        subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+                        '-i', 'color=c=blue:s=160x90:r=10', '-t', '2', '-c:v', 'mpeg2video',
+                        '-f', 'mpegts', str(self.root / 'segment.ts')], check=True, capture_output=True)
+        self.playback_fixture = (self.root / 'segment.ts').read_bytes()
+        for attempt in range(2):
+            response = requests.post(self.base + '/api/xtream/pool/accounts/account_0/check', timeout=30)
+            self.assertEqual(200, response.status_code)
+            data = response.json()
+            check = data['playback_checks']['account_0']
+            self.assertEqual('passed', check['status'])
+            self.assertEqual((160, 90), (check['video']['width'], check['video']['height']))
+            self.assertEqual('100', check['channel']['stream_id'])
+            self.assertEqual(attempt + 1, self.media_requests)
+            self.assertEqual(0, self.api_requests)
+            self.assertEqual(0, data['active'])
+            self.until(lambda: self.active == 0)
+        response = requests.post(self.base + '/api/xtream/pool/check', timeout=60)
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(3, len(response.json()['playback_checks']))
+        self.assertTrue(all(c['status'] == 'passed' for c in response.json()['playback_checks'].values()))
+        self.assertEqual(5, self.media_requests)
+        self.until(lambda: self.pool.status()['active'] == 0 and self.active == 0)
 
     def test_real_hls_remux_copies_playable_media_and_releases_process(self):
         self.assertIsNotNone(shutil.which('ffmpeg'), 'Docker/runtime needs FFmpeg for HLS remux')

@@ -17,7 +17,7 @@ MAX_SAMPLE_SECONDS = 8
 
 
 def _capture_one(ts_url, hls_url, extension, lease_fd, *, deadline, gate_fd,
-                 session_factory):
+                 session_factory, sample_seconds=None):
     import requests
     from xtream_curl import CurlStream
     from xtream_hls import HLSStream
@@ -53,8 +53,9 @@ def _capture_one(ts_url, hls_url, extension, lease_fd, *, deadline, gate_fd,
         if not first or first[0] != 0x47:
             raise OSError("Provider returned no transport stream")
         sample = bytearray(first[:MAX_SAMPLE_BYTES])
+        sample_until = min(deadline, time.monotonic() + sample_seconds) if sample_seconds is not None else deadline
         # Check before requesting the next chunk, including after the byte cap.
-        while len(sample) < MAX_SAMPLE_BYTES and time.monotonic() < deadline:
+        while len(sample) < MAX_SAMPLE_BYTES and time.monotonic() < sample_until:
             chunk = next(chunks, b"")
             if not chunk:
                 break
@@ -74,7 +75,7 @@ def _capture_one(ts_url, hls_url, extension, lease_fd, *, deadline, gate_fd,
 def capture_sample(ts_url, hls_url, extension, lease_fd, *, deadline,
                    gate_fd=None, session_factory=None,
                    primary_host_index=0, alternate_ts_url=None,
-                   alternate_hls_url=None, alternate_host_index=1):
+                   alternate_hls_url=None, alternate_host_index=1, sample_seconds=None):
     from xtream_hosts import record_host_success
 
     hosts = [(primary_host_index, ts_url, hls_url)]
@@ -84,7 +85,7 @@ def capture_sample(ts_url, hls_url, extension, lease_fd, *, deadline,
         try:
             sample = _capture_one(candidate_ts, candidate_hls, extension, lease_fd,
                                   deadline=deadline, gate_fd=gate_fd,
-                                  session_factory=session_factory)
+                                  session_factory=session_factory, sample_seconds=sample_seconds)
             record_host_success(gate_fd, index)
             return sample
         except Exception:

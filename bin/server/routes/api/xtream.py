@@ -64,9 +64,10 @@ def api_xtream_pool():
 def api_xtream_pool_check(account_id=None):
     from xtream_pool import XtreamPool
     from xtream_activity import normal_activity
+    from server.services.xtream_playback_test import test_account_playback
     try:
         with normal_activity(resolve_db_path()):
-            return jsonify(XtreamPool(resolve_db_path()).check_accounts(account_id))
+            return jsonify(test_account_playback(XtreamPool(resolve_db_path()), account_id))
     except Exception as exc:
         return _safe_error(exc)
 

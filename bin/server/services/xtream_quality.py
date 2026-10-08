@@ -144,7 +144,7 @@ def _probe_bytes(sample: bytes, runner=subprocess.run) -> dict:
         raise XtreamError("Video resolution could not be measured from this stream") from None
 
 
-def _sample_media(lease, stream_id, extension):
+def _sample_media(lease, stream_id, extension, *, require_quiet=True, sample_seconds=None):
     """Kill all sample transports at a wall deadline, even on worker shutdown."""
     deadline = time.monotonic() + MAX_SAMPLE_SECONDS
     hosts = host_configs(lease.account.config, lease.gate_fd)
@@ -154,6 +154,8 @@ def _sample_media(lease, stream_id, extension):
         "primary_host_index": hosts[0][0],
         "extension": extension,
     }
+    if sample_seconds is not None:
+        arguments["sample_seconds"] = sample_seconds
     if len(hosts) > 1:
         arguments.update(alternate_ts_url=build_stream_url(hosts[1][1], stream_id, "ts"),
                          alternate_hls_url=build_stream_url(hosts[1][1], stream_id, "m3u8"),
@@ -167,7 +169,8 @@ def _sample_media(lease, stream_id, extension):
     try:
         payload = json.dumps(arguments).encode()
         while True:
-            _require_quiet(lease.pool.db_path)
+            if require_quiet:
+                _require_quiet(lease.pool.db_path)
             try:
                 sample, _ = process.communicate(
                     input=payload,
@@ -178,7 +181,8 @@ def _sample_media(lease, stream_id, extension):
                 payload = None
                 if time.monotonic() >= deadline:
                     raise TimeoutError("Resolution sample deadline reached") from None
-        _require_quiet(lease.pool.db_path)
+        if require_quiet:
+            _require_quiet(lease.pool.db_path)
         if process.returncode in {3, -signal.SIGKILL}:
             raise TimeoutError("Resolution sample deadline reached")
         if process.returncode or not sample or sample[0] != 0x47:

@@ -19,8 +19,8 @@ Xtream accounts A / B / C → FruitDeepLinks → Channels DVR
 | Persistent tune | `/xtream/channel/<persistent-id>/stream` |
 | Dynamic lane tune | `/lane/<lane-id>/stream.m3u8` |
 | Account, capacity, lease and recent outcome status | `/api/xtream/pool` |
-| Check all accounts | `POST /api/xtream/pool/check` |
-| Check one account | `POST /api/xtream/pool/accounts/<account-id>/check` |
+| Test playback on all accounts | `POST /api/xtream/pool/check` |
+| Test playback on one account | `POST /api/xtream/pool/accounts/<account-id>/check` |
 | Edit non-secret controls | `PATCH /api/xtream/pool/accounts/<account-id>` |
 | Refresh persistent EPG / read status | `POST /api/xtream/epg/refresh` / `GET /api/xtream/epg/status` |
 
@@ -129,7 +129,7 @@ accounts to recover capacity before trying media.
 To use an account in another app, disable and save it in the pool first. Fruit
 requires the account to be idle before that change succeeds, then sends no new
 account checks, catalog/EPG requests, quality probes or streams on it. Test
-Account reports when a test was skipped because the account is disabled or
+Playback reports when a test was skipped because the account is disabled or
 occupied. Re-enable it only after the other app has stopped.
 
 For `account_2` and `account_3`, the previously tested
@@ -141,9 +141,23 @@ catalogue requests, XMLTV, quality samples and media tunes close a failed
 attempt before trying the second host with the **same account credentials and
 the same account lock**. A successful alternate is preferred for five minutes,
 then the configured primary is tried again. No host is added for other account
-IDs or an unrelated configured host. Test Account reports when its successful
-check used the alternate host or both hosts failed; a healthy check still does not prove playback,
-which requires a real media `GET`.
+IDs or an unrelated configured host. Automatic account API health checks do
+not establish playback; that requires a real media `GET`.
+
+Settings **Test Playback** and **Test All Playback** open a fresh real media
+sample on every click. Each account is tested with its own credentials, without
+substituting another account after a failure. It aims to collect two seconds of
+media, bounded to eight seconds and 4 MiB, then analyzes it locally for valid
+video (up to eight seconds).
+The result reports playback passed or failed, the tested channel, and video
+dimensions. Fruit chooses the first available saved persistent channel,
+falling back to another saved/catalog channel; if none is saved, it discovers
+a channel from the selected account's first configured or discovered category.
+Accounts are tested sequentially. Disabled or occupied accounts are skipped
+without interrupting an existing stream. Explicit tests can retry accounts with
+unknown/rejected cached health or an active cooldown. Successful media allows
+ordinary playback retry but does not mark the account API healthy or enable
+automatic resolution probes. This short test does not establish sustained playback.
 
 The background resolution sampler considers only enabled, available **saved
 persistent channels**. It wakes once a minute but attempts at most one channel
@@ -204,7 +218,7 @@ cooldown, disabled, or awaiting/unavailable/rejected account verification.
 `retry_after_seconds` is the remaining local cooldown at the time of the
 snapshot. Refresh Status updates these values without contacting the provider.
 `last_success` records a successful account API check; `last_media_success`
-records the first playable MPEG-TS bytes from a normal media tune. The latter
+records playable MPEG-TS bytes from a normal media tune or a successful manual playback test. The latter
 does not prove sustained playback or promote cached API health for background
 resolution probes. Both success records reset when credentials change.
 
@@ -262,7 +276,7 @@ a maximum session duration**; an active recording may run for hours. A stalled
 upstream is closed after the idle timeout, so detecting a client disconnect
 during an upstream stall can take that long. A rejected/transiently failing
 account gets a cooldown and tune retries another eligible account; a failed
-authentication is rechecked after five minutes or immediately by Test Account.
+authentication is rechecked after five minutes. Test Playback can attempt media immediately.
 Transient errors retry after 30 seconds and do not permanently disable a
 previously healthy account. Automatic health checks are bounded per account.
 The idle timeout also applies during startup; there is no total tune deadline
@@ -438,7 +452,7 @@ the upgrade; restoring the old version restores its old redirect behavior.
 
 5. Stop one stream/recording. Its lease must release, and the fourth request must
    then succeed. Stop all clients; active must become zero. Test a bad/disabled
-   account while the others continue. Restore it and Test Account to recover.
+   account while the others continue. Restore it and Test Playback to recover.
 
 6. Schedule overlapping recordings and keep a real recording playing for several
    hours. Verify start/end, duration, continuity, seeking after recording, audio,

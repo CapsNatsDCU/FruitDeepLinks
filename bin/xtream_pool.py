@@ -184,7 +184,7 @@ class XtreamPool:
                 # still work when player_api.php is unavailable or rejected.
                 # Preserve a cooldown caused by an actual failed media tune;
                 # an explicit successful account test may clear it.
-                if health == "unreachable" and state["last_success"]:
+                if health == "unreachable" and (state["last_success"] or state["last_media_success"]):
                     health = "degraded"
                 conn.execute("UPDATE xtream_account_state SET discovered_capacity=COALESCE(?,discovered_capacity),"
                              "health=?,last_checked=?,last_success=CASE WHEN ?='healthy' THEN ? ELSE last_success END,"
@@ -255,7 +255,12 @@ class XtreamPool:
             finally:
                 os.close(fd)
 
-    def acquire(self, stream_id, source, *, excluded=()) -> Lease:
+    def acquire(self, stream_id, source, *, excluded=(), account_id=None) -> Lease:
+        manual_test = source == "manual_playback_test" and account_id is not None
+        if source == "manual_playback_test" and not manual_test:
+            raise XtreamError("Manual playback tests require a specific account")
+        if account_id is not None and account_id not in {a.id for a in self.accounts}:
+            raise XtreamError("Xtream account not found")
         if source != "quality_probe":
             mark_normal_activity(self.db_path)
         if not self.enabled:
@@ -279,14 +284,18 @@ class XtreamPool:
             live = conn.execute("SELECT account_id,fingerprint FROM xtream_leases").fetchall()
             candidates = []
             for account in self.accounts:
+                if account_id is not None and account.id != account_id:
+                    continue
                 state = self._state(conn, account)
                 active = sum(row["account_id"] == account.id or row["fingerprint"] == account.fingerprint for row in live)
                 # Optional diagnostics cannot recover or sample degraded accounts.
                 # Enforce this inside the allocation transaction if health changed
                 # after the route's preflight. Playback retains its fallback.
                 allowed_health = {"healthy"} if source == "quality_probe" else {"healthy", "degraded"}
-                if (account.id not in excluded and state["enabled"] and state["health"] in allowed_health
-                        and state["retry_after"] <= time.time() and active < state["effective_capacity"]):
+                if (account.id not in excluded and state["enabled"]
+                        and (manual_test or state["health"] in allowed_health)
+                        and (manual_test or state["retry_after"] <= time.time())
+                        and active < state["effective_capacity"]):
                     # A sequential quality scan must not hammer the first
                     # account alphabetically.  Reuse the least recently
                     # released account after balancing active capacity.
@@ -380,7 +389,8 @@ class XtreamPool:
         the credential fingerprint so an old worker cannot update rotated secrets.
         """
         with self.connection() as conn:
-            conn.execute("UPDATE xtream_account_state SET last_media_success=?,retry_after=0 "
+            conn.execute("UPDATE xtream_account_state SET last_media_success=?,retry_after=0,"
+                         "health=CASE WHEN health IN ('unknown','unreachable','unhealthy') THEN 'degraded' ELSE health END "
                          "WHERE account_id=? AND fingerprint=?",
                          (time.time(), lease.account.id, lease.account.fingerprint))
 
