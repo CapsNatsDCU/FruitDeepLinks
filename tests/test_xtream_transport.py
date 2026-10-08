@@ -73,6 +73,40 @@ class XtreamTransportTests(unittest.TestCase):
                     proxy_url()
                 self.assertNotIn("secret", str(error.exception))
 
+    def test_chunked_response_continues_after_the_startup_prefix(self):
+        prefix = b"\x47" + b"a" * 187 + b"\x47" + b"b" * 187
+        rest = (b"\x47" + b"c" * 187) * 100
+        body = prefix + rest
+
+        class Provider(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                try:
+                    for part in (prefix, rest[:5000], rest[5000:]):
+                        self.wfile.write(f"{len(part):X}\r\n".encode() + part + b"\r\n")
+                        self.wfile.flush()
+                    self.wfile.write(b"0\r\n\r\n")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        with requests.get(f"http://127.0.0.1:{server.server_port}/stream", stream=True,
+                          timeout=(1, 1)) as response:
+            self.assertTrue(response.raw.chunked)
+            chunks = media_chunks(response)
+            self.assertEqual(prefix, next(chunks))
+            self.assertEqual(body, prefix + b"".join(chunks))
+
     def test_session_is_scoped_to_xtream(self):
         ordinary = requests.Session()
         self.addCleanup(ordinary.close)

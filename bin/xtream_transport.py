@@ -66,7 +66,14 @@ def media_chunks(response):
     Both iterators consume the same response; the second resumes after the
     prefix rather than replaying it. A short HLS body can still reach EOF.
     """
-    prefix = next(response.iter_content(chunk_size=188 * 2), b"")
-    if prefix:
-        yield prefix
-        yield from response.iter_content(chunk_size=188 * 64)
+    # Keep the first iterator alive while the second reads. Closing urllib3's
+    # chunked iterator (including through garbage collection) closes its HTTP
+    # response, even when only the first small prefix has been consumed.
+    initial = response.iter_content(chunk_size=188 * 2)
+    try:
+        prefix = next(initial, b"")
+        if prefix:
+            yield prefix
+            yield from response.iter_content(chunk_size=188 * 64)
+    finally:
+        initial.close()
