@@ -505,7 +505,6 @@ function clearPersistentBrowserResults() {
   _persistentPage = 1;
   document.getElementById('persistent-results').innerHTML = '<span class="status-muted">Enter a channel name to search these categories.</span>';
   document.getElementById('persistent-pagination').innerHTML = '';
-  document.getElementById('persistent-editor').innerHTML = '';
 }
 
 function setPersistentCategoryView(view) {
@@ -524,7 +523,6 @@ function setPersistentCategoryView(view) {
 function closePersistentBrowser() {
   _persistentSearchSequence++;
   document.getElementById('persistent-browser').hidden = true;
-  document.getElementById('persistent-editor').innerHTML = '';
 }
 
 async function searchPersistentStreams(page = 1) {
@@ -535,7 +533,6 @@ async function searchPersistentStreams(page = 1) {
     return;
   }
   const requestId = ++_persistentSearchSequence;
-  document.getElementById('persistent-editor').innerHTML = '';
   document.getElementById('persistent-pagination').innerHTML = '';
   results.innerHTML = '<span class="status-muted">Searching saved channels…</span>';
   try {
@@ -621,7 +618,8 @@ function showPersistentAdd(index) {
   if (!stream) return;
   _epgSetupSequence++;
   const editor = document.getElementById('persistent-editor');
-  editor.dataset.streamIndex = String(index);
+  // Search results may reorder while this draft is open. Keep its identity.
+  editor.dataset.streamId = stream.stream_id;
   editor.dataset.categoryId = stream.category_id;
   editor.innerHTML = persistentFormHtml({display_name:stream.name, channel_number:nextPersistentNumber(), enabled:true, guide_id:stream.epg_channel_id || ''}, 'add');
   editor.scrollIntoView({behavior:'smooth', block:'nearest'});
@@ -709,9 +707,8 @@ async function savePersistentForm(mode, id) {
   let method = 'POST';
   if (mode === 'add') {
     const editor = document.getElementById('persistent-editor');
-    const stream = _persistentResults[Number(editor.dataset.streamIndex)];
     payload.category_id = editor.dataset.categoryId;
-    payload.stream_id = stream.stream_id;
+    payload.stream_id = editor.dataset.streamId;
   } else {
     url += `/${id}`;
     method = 'PATCH';
