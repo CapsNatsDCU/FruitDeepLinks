@@ -5,7 +5,7 @@ from unittest.mock import patch
 from tests import test_xtream_background_quality as fixtures
 from tests.test_xtream_pool import account_rows, pool_environment
 from server.services import xtream_quality_queue as queue
-from server.services.xtream_background_quality import _next_channel, run_background_quality
+from server.services.xtream_background_quality import _next_channel, automatic_candidates, run_background_quality
 from server.services.xtream_persistent import PersistentChannelError, quality_for_stream, create_channel, save_stream_quality
 from server.services.xtream_quality import quality_probe_guard
 from server.services.xtream_channel_cache import replace_snapshot
@@ -55,6 +55,44 @@ class QualityQueueTests(unittest.TestCase):
             self.assertEqual(first['id'], _next_channel(conn, 100000)['id'])
             conn.execute('INSERT INTO xtream_background_quality_channels VALUES (?,?)', (first['id'], 98000))
             self.assertEqual(7, _next_channel(conn, 100000)['id'])
+
+    def test_missing_resolution_blocks_rechecks_even_during_retry_wait(self):
+        with self.pool.connection() as conn:
+            save_stream_quality(conn, 'sports', '437219', {'width':1920,'height':1080})
+            _next_channel(conn, 100000)  # Create durable attempt state.
+            conn.execute('INSERT INTO xtream_background_quality_channels VALUES (7,98000)')
+            conn.execute('INSERT INTO xtream_background_quality_channels VALUES (8,99999)')
+            self.assertEqual([], automatic_candidates(conn, 100000))
+            self.assertIsNone(_next_channel(conn, 100000))
+            # Manual rechecks remain available while the automatic queue waits.
+            manual = queue.enqueue(conn, 'sports', '437219')
+            self.assertEqual(manual['id'], _next_channel(conn, 100000)['queue_id'])
+            queue.cancel(conn, manual['id'])
+            due = automatic_candidates(conn, 100599)
+            self.assertEqual([8], [item['id'] for item in due])
+            self.assertTrue(due[0]['needs_resolution'])
+            self.assertFalse(due[0]['first_check'])
+            # Once the last unknown channel is measured, repeat checks resume.
+            save_stream_quality(conn, 'sports', '437220', {'width':1280,'height':720})
+            self.assertEqual([7], [item['id'] for item in automatic_candidates(conn, 100000)])
+
+    def test_new_channel_with_cached_quality_blocks_rechecks_until_first_attempt(self):
+        with self.pool.connection() as conn:
+            for stream in ('437219', '437220'):
+                save_stream_quality(conn, 'sports', stream, {'width':1920,'height':1080})
+            _next_channel(conn, 100000)
+            conn.execute('INSERT INTO xtream_background_quality_channels VALUES (7,98000)')
+            self.assertEqual([8], [item['id'] for item in automatic_candidates(conn, 100000)])
+
+    def test_disabled_or_unavailable_unknown_channels_do_not_block_rechecks(self):
+        for column, value in [('enabled', 0), ('availability_status', 'unavailable')]:
+            with self.subTest(column=column), self.pool.connection() as conn:
+                conn.execute("UPDATE xtream_persistent_channels SET enabled=1,availability_status='available' WHERE id=8")
+                save_stream_quality(conn, 'sports', '437219', {'width':1920,'height':1080})
+                _next_channel(conn, 100000)
+                conn.execute('INSERT OR REPLACE INTO xtream_background_quality_channels VALUES (7,98000)')
+                conn.execute(f'UPDATE xtream_persistent_channels SET {column}=? WHERE id=8', (value,))
+                self.assertEqual([7], [item['id'] for item in automatic_candidates(conn, 100000)])
 
     def test_queued_measurement_completes_and_saves_actual_quality(self):
         self.enqueue()

@@ -110,7 +110,7 @@
 </section>
 <section class="card" aria-labelledby="quality-queue-title">
   <h2 id="quality-queue-title">Resolution check queue</h2>
-  <p class="persistent-intro">Choose Queue test on saved channels or search results. Manual requests are saved and checked in order, even after you close this page. Newly added permanent channels are checked next, newest first, ahead of routine background checks. Successful queued checks are spaced 10 seconds apart, with a 10-second pause after activity. Playback and recordings take priority. Checks need an idle, healthy account marked “Reserved for Fruit” in Settings.</p>
+  <p class="persistent-intro">Choose Queue test on saved channels or search results. Manual requests are saved and checked in order, even after you close this page. Newly added permanent channels are checked next, newest first, ahead of channels still needing a resolution measurement. Automatic rechecks run only when there are no initial checks or missing measurements left. Successful queued checks are spaced 10 seconds apart, with a 10-second pause after activity. Playback and recordings take priority. Checks need an idle, healthy account marked “Reserved for Fruit” in Settings.</p>
   <div id="quality-queue-status" class="status-muted" role="status" aria-live="polite">Loading queued checks…</div>
   <h3>Manual tests</h3>
   <div id="quality-queue-list" class="persistent-list persistent-epg-results"></div>
@@ -194,7 +194,7 @@ async function loadQualityQueue() {
         <div class="persistent-row-meta">${labels[item.state] || escHtml(item.state)}${item.state === 'completed' && item.measured_quality ? ' · ' + escHtml(item.measured_quality.width) + ' × ' + escHtml(item.measured_quality.height) + (item.measured_quality.fps ? ' · ' + escHtml(item.measured_quality.fps) + ' fps' : '') : ''}${item.last_error ? ' · ' + escHtml(item.last_error) : ''}</div></div>
       ${item.state === 'pending' ? `<button class="btn btn-secondary" type="button" onclick="cancelQualityTest(${item.id}, this)">Cancel</button>` : ''}
     </article>`).join('');
-    document.getElementById('quality-automatic-list').innerHTML = (result.automatic || []).map((item, index) => `<article class="persistent-row external-station-row"><div class="persistent-row-main"><strong>${index + 1}. ${escHtml(item.display_name)}</strong><div class="persistent-row-meta">${item.first_check ? 'First automatic check' : 'Routine recheck'} · after manual requests</div></div></article>`).join('') || '<span class="status-muted">No automatic checks due right now.</span>';
+    document.getElementById('quality-automatic-list').innerHTML = (result.automatic || []).map((item, index) => `<article class="persistent-row external-station-row"><div class="persistent-row-main"><strong>${index + 1}. ${escHtml(item.display_name)}</strong><div class="persistent-row-meta">${item.first_check ? 'First automatic check' : item.needs_resolution ? 'Awaiting resolution measurement' : 'Routine recheck'} · after manual requests</div></div></article>`).join('') || '<span class="status-muted">No automatic checks due right now.</span>';
     // Playback can update quality even when no queued request changed state.
     await loadPersistentChannels();
     if (!document.getElementById('persistent-browser').hidden && document.getElementById('persistent-search').value.trim()) await searchPersistentStreams(_persistentPage);

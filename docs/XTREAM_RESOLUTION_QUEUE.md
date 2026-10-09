@@ -8,9 +8,10 @@ Check order:
 
 1. Manually queued requests, in the order you queued them.
 2. Permanent channels awaiting their first automatic attempt, newest additions first. A previously cached resolution does not remove this priority.
-3. Routine repeat checks, using the existing due-channel ordering.
+3. Channels still without a resolution measurement, oldest attempt first.
+4. Routine repeat checks only when no enabled, available channel is awaiting an initial check or resolution measurement.
 
-After its first media-check attempt, a new channel returns to normal repeat-check scheduling. A valid measurement from normal playback also satisfies its first check and completes a matching pending manual request. This ordering is saved through the channel creation timestamp and durable attempt records, so it survives restarts.
+After its first media-check attempt, a new channel leaves newest-first priority. If that attempt fails to measure resolution, it stays ahead of routine rechecks. While an unmeasured channel waits for its retry interval, routine rechecks wait too. Disabled or unavailable channels do not block rechecks. A valid measurement from normal playback also satisfies its first check and completes a matching pending manual request. This ordering is saved through the channel creation timestamp and durable attempt records, so it survives restarts.
 
 Operator requests take priority over the normal background scan. The worker checks every **five seconds** and makes at most one attempt per tick. Queued checks use **10 seconds** of quiet time after activity, **10 seconds** between successful checks, and **10 seconds** before reusing an account for another queued request. Provider checks, media collection and local analysis add time to each check. Failures keep the **two-minute backoff**. Automatic checks use the same ten-second spacing. A routine channel becomes due for another automatic recheck ten minutes after its last attempt or valid playback measurement; this does not delay manual requests or checks of newly added channels.
 
