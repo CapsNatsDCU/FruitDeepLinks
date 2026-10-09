@@ -14,6 +14,8 @@
 .persistent-browser { margin:12px 0 18px; padding:14px; background:var(--bg-inset); border:1px solid var(--border); border-radius:var(--radius); }
 .persistent-results, .persistent-list { display:flex; flex-direction:column; gap:8px; }
 .persistent-epg-results { max-height:min(480px,60vh); overflow-y:auto; }
+.persistent-row.external-station-row { grid-template-columns:minmax(0,1fr) auto; }
+.external-schedule { max-height:300px; overflow-y:auto; }
 .persistent-row { display:grid; grid-template-columns:44px minmax(0,1fr) auto; gap:10px; align-items:center; padding:10px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg-inset); }
 .persistent-row img { width:40px; height:40px; border-radius:5px; object-fit:contain; background:var(--bg-card); }
 .persistent-row-main { min-width:0; overflow-wrap:anywhere; }
@@ -36,6 +38,8 @@
   .persistent-actions .btn { flex:1; justify-content:center; min-width:80px; }
   .persistent-form-grid { grid-template-columns:1fr; }
   .persistent-form-grid .full { grid-column:auto; }
+  .persistent-row.external-station-row { grid-template-columns:minmax(0,1fr); }
+  .external-station-row button { justify-self:start; }
 }
 {% endblock %}
 
@@ -89,6 +93,18 @@
   <div class="persistent-toolbar"><label>XMLTV file URL<input id="external-xmltv-url" type="url" placeholder="http://your-nas:8098/xmltv-raw.xml" maxlength="2048"></label>
     <button class="btn btn-secondary" type="button" onclick="refreshExternalXmltv(this)">Import / Refresh XMLTV</button></div>
   <div id="external-xmltv-status" class="status-muted" role="status" aria-live="polite">Checking external guide…</div>
+  <div class="persistent-toolbar"><button class="btn" type="button" onclick="openExternalStations()">Browse imported guide &amp; assign channels</button></div>
+  <div id="external-station-browser" class="persistent-browser" hidden>
+    <h3>Imported XMLTV stations</h3>
+    <p class="persistent-intro">Search the imported station names or IDs, preview their schedules, and assign them to your saved persistent channels.</p>
+    <div class="persistent-toolbar"><label>Search imported stations<input id="external-station-query" type="text" maxlength="512" placeholder="ESPN, WTTG, or station ID" onkeydown="if(event.key==='Enter'){event.preventDefault();searchExternalStations()}"></label>
+      <button id="external-station-search" class="btn btn-secondary" type="button" onclick="searchExternalStations()">Search stations</button>
+      <button class="btn btn-secondary" type="button" onclick="closeExternalStations()">Close guide browser</button></div>
+    <div id="external-station-pagination" class="persistent-toolbar"></div>
+    <div id="external-station-list" class="persistent-results persistent-epg-results" aria-live="polite"></div>
+    <div id="external-station-detail" class="persistent-form" hidden></div>
+    <div id="external-station-result" class="status-muted" role="status" aria-live="polite"></div>
+  </div>
 </section>
 <section class="card" aria-labelledby="epg-link-index-title">
   <h2 id="epg-link-index-title">Offline EPG Links</h2>
@@ -117,6 +133,12 @@ let _epgLinkSuggestions = [];
 let _epgSetupCandidates = [];
 let _epgSetupSequence = 0;
 let _epgSetupSearch = null;
+let _externalStations = [];
+let _externalStationOffset = 0;
+let _externalStationQuery = '';
+let _externalBrowseSequence = 0;
+let _externalPreviewSequence = 0;
+let _externalStationSelected = null;
 let _qualityQueueRequests = [];
 let _qualityQueueTimer = null;
 let _qualityQueueLoading = false;
@@ -220,8 +242,98 @@ async function refreshExternalXmltv(button) {
       method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:input.value.trim()})});
     showExternalXmltvStatus(result.cache || {});
     await loadEpgLinkSuggestions();
+    if (!document.getElementById('external-station-browser').hidden) await searchExternalStations();
   } catch (err) { document.getElementById('external-xmltv-status').textContent = `Import failed: ${err.message}`; }
   finally { button.disabled = false; input.disabled = false; button.textContent = 'Import / Refresh XMLTV'; }
+}
+
+async function openExternalStations() {
+  document.getElementById('external-station-browser').hidden = false;
+  await loadPersistentChannels();
+  await searchExternalStations();
+}
+function closeExternalStations() {
+  _externalBrowseSequence++; _externalPreviewSequence++;
+  document.getElementById('external-station-browser').hidden = true;
+}
+async function searchExternalStations(offset = 0, keepPreview = false) {
+  const button = document.getElementById('external-station-search');
+  if (button.disabled) return;
+  const query = document.getElementById('external-station-query').value.trim();
+  if (query !== _externalStationQuery) offset = 0;
+  const sequence = ++_externalBrowseSequence;
+  const list = document.getElementById('external-station-list');
+  const pagination = document.getElementById('external-station-pagination');
+  if (!keepPreview) {
+    _externalPreviewSequence++;
+    _externalStationSelected = null;
+    document.getElementById('external-station-detail').hidden = true;
+    document.getElementById('external-station-result').textContent = '';
+  }
+  button.disabled = true; button.textContent = 'Searching…';
+  list.textContent = 'Reading imported stations…'; pagination.innerHTML = '';
+  try {
+    const result = await persistentRequest(`/api/xtream/epg/external/stations?${new URLSearchParams({q:query,offset:String(offset)})}`);
+    if (sequence !== _externalBrowseSequence) return;
+    _externalStations = result.stations || [];
+    _externalStationQuery = query; _externalStationOffset = result.offset;
+    list.innerHTML = _externalStations.length ? _externalStations.map((station, i) => `<article class="persistent-row external-station-row">
+      <div class="persistent-row-main"><strong>${escHtml(station.display_names.join(' / '))}</strong>
+        <div class="persistent-row-meta">${escHtml(station.guide_id)} · ${station.programme_count} imported programmes</div>
+        <div class="persistent-row-meta">${station.assigned_channels.length ? 'Assigned to: ' + station.assigned_channels.map(c => escHtml(`${c.channel_number} · ${c.display_name}${c.enabled ? '' : ' (disabled)'}`)).join('; ') : 'Not assigned to a persistent channel'}</div></div>
+      <button class="btn btn-secondary" type="button" onclick="previewExternalStation(_externalStations[${i}].guide_id)">Preview &amp; assign</button></article>`).join('')
+      : result.cache?.refreshed_at ? 'No imported stations match this search. Clear the search to browse all.' : 'Import an XMLTV file first using the URL above.';
+    pagination.innerHTML = `<span class="status-muted">${result.total ? `Showing ${result.offset+1}–${result.offset+_externalStations.length} of ${result.total} stations` : '0 stations'}</span>
+      ${result.offset ? `<button class="btn btn-secondary" type="button" onclick="searchExternalStations(${Math.max(0,result.offset-result.limit)})">Previous stations</button>` : ''}
+      ${result.has_more ? `<button class="btn btn-secondary" type="button" onclick="searchExternalStations(${result.offset+result.limit})">Next stations</button>` : ''}`;
+  } catch (err) { if (sequence === _externalBrowseSequence) list.textContent = `Could not read imported stations: ${err.message}`; }
+  finally { button.disabled = false; button.textContent = 'Search stations'; }
+}
+async function previewExternalStation(guideId) {
+  const sequence = ++_externalPreviewSequence;
+  const detail = document.getElementById('external-station-detail');
+  _externalStationSelected = guideId;
+  detail.hidden = false; detail.textContent = 'Reading saved schedule…';
+  document.getElementById('external-station-result').textContent = '';
+  try {
+    const result = await persistentRequest(`/api/xtream/epg/external/station?${new URLSearchParams({guide_id:guideId})}`);
+    if (sequence !== _externalPreviewSequence) return;
+    const station = result.station;
+    detail.innerHTML = `<h3>${escHtml(station.display_names.join(' / '))}</h3>
+      <div class="persistent-row-meta">${escHtml(station.guide_id)} · Preview of up to 20 current/upcoming programmes · Times shown in your local timezone</div>
+      <div class="external-schedule">${result.programmes.length ? result.programmes.map(p => `<article class="persistent-row external-station-row"><div class="persistent-row-main">
+        <strong>${escHtml(p.title)}</strong><div class="persistent-row-meta">${escHtml(new Date(p.start).toLocaleString())} – ${escHtml(new Date(p.stop).toLocaleString())}</div>
+        ${p.description ? `<div class="persistent-row-meta">${escHtml(p.description)}</div>` : ''}</div></article>`).join('') : '<p class="status-muted">This station has no current or upcoming programmes in the imported file. You can assign it, but its guide will remain empty until a valid schedule is imported.</p>'}</div>
+      <div class="persistent-toolbar"><label>Assign to persistent channel<select id="external-assign-channel"><option value="">Choose a channel…</option>${_persistentChannels.map(c => `<option value="${c.id}">${escHtml(`${c.channel_number} · ${c.display_name}${c.enabled ? '' : ' (disabled)'}${c.epg_source_id === guideId ? ' — already assigned' : ''}`)}</option>`).join('')}</select></label>
+        <button class="btn" type="button" ${_persistentChannels.length ? '' : 'disabled'} onclick="assignExternalStation(this)">Assign guide</button></div>
+      <p class="persistent-row-meta">Assignment replaces this channel’s guide source. Its stream, channel number, and exported guide ID stay the same. One station may be assigned to multiple channels carrying the same schedule.</p>
+      ${_persistentChannels.length ? '' : '<p class="status-muted">Add a persistent channel first, then reopen this browser to assign its guide.</p>'}`;
+    detail.scrollIntoView({behavior:'smooth',block:'nearest'});
+  } catch (err) { if (sequence === _externalPreviewSequence) detail.textContent = `Could not preview schedule: ${err.message}`; }
+}
+async function assignExternalStation(button) {
+  if (button.disabled) return;
+  const select = document.getElementById('external-assign-channel');
+  const channel = _persistentChannels.find(c => String(c.id) === select.value);
+  const guideId = _externalStationSelected;
+  const status = document.getElementById('external-station-result');
+  if (!channel || !guideId) { status.textContent = 'Choose a persistent channel first.'; return; }
+  button.disabled = true; select.disabled = true;
+  try {
+    if (!await showConfirm('Assign imported guide?', `Use ${guideId} for ${channel.channel_number} · ${channel.display_name}? This replaces its current guide source. Check that the station carries the same schedule.`)) return;
+    button.textContent = 'Assigning…'; status.textContent = 'Saving guide assignment…';
+    const result = await persistentRequest('/api/xtream/epg/external/assign', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({persistent_id:channel.id,guide_id:guideId,expected_source_id:channel.epg_source_id || null})});
+    await loadPersistentChannels();
+    await loadEpgLinkSuggestions();
+    await searchExternalStations(_externalStationOffset, true);
+    if (_externalStationSelected === guideId && !document.getElementById('external-station-browser').hidden) {
+      await previewExternalStation(guideId);
+      status.textContent = `Assigned ${guideId} to ${channel.channel_number} · ${channel.display_name}. ${result.channel.enabled ? `${result.programmes} ${result.programmes === 1 ? 'programme' : 'programmes'} copied to its guide.` : 'The channel is disabled; its schedule will be used when enabled.'}`;
+    }
+    showToast('Imported guide assigned.', 'success');
+  } catch (err) { status.textContent = `Could not assign guide: ${err.message}`; }
+  finally { if (button.isConnected) { button.disabled = false; button.textContent = 'Assign guide'; select.disabled = false; } }
 }
 
 async function refreshEpgLinkIndex(button) {

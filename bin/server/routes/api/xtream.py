@@ -216,6 +216,66 @@ def api_external_xmltv():
         return _safe_error(exc, 502)
 
 
+@bp.route("/api/xtream/epg/external/stations")
+def api_external_xmltv_stations():
+    from server.services import external_xmltv
+    if not db_exists(): return _read_database_error()
+    try:
+        query = request.args.get("q", "").strip()
+        offset = int(request.args.get("offset", "0"))
+        if len(query) > 512 or offset < 0:
+            raise ValueError("Use up to 512 search characters and a nonnegative offset")
+        with get_conn() as conn:
+            return jsonify(status="success", cache=external_xmltv.status(conn),
+                           **external_xmltv.browse(conn, query, offset=offset))
+    except ValueError:
+        return jsonify(status="error", message="Use up to 512 search characters and a nonnegative integer offset"), 400
+    except Exception as exc:
+        return _safe_error(exc)
+
+
+@bp.route("/api/xtream/epg/external/station")
+def api_external_xmltv_station():
+    from server.services import external_xmltv
+    if not db_exists(): return _read_database_error()
+    try:
+        with get_conn() as conn:
+            return jsonify(status="success", **external_xmltv.station_preview(conn, request.args.get("guide_id", "")))
+    except KeyError:
+        return jsonify(status="error", message="Imported XMLTV station not found"), 404
+    except Exception as exc:
+        return _safe_error(exc)
+
+
+@bp.route("/api/xtream/epg/external/assign", methods=["POST"])
+def api_external_xmltv_assign():
+    from server.services import external_xmltv
+    if not db_exists(): return _read_database_error()
+    try:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or type(payload.get("persistent_id")) is not int:
+            raise ValueError("Select a persistent channel")
+        with get_conn() as conn:
+            guide_id = payload.get("guide_id")
+            if not any(s["guide_id"] == guide_id for s in external_xmltv.entries(conn)):
+                raise ValueError("Select a station from the imported XMLTV file")
+            current = get_channel(conn, payload["persistent_id"])
+            if current is None:
+                raise KeyError("Persistent channel not found")
+            if ("expected_source_id" in payload
+                    and payload["expected_source_id"] != current.get("epg_source_id")):
+                return jsonify(status="error", message="This channel’s guide changed. Refresh the channel list and try again."), 409
+            channel = update_channel(conn, current["id"], {"epg_source_id": guide_id})
+            count = external_xmltv.apply_selected(conn, persistent_id=current["id"])
+            return jsonify(status="success", channel=channel, programmes=count)
+    except ValueError as exc:
+        return jsonify(status="error", message=str(exc)), 400
+    except KeyError:
+        return jsonify(status="error", message="Persistent channel not found"), 404
+    except Exception as exc:
+        return _safe_error(exc)
+
+
 @bp.route("/m3u/channels")
 @bp.route("/xmltv/channels")
 def channels_lineup():

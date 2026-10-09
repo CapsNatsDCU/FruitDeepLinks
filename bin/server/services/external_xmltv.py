@@ -61,6 +61,43 @@ def programmes(conn, source_id):
         (source_id[len(PREFIX):], now))]
 
 
+def browse(conn, query="", *, offset=0, limit=50):
+    """Browse only the imported snapshot and show its current channel assignments."""
+    from server.services.xtream_persistent import list_channels
+    query = query.casefold().strip()
+    assigned = {}
+    for channel in list_channels(conn):
+        assigned.setdefault(channel.get("epg_source_id"), []).append({
+            "id": channel["id"], "display_name": channel["display_name"],
+            "channel_number": channel["channel_number"], "enabled": channel["enabled"]})
+    stations = [{**station, "assigned_channels": assigned.get(station["guide_id"], [])}
+                for station in entries(conn)
+                if not query or query in station["guide_id"].casefold()
+                or any(query in name.casefold() for name in station["display_names"])]
+    stations.sort(key=lambda s: (s["display_names"][0].casefold(), s["guide_id"]))
+    return {"stations": stations[offset:offset + limit], "total": len(stations),
+            "offset": offset, "limit": limit, "has_more": offset + limit < len(stations)}
+
+
+def station_preview(conn, guide_id):
+    """Return a bounded, text-only current/upcoming schedule from the saved file."""
+    from xtream_epg import xml_time
+    station = next((s for s in entries(conn) if s["guide_id"] == guide_id), None)
+    if station is None:
+        raise KeyError("Imported XMLTV station not found")
+    now = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S +0000")
+    rows = conn.execute("SELECT programme_xml FROM external_xmltv_programmes "
+                        "WHERE guide_id=? AND stop_utc>? ORDER BY start_utc LIMIT 20",
+                        (guide_id[len(PREFIX):], now))
+    schedule = []
+    for row in rows:
+        p = ET.fromstring(row[0])
+        schedule.append({"title": p.findtext("title") or "", "description": p.findtext("desc") or "",
+                         "start": xml_time(p.get("start")).isoformat(),
+                         "stop": xml_time(p.get("stop")).isoformat()})
+    return {"station": station, "programmes": schedule}
+
+
 def validate_url(value):
     url = str(value or "").strip()
     parts = urlsplit(url)
@@ -164,7 +201,7 @@ def refresh_if_due(conn, accounts=()):
             pass
 
 
-def apply_selected(conn, accounts=()):
+def apply_selected(conn, accounts=(), *, persistent_id=None):
     """Copy selected external schedules into the existing export cache offline."""
     from server.services.xtream_persistent import list_channels
     from xtream_epg import clean_programme
@@ -173,6 +210,8 @@ def apply_selected(conn, accounts=()):
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     count = 0
     for channel in list_channels(conn, enabled_only=True):
+        if persistent_id is not None and channel["id"] != persistent_id:
+            continue
         source = channel.get("epg_source_id") or ""
         if not source.startswith(PREFIX):
             continue
