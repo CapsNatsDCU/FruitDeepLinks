@@ -23,7 +23,7 @@ from xtream_ingest import XtreamClient
 from xtream_pool import PoolUnavailable, XtreamPool
 
 
-ACCOUNT_INTERVAL_SECONDS = 600
+ACCOUNT_INTERVAL_SECONDS = 10
 CHANNEL_INTERVAL_SECONDS = 600
 ACTIVITY_RECHECK_SECONDS = 2
 
@@ -46,8 +46,16 @@ def _next_channel(conn, now):
     queued = quality_queue.next_request(conn)
     if queued is not None:
         return queued
-    return conn.execute("""
-        SELECT c.id, c.category_id, c.stream_id, c.stream_extension
+    candidates = automatic_candidates(conn, now, limit=1)
+    return candidates[0] if candidates else None
+
+
+def automatic_candidates(conn, now, *, limit=25):
+    ensure_schema(conn)
+    _ensure_state(conn)
+    cursor = conn.execute("""
+        SELECT c.id, c.category_id, c.stream_id, c.stream_extension, c.display_name,
+               (attempted.last_attempt IS NULL) AS first_check
         FROM xtream_persistent_channels AS c
         LEFT JOIN xtream_stream_quality AS q
           ON q.category_id=c.category_id AND q.stream_id=c.stream_id
@@ -59,8 +67,10 @@ def _next_channel(conn, now):
                  CASE WHEN attempted.last_attempt IS NULL THEN c.id END DESC,
                  (q.measured_at IS NOT NULL), COALESCE(attempted.last_attempt,0),
                  q.measured_at, c.id
-        LIMIT 1
-    """, (now - CHANNEL_INTERVAL_SECONDS,)).fetchone()
+        LIMIT ?
+    """, (now - CHANNEL_INTERVAL_SECONDS, limit))
+    columns = [item[0] for item in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor]
 
 
 def _account_due(conn, account, now):
@@ -108,7 +118,8 @@ def _run_background_quality(db_path: Path | None = None, *, pool=None) -> str:
     now = time.time()
     with pool.connection() as conn:
         _ensure_state(conn)
-        if _next_channel(conn, now) is None:
+        candidate = _next_channel(conn, now)
+        if candidate is None:
             return "no_due_channel"
         if not any(_account_due(conn, account, now) for account in pool.accounts
                    if account.id in eligible_ids):

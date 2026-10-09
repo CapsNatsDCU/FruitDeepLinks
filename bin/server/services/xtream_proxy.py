@@ -14,6 +14,7 @@ from xtream_ingest import build_stream_url
 from xtream_hosts import host_configs, record_host_success
 from xtream_pool import PoolUnavailable, XtreamPool
 from xtream_transport import configure_session, media_chunks
+from server.services.xtream_playback_quality import PlaybackQualityObserver
 
 
 def _timeout():
@@ -34,17 +35,29 @@ def _close(resource):
 
 class OwnedStream:
     """WSGI close works even when the body iterator was never started."""
-    def __init__(self, lease, upstream, session, chunks, first):
+    def __init__(self, lease, upstream, session, chunks, first, observer=None):
         self.lease, self.upstream, self.session = lease, upstream, session
         self.chunks, self.first = chunks, first
         self.outcome = "client_closed"
         self.closed = False
         self.lock = threading.Lock()
+        self.observer = observer
+
+    def _observe(self, chunk):
+        if self.observer is not None:
+            try:
+                self.observer.feed(chunk)
+            except Exception:
+                # Optional local analysis never changes the media response.
+                pass
 
     def __iter__(self):
         try:
+            self._observe(self.first)
             yield self.first
-            yield from self.chunks
+            for chunk in self.chunks:
+                self._observe(chunk)
+                yield chunk
             self.outcome = "upstream_eof"
         except GeneratorExit:
             raise
@@ -63,7 +76,14 @@ class OwnedStream:
             self.closed = True
             _close(self.upstream)
             _close(self.session)
-            self.lease.release(self.outcome)
+            try:
+                self.lease.release(self.outcome)
+            finally:
+                if self.observer is not None:
+                    try:
+                        self.observer.close()
+                    except Exception:
+                        pass
 
 
 def _failure(message, status=503):
@@ -71,7 +91,7 @@ def _failure(message, status=503):
                     headers={"Cache-Control": "no-store", "Retry-After": "5"})
 
 
-def proxy_stream(stream_id, source, extension="ts", *, pool=None):
+def proxy_stream(stream_id, source, extension="ts", *, pool=None, category_id=None):
     """Return MPEG-TS, retaining a lease until both sides have been closed.
 
     HEAD is a local availability probe and never opens provider media. No
@@ -145,7 +165,11 @@ def proxy_stream(stream_id, source, extension="ts", *, pool=None):
                 record_host_success(lease.gate_fd, host_index)
                 if len(first) >= 188:
                     pool.record_media_success(lease)
-                body = OwnedStream(lease, upstream, session, chunks, first)
+                try:
+                    observer = PlaybackQualityObserver(pool.db_path, stream_id, category_id)
+                except Exception:
+                    observer = None
+                body = OwnedStream(lease, upstream, session, chunks, first, observer)
                 response = Response(body, content_type="video/mp2t", headers={
                     "Cache-Control": "no-store", "X-Accel-Buffering": "no"})
                 response.call_on_close(body.close)

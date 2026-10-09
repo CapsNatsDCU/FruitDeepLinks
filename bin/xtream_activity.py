@@ -11,7 +11,7 @@ from functools import wraps
 from pathlib import Path
 
 
-QUIET_SECONDS = 600
+QUIET_SECONDS = 10
 _probe_context = contextvars.ContextVar("xtream_quality_probe", default=None)
 
 
@@ -29,12 +29,7 @@ def mark_normal_activity(db_path):
     fd = os.open(_activity_file(db_path), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        try:
-            previous = float(os.read(fd, 128) or b"0")
-        except ValueError:
-            previous = 0
-        deadline = max(previous if math.isfinite(previous) else 0,
-                       time.time() + QUIET_SECONDS)
+        deadline = time.time() + QUIET_SECONDS
         os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)
         os.write(fd, str(deadline).encode("ascii"))
@@ -46,12 +41,23 @@ def mark_normal_activity(db_path):
 def normal_activity_remaining(db_path):
     fd = os.open(_activity_file(db_path), os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_SH)
+        fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             deadline = float(os.read(fd, 128) or b"0")
         except ValueError:
             return QUIET_SECONDS
-        return max(0, deadline - time.time()) if math.isfinite(deadline) else QUIET_SECONDS
+        if not math.isfinite(deadline):
+            return QUIET_SECONDS
+        now = time.time()
+        # Adopt the shorter policy once when an older worker left a ten-minute
+        # deadline. Persist the new deadline so repeated reads do not reset it.
+        if deadline > now + QUIET_SECONDS:
+            deadline = now + QUIET_SECONDS
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, str(deadline).encode("ascii"))
+            os.fsync(fd)
+        return max(0, deadline - now)
     finally:
         os.close(fd)
 

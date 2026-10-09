@@ -20,6 +20,7 @@ def _saved_channel(pool):
         return None
     channel = candidates[0]
     return {"stream_id": str(channel["stream_id"]),
+            "category_id": str(channel["category_id"]),
             "name": channel.get("display_name") or channel.get("name"),
             "extension": channel.get("stream_extension") or channel.get("container_extension") or "ts"}
 
@@ -40,6 +41,7 @@ def _discover_channel(pool, lease):
         if channel is None:
             raise XtreamError("No channel is available in the test category")
         return {"stream_id": str(channel["stream_id"]), "name": channel.get("name"),
+                "category_id": categories[0],
                 "extension": normalize_extension(channel.get("container_extension"))}
     finally:
         session = getattr(client, "session", None)
@@ -80,6 +82,8 @@ def test_account_playback(pool, account_id=None):
             # reservation through local validation to serialize the result write.
             video = _probe_bytes(sample)
             pool.record_media_success(lease)
+            from server.services.xtream_playback_quality import save_playback_quality
+            save_playback_quality(pool.db_path, channel["stream_id"], channel.get("category_id"), video)
             outcome = "client_closed"
             checks[account.id] = {"status": "passed", "channel": channel, "video": video}
         except TimeoutError:

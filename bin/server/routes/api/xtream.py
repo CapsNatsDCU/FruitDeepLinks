@@ -671,10 +671,19 @@ def api_xtream_quality_queue(queue_id=None):
                 xtream_quality_queue.cancel(conn, queue_id)
                 return jsonify(status='success')
             items = xtream_quality_queue.entries(conn)
+            from server.services.xtream_background_quality import automatic_candidates
+            import time
+            automatic = automatic_candidates(conn, time.time(), limit=225)
+            manual_keys = {(item['category_id'], item['stream_id']) for item in items if item['state'] in {'pending','running'}}
+            automatic = [item for item in automatic if (item['category_id'], item['stream_id']) not in manual_keys][:25]
+            names = {str(row[0]): row[1] for row in conn.execute('SELECT stream_id,display_name FROM xtream_persistent_channels')}
             for item in items:
                 if item['state'] == 'completed':
                     item['measured_quality'] = quality_for_stream(conn, item['category_id'], item['stream_id'])
         pool = XtreamPool(resolve_db_path()).status()
+        manual_streams = {key[1] for key in manual_keys}
+        automatic_running = [{'stream_id': lease['stream_id'], 'channel_name': names.get(str(lease['stream_id']), 'Automatic check')}
+                             for lease in pool['leases'] if lease['source'] == 'quality_probe' and str(lease['stream_id']) not in manual_streams]
         wait = normal_activity_remaining(resolve_db_path())
         if os.getenv('XTREAM_BACKGROUND_QUALITY_ENABLED', 'true').lower() in {'0', 'false', 'no'}:
             reason = 'The background resolution worker is disabled in the deployment.'
@@ -686,7 +695,7 @@ def api_xtream_quality_queue(queue_id=None):
             reason = 'Waiting for a healthy free account marked Reserved for Fruit in Settings.'
         else:
             reason = 'Waiting for the next worker tick and account check interval.'
-        return jsonify(status='success', requests=items, wait_reason=reason)
+        return jsonify(status='success', requests=items, automatic=automatic, automatic_running=automatic_running, wait_reason=reason)
     except Exception as exc:
         return _safe_error(exc)
 
@@ -845,7 +854,7 @@ def xtream_persistent_stream(persistent_id):
             if channel["availability_status"] in {"unavailable", "needs_attention"}:
                 return Response("", status=503)
         from server.services.xtream_proxy import proxy_stream
-        return proxy_stream(channel["stream_id"], f"persistent:{persistent_id}", channel["stream_extension"])
+        return proxy_stream(channel["stream_id"], f"persistent:{persistent_id}", channel["stream_extension"], category_id=channel["category_id"])
     except (XtreamError, PersistentChannelError):
         return Response("", status=503)
     except Exception as exc:

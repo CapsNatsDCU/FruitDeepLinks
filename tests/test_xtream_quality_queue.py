@@ -66,6 +66,26 @@ class QualityQueueTests(unittest.TestCase):
             self.assertEqual(1080, quality_for_stream(conn, 'sports', '437220')['height'])
         self.assertEqual(0, self.pool.status()['active'])
 
+    def test_queued_checks_reuse_the_account_after_ten_seconds(self):
+        self.enqueue('437220')
+        self.enqueue('437219')
+        with patch('server.services.xtream_background_quality.time.time', return_value=100):
+            self.assertEqual('measured', self.measure()[0])
+        with patch('server.services.xtream_background_quality.time.time', return_value=109):
+            self.assertEqual('account_interval', self.measure()[0])
+        with patch('server.services.xtream_background_quality.time.time', return_value=110):
+            self.assertEqual('measured', self.measure()[0])
+        self.assertTrue(all(r['state'] == 'completed' for r in self.entries()))
+
+    def test_visible_automatic_queue_follows_the_worker_order_without_provider_requests(self):
+        from server.app import create_app
+        self.enqueue('437220')
+        with patch.dict(os.environ, {**pool_environment(account_rows((1,))), 'FRUIT_DB_PATH':str(self.path)}), \
+             patch('server.services.xtream_background_quality.XtreamClient', side_effect=AssertionError('Queue reads are offline')):
+            result = create_app().test_client().get('/api/xtream/persistent-channels/quality/queue').get_json()
+        self.assertEqual('437220', result['requests'][0]['stream_id'])
+        self.assertEqual(['437219'], [c['stream_id'] for c in result['automatic']])
+
     def test_cached_search_result_can_be_queued_without_saving_a_channel(self):
         with self.pool.connection() as conn:
             replace_snapshot(conn, [('sports','Sports')], [('sports','437221','Search result','search result',None,None,'ts')])

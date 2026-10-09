@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bin'))
-from server.services.xtream_persistent import create_channel
+from server.services.xtream_persistent import create_channel, quality_for_stream
 from server.services.xtream_playback_test import test_account_playback
 from server.services.xtream_quality import _eligible_probe_configs, QualityProbeDeferred
 from xtream_pool import XtreamPool
@@ -55,6 +55,15 @@ class ManualPlaybackTests(unittest.TestCase):
         test_account_playback(self.pool, 'account_0')
         with self.assertRaises(QualityProbeDeferred):
             _eligible_probe_configs(self.pool)
+
+    def test_manual_playback_updates_channel_quality_without_an_extra_sample(self):
+        test_account_playback(self.pool, 'account_0')
+        self.probe.return_value = {'width':1280, 'height':720, 'fps':59.94, 'codec':'h264'}
+        test_account_playback(self.pool, 'account_0')
+        with self.pool.connection() as conn:
+            self.assertEqual(720, quality_for_stream(conn, '10', '100')['height'])
+        self.assertEqual(2, self.sample.call_count)
+        self.factory.assert_not_called()
 
     def test_later_metadata_outage_preserves_playback_retry_after_media_success(self):
         test_account_playback(self.pool, 'account_0')

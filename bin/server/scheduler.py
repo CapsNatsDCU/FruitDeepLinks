@@ -48,15 +48,15 @@ def start(auto_refresh_settings: dict | None = None) -> None:
             _quality_job = _scheduler.add_job(
                 func=run_background_quality,
                 trigger="interval",
-                seconds=60,
-                next_run_time=datetime.now(timezone.utc) + timedelta(seconds=60),
+                seconds=5,
+                next_run_time=datetime.now(timezone.utc) + timedelta(seconds=5),
                 id="xtream_background_quality",
                 replace_existing=True,
                 coalesce=True,
                 max_instances=1,
                 misfire_grace_time=30,
             )
-            log("Slow Xtream resolution checks scheduled", "INFO")
+            log("Xtream resolution queue scheduled", "INFO")
     except Exception as e:
         log(f"Error starting APScheduler: {e}", "ERROR")
 

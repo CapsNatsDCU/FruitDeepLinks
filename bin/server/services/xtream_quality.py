@@ -21,7 +21,7 @@ from xtream_pool import PoolUnavailable, XtreamPool
 from xtream_quality_sample import MAX_SAMPLE_BYTES, MAX_SAMPLE_SECONDS
 
 
-PROBE_INTERVAL_SECONDS = 30
+PROBE_INTERVAL_SECONDS = 10
 FAILED_PROBE_PAUSE_SECONDS = 120
 
 
@@ -54,7 +54,7 @@ def _require_quiet(db_path):
     if remaining > 0:
         raise QualityProbeDeferred(
             remaining,
-            message="Resolution checks are paused for 10 minutes after channel or account activity.",
+            message="Resolution checks are paused briefly after channel or account activity.",
         )
 
 

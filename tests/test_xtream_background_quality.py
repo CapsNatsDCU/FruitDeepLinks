@@ -142,7 +142,7 @@ class BackgroundQualityTests(unittest.TestCase):
                 self.assertEqual(1, maximum)
                 self.assertEqual(expected, check.get("active_connections"))
 
-    def test_scheduler_registers_a_single_slow_job(self):
+    def test_scheduler_registers_a_single_fast_queue_job(self):
         from server import scheduler
         fake = Mock()
         with patch.object(scheduler, "_AVAILABLE", True), \
@@ -153,7 +153,7 @@ class BackgroundQualityTests(unittest.TestCase):
                 quality = [call for call in fake.add_job.call_args_list
                            if call.kwargs.get("id") == "xtream_background_quality"]
                 self.assertEqual(1, len(quality))
-                self.assertEqual(60, quality[0].kwargs["seconds"])
+                self.assertEqual(5, quality[0].kwargs["seconds"])
                 self.assertEqual(1, quality[0].kwargs["max_instances"])
             finally:
                 scheduler.stop()

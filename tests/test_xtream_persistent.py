@@ -557,7 +557,7 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
         })
         self.assertEqual(429, paused.status_code)
         self.assertEqual("quality_probe_deferred", paused.get_json()["code"])
-        self.assertGreaterEqual(int(paused.headers["Retry-After"]), 29)
+        self.assertGreaterEqual(int(paused.headers["Retry-After"]), 9)
         activity_file = self.db_path.parent / (self.db_path.name + ".xtream-locks") / "normal-activity-until"
         activity_file.write_text("0", encoding="ascii")
         with patch("server.services.xtream_quality.time.time", return_value=time.time() + 31):
@@ -595,7 +595,7 @@ class PersistentChannelApiWorkflowTest(unittest.TestCase):
             })
         self.assertEqual(429, result.status_code)
         self.assertEqual("quality_probe_deferred", result.get_json()["code"])
-        self.assertEqual("30", result.headers["Retry-After"])
+        self.assertEqual("10", result.headers["Retry-After"])
         catalog.assert_not_called()
         media.assert_not_called()
 

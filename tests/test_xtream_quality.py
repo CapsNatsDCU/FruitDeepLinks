@@ -65,12 +65,12 @@ class QualityProbeTest(unittest.TestCase):
         with patch("server.services.xtream_quality.time.time", return_value=100):
             with quality_probe_guard(self.pool.db_path, pool=self.pool):
                 pass
-        with patch("server.services.xtream_quality.time.time", return_value=129):
+        with patch("server.services.xtream_quality.time.time", return_value=109):
             with self.assertRaises(QualityProbeDeferred) as deferred:
                 with quality_probe_guard(self.pool.db_path, pool=self.pool):
                     self.fail("Probe spacing must be preserved")
             self.assertEqual(1, deferred.exception.retry_after)
-        with patch("server.services.xtream_quality.time.time", return_value=130):
+        with patch("server.services.xtream_quality.time.time", return_value=110):
             with quality_probe_guard(self.pool.db_path, pool=self.pool):
                 pass
 
@@ -89,17 +89,27 @@ class QualityProbeTest(unittest.TestCase):
 
     def test_normal_activity_extends_quiet_period_after_completion(self):
         with normal_activity(self.pool.db_path):
-            self.assertGreater(normal_activity_remaining(self.pool.db_path), 599)
+            self.assertGreater(normal_activity_remaining(self.pool.db_path), 9)
             with self.assertRaises(QualityProbeDeferred):
                 with quality_probe_guard(self.pool.db_path, pool=self.pool):
                     self.fail("An active account request must prevent probing")
             with patch("xtream_activity.time.time", return_value=time.time() + 5):
                 mark_normal_activity(self.pool.db_path)
-        self.assertGreater(normal_activity_remaining(self.pool.db_path), 599)
+        self.assertGreater(normal_activity_remaining(self.pool.db_path), 9)
         with self.assertRaises(QualityProbeDeferred) as deferred:
             with quality_probe_guard(self.pool.db_path, pool=self.pool):
                 self.fail("The cooldown must survive a new guard instance")
-        self.assertGreaterEqual(deferred.exception.retry_after, 599)
+        self.assertGreaterEqual(deferred.exception.retry_after, 9)
+
+    def test_legacy_ten_minute_marker_is_shortened_once_and_then_expires(self):
+        marker = self.pool.lock_dir / 'normal-activity-until'
+        marker.write_text('1100', encoding='ascii')
+        with patch('xtream_activity.time.time', return_value=500):
+            self.assertEqual(10, normal_activity_remaining(self.pool.db_path))
+        with patch('xtream_activity.time.time', return_value=508):
+            self.assertEqual(2, normal_activity_remaining(self.pool.db_path))
+        with patch('xtream_activity.time.time', return_value=511):
+            self.assertEqual(0, normal_activity_remaining(self.pool.db_path))
 
     def test_metadata_requests_pause_probes_but_probe_catalog_does_not_pause_itself(self):
         config = self.pool.accounts[0].config
@@ -109,7 +119,7 @@ class QualityProbeTest(unittest.TestCase):
         activity_file = self.pool.lock_dir / "normal-activity-until"
         activity_file.write_text("0", encoding="ascii")
         with self.pool.gate.hold(config):
-            self.assertGreater(normal_activity_remaining(self.pool.db_path), 599)
+            self.assertGreater(normal_activity_remaining(self.pool.db_path), 9)
 
     def test_new_activity_cancels_in_progress_media_sample(self):
         lease = self.pool.acquire("probe", "quality_probe")

@@ -34,6 +34,9 @@ class StreamProxyTests(unittest.TestCase):
         self.app = Flask(__name__)
         self.app.add_url_rule('/stream', view_func=lambda: proxy_stream("437219", "test", pool=self.pool), methods=["GET", "HEAD"])
         self.client = self.app.test_client()
+        observer = patch('server.services.xtream_proxy.PlaybackQualityObserver')
+        observer.start()
+        self.addCleanup(observer.stop)
 
     def test_streaming_is_incremental_and_close_releases_even_without_full_consumption(self):
         upstream = FakeMedia([b"\x47" * 188] * 100)
