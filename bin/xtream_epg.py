@@ -206,6 +206,8 @@ def provider_guide_id(channel):
 def refresh_epg(conn, client, accounts=()):
     from server.services.xtream_persistent import list_channels
     ensure_schema(conn)
+    from server.services import external_xmltv
+    external_xmltv.ensure_schema(conn)
     channels = list_channels(conn, enabled_only=True)
     if not channels:
         return {"channels": 0, "programmes": 0, "failed": 0}

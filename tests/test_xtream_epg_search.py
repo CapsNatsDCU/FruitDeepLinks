@@ -57,11 +57,11 @@ class EpgSearchTests(unittest.TestCase):
         with patch('server.routes.api.xtream._configured_client', side_effect=AssertionError('Offline search')), \
              patch('requests.sessions.Session.request', side_effect=AssertionError('No network')):
             result = client.get('/api/xtream/epg/links/search?mode=all').get_json()
-            station = client.get('/api/xtream/epg/links/search?q=xmltv:20367').get_json()
+            station = client.get('/api/xtream/epg/links/search?q=xmltv:1:20367').get_json()
             substring = client.get('/api/xtream/epg/links/search?mode=all&q=TTG').get_json()
-        self.assertEqual({'ESPN.us', 'NBC.us', 'xmltv:20367'}, {c['guide_id'] for c in result['candidates']})
+        self.assertEqual({'ESPN.us', 'NBC.us', 'xmltv:1:20367'}, {c['guide_id'] for c in result['candidates']})
         self.assertEqual(['ESPNHD', 'NBC local', 'WTTGDT'], [c['display_name'] for c in result['candidates']])
-        self.assertEqual(['xmltv:20367'], [c['guide_id'] for c in station['candidates']])
+        self.assertEqual(['xmltv:1:20367'], [c['guide_id'] for c in station['candidates']])
         self.assertEqual(station['candidates'], substring['candidates'])
         self.assertEqual('ESPN.us', index.search(self.conn, 'ESPN')[0]['guide_id'])
         self.assertIsNone(get_channel(self.conn, self.channel['id'])['epg_source_id'])

@@ -161,7 +161,7 @@ def api_xtream_epg_link_search():
         with get_conn() as conn:
             return jsonify({"status": "success", "cache": xtream_epg_index.status(conn),
                             "channel_cache": channel_cache.status(conn),
-                            **xtream_epg_index.search_page(conn, query, mode=mode, limit=limit, offset=offset)})
+                            **xtream_epg_index.search_page(conn, query, mode=mode, limit=limit, offset=offset, prefer_external=request.args.get("prefer_external") == "true")})
     except Exception as exc:
         return _safe_error(exc)
 
@@ -202,16 +202,76 @@ def api_external_xmltv():
     try:
         with get_conn() as conn:
             if request.method == "GET":
-                return jsonify(status="success", cache=external_xmltv.status(conn))
+                return jsonify(status="success", cache=external_xmltv.status(conn), sources=external_xmltv.sources(conn))
             payload = request.get_json(silent=True) or {}
             if not isinstance(payload, dict):
                 raise ValueError("Expected a JSON object")
             accounts = load_accounts(conn)
             cache = external_xmltv.refresh(conn, payload.get("url"), accounts)
             programmes = external_xmltv.apply_selected(conn, accounts)
-            return jsonify(status="success", cache=cache, programmes=programmes)
+            return jsonify(status="success", cache=cache, sources=external_xmltv.sources(conn), programmes=programmes)
     except ValueError as exc:
         return jsonify(status="error", message=str(exc)), 400
+    except Exception as exc:
+        return _safe_error(exc, 502)
+
+
+@bp.route("/api/xtream/epg/external/sources", methods=["GET", "POST"])
+def api_external_xmltv_sources():
+    from server.services import external_xmltv
+    if not db_exists(): return _read_database_error()
+    try:
+        with get_conn() as conn:
+            if request.method == "GET":
+                return jsonify(status="success", sources=external_xmltv.sources(conn))
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict):
+                raise ValueError("Expected a source name and XMLTV URL")
+            source = external_xmltv.save_source(conn, payload.get("name"), payload.get("url"))
+            return jsonify(status="success", source=source, sources=external_xmltv.sources(conn)), 201
+    except ValueError as exc:
+        return jsonify(status="error", message=str(exc)), 400
+    except Exception as exc:
+        return _safe_error(exc)
+
+
+@bp.route("/api/xtream/epg/external/sources/<int:source_id>", methods=["PATCH", "DELETE"])
+def api_external_xmltv_source(source_id):
+    from server.services import external_xmltv
+    if not db_exists(): return _read_database_error()
+    try:
+        with get_conn() as conn:
+            if request.method == "DELETE":
+                external_xmltv.delete_source(conn, source_id)
+            else:
+                payload = request.get_json(silent=True)
+                if not isinstance(payload, dict):
+                    raise ValueError("Expected a source name and XMLTV URL")
+                external_xmltv.save_source(conn, payload.get("name"), payload.get("url"), source_id=source_id)
+            return jsonify(status="success", sources=external_xmltv.sources(conn))
+    except ValueError as exc:
+        return jsonify(status="error", message=str(exc)), 400
+    except KeyError:
+        return jsonify(status="error", message="XMLTV source not found"), 404
+    except Exception as exc:
+        return _safe_error(exc)
+
+
+@bp.route("/api/xtream/epg/external/sources/<int:source_id>/refresh", methods=["POST"])
+def api_external_xmltv_source_refresh(source_id):
+    from server.services import external_xmltv
+    from xtream_accounts import load_accounts
+    if not db_exists(): return _read_database_error()
+    try:
+        with get_conn() as conn:
+            accounts = load_accounts(conn)
+            cache = external_xmltv.refresh(conn, accounts=accounts, source_id=source_id)
+            count = external_xmltv.apply_selected(conn, accounts, source_id=source_id)
+            return jsonify(status="success", source=cache, sources=external_xmltv.sources(conn), programmes=count)
+    except ValueError as exc:
+        return jsonify(status="error", message=str(exc)), 400
+    except KeyError:
+        return jsonify(status="error", message="XMLTV source not found"), 404
     except Exception as exc:
         return _safe_error(exc, 502)
 
@@ -226,8 +286,11 @@ def api_external_xmltv_stations():
         if len(query) > 512 or offset < 0:
             raise ValueError("Use up to 512 search characters and a nonnegative offset")
         with get_conn() as conn:
-            return jsonify(status="success", cache=external_xmltv.status(conn),
-                           **external_xmltv.browse(conn, query, offset=offset))
+            source_id = int(request.args["source_id"]) if request.args.get("source_id") else None
+            if source_id is not None and not external_xmltv.status(conn, source_id):
+                return jsonify(status="error", message="XMLTV source not found"), 404
+            return jsonify(status="success", cache=external_xmltv.summary(conn),
+                           **external_xmltv.browse(conn, query, offset=offset, source_id=source_id))
     except ValueError:
         return jsonify(status="error", message="Use up to 512 search characters and a nonnegative integer offset"), 400
     except Exception as exc:
@@ -766,6 +829,8 @@ def api_xtream_persistent_channels():
         if not db_exists(): return _read_database_error()
         try:
             with get_conn() as conn:
+                from server.services import external_xmltv
+                external_xmltv.ensure_schema(conn)
                 channels = list_channels(conn)
             return jsonify({"status": "success", "channels": channels})
         except Exception as exc:

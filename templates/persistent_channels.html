@@ -10,6 +10,8 @@
 .favorite-alert.visible { display:block; }
 .persistent-intro { color:var(--text-muted); font-size:13px; line-height:1.5; max-width:900px; }
 .persistent-toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:end; margin:14px 0; }
+.persistent-toolbar input[type="url"] { background:var(--bg-inset); border:1px solid var(--border); border-radius:6px; color:var(--text); padding:7px 10px; font-size:13px; font-family:inherit; width:100%; }
+.persistent-toolbar [hidden] { display:none; }
 .persistent-toolbar label { flex:1; min-width:180px; }
 .persistent-browser { margin:12px 0 18px; padding:14px; background:var(--bg-inset); border:1px solid var(--border); border-radius:var(--radius); }
 .persistent-results, .persistent-list { display:flex; flex-direction:column; gap:8px; }
@@ -81,15 +83,20 @@
 </section>
 <section class="card" aria-labelledby="external-xmltv-title">
   <h2 id="external-xmltv-title">External XMLTV / zap2xml</h2>
-  <p class="persistent-intro">Connect an existing XMLTV file served by zap2xml or another guide service. Imported station names appear under Find EPG links in channel setup. Choose a guide and save the channel to use its schedule. Regular guide refreshes check this file when its saved copy is at least six hours old.</p>
-  <div class="persistent-toolbar"><label>XMLTV file URL<input id="external-xmltv-url" type="url" placeholder="http://your-nas:8098/xmltv-raw.xml" maxlength="2048"></label>
-    <button class="btn btn-secondary" type="button" onclick="refreshExternalXmltv(this)">Import / Refresh XMLTV</button></div>
-  <div id="external-xmltv-status" class="status-muted" role="status" aria-live="polite">Checking external guide…</div>
+  <p class="persistent-intro">Add XMLTV feeds from zap2xml or another guide service. Each source keeps its own stations and refresh status. Browse one source or all sources, then choose a guide for a persistent channel. Regular guide refreshes check each source when its last check is at least six hours old.</p>
+  <div id="external-source-form" class="persistent-toolbar">
+    <label>Source name<input id="external-xmltv-name" type="text" placeholder="Local cable guide" maxlength="120"></label>
+    <label>XMLTV file URL<input id="external-xmltv-url" type="url" placeholder="http://your-nas:8098/xmltv-raw.xml" maxlength="2048"></label>
+    <button id="external-source-submit" class="btn" type="button" onclick="saveExternalSource(this)">Add &amp; import source</button>
+    <button id="external-source-cancel" class="btn btn-secondary" type="button" onclick="cancelExternalSourceEdit()" hidden>Cancel edit</button>
+  </div>
+  <div id="external-xmltv-status" class="status-muted" role="status" aria-live="polite">Checking XMLTV sources…</div>
+  <div id="external-source-list" class="persistent-list"></div>
   <div class="persistent-toolbar"><button class="btn" type="button" onclick="openExternalStations()">Browse imported guide &amp; assign channels</button></div>
   <div id="external-station-browser" class="persistent-browser" hidden>
     <h3>Imported XMLTV stations</h3>
     <p class="persistent-intro">Search the imported station names or IDs, preview their schedules, and assign them to your saved persistent channels.</p>
-    <div class="persistent-toolbar"><label>Search imported stations<input id="external-station-query" type="text" maxlength="512" placeholder="ESPN, WTTG, or station ID" onkeydown="if(event.key==='Enter'){event.preventDefault();searchExternalStations()}"></label>
+    <div class="persistent-toolbar"><label>Guide source<select id="external-station-source" onchange="searchExternalStations()"><option value="">All sources</option></select></label><label>Search imported stations<input id="external-station-query" type="text" maxlength="512" placeholder="ESPN, WTTG, or station ID" onkeydown="if(event.key==='Enter'){event.preventDefault();searchExternalStations()}"></label>
       <button id="external-station-search" class="btn btn-secondary" type="button" onclick="searchExternalStations()">Search stations</button>
       <button class="btn btn-secondary" type="button" onclick="closeExternalStations()">Close guide browser</button></div>
     <div id="external-station-pagination" class="persistent-toolbar"></div>
@@ -216,32 +223,116 @@ async function refreshPersistentEpg(button) {
   finally { button.disabled = false; }
 }
 
-function showExternalXmltvStatus(cache) {
-  document.getElementById('external-xmltv-status').textContent = cache.refreshed_at
-    ? `${cache.channel_count} channels · ${cache.programme_count} programmes · refreshed ${cache.refreshed_at}${cache.last_error ? ' · ' + cache.last_error : ''}`
-    : 'No external XMLTV source connected. Enter its file URL and import it.';
+let _externalSources = [];
+let _externalEditingSource = null;
+let _externalSourceBusy = false;
+let _externalStationSource = '';
+function renderExternalSources(sources) {
+  _externalSources = sources;
+  document.getElementById('external-source-list').innerHTML = sources.map(source => `<article class="persistent-row external-station-row">
+    <div class="persistent-row-main"><strong>${escHtml(source.name)}</strong><div class="persistent-row-meta">${escHtml(source.url)}</div>
+      <div class="persistent-row-meta">${source.refreshed_at ? `${source.channel_count} ${source.channel_count === 1 ? 'station' : 'stations'} · ${source.programme_count} ${source.programme_count === 1 ? 'programme' : 'programmes'} · refreshed ${escHtml(new Date(source.refreshed_at).toLocaleString())}` : 'Not imported yet'}${source.last_error ? ` · ${escHtml(source.last_error)}` : ''}</div></div>
+    <div class="persistent-actions">
+      <button class="btn btn-secondary" type="button" onclick="refreshExternalSource(${source.id}, this)">Refresh</button>
+      <button class="btn btn-secondary" type="button" onclick="browseExternalSource(${source.id})">Browse</button>
+      <button class="btn btn-secondary" type="button" onclick="editExternalSource(${source.id})">Edit source</button>
+      <button class="btn btn-danger" type="button" onclick="removeExternalSource(${source.id})">Remove</button>
+    </div></article>`).join('') || '<p class="status-muted">No XMLTV sources yet. Add a name and file URL above.</p>';
+  const filter = document.getElementById('external-station-source');
+  const selected = filter.value;
+  filter.innerHTML = '<option value="">All sources</option>' + sources.map(source => `<option value="${source.id}">${escHtml(source.name)}</option>`).join('');
+  filter.value = sources.some(source => String(source.id) === selected) ? selected : '';
+  setExternalSourceBusy(_externalSourceBusy);
+}
+function setExternalSourceBusy(busy) {
+  _externalSourceBusy = busy;
+  document.querySelectorAll('#external-source-form input, #external-source-form button, #external-source-list button').forEach(control => {control.disabled = busy;});
 }
 async function loadExternalXmltv() {
-  try {
-    const result = await persistentRequest('/api/xtream/epg/external');
-    document.getElementById('external-xmltv-url').value = result.cache?.url || '';
-    showExternalXmltvStatus(result.cache || {});
-  } catch (err) { document.getElementById('external-xmltv-status').textContent = err.message; }
+  const result = await persistentRequest('/api/xtream/epg/external/sources');
+  renderExternalSources(result.sources || []);
+  document.getElementById('external-xmltv-status').textContent = `${_externalSources.length} XMLTV ${_externalSources.length === 1 ? 'source' : 'sources'}`;
 }
-async function refreshExternalXmltv(button) {
-  if (button.disabled) return;
-  const input = document.getElementById('external-xmltv-url');
-  button.disabled = true; input.disabled = true;
-  button.textContent = 'Importing XMLTV…';
-  document.getElementById('external-xmltv-status').textContent = 'Downloading and indexing the guide…';
+function cancelExternalSourceEdit() {
+  _externalEditingSource = null;
+  document.getElementById('external-xmltv-name').value = '';
+  document.getElementById('external-xmltv-url').value = '';
+  document.getElementById('external-source-submit').textContent = 'Add & import source';
+  document.getElementById('external-source-cancel').hidden = true;
+}
+function editExternalSource(id) {
+  if (_externalSourceBusy) return;
+  const source = _externalSources.find(item => item.id === id);
+  if (!source) return;
+  _externalEditingSource = id;
+  document.getElementById('external-xmltv-name').value = source.name;
+  document.getElementById('external-xmltv-url').value = source.url;
+  document.getElementById('external-source-submit').textContent = 'Save & refresh source';
+  document.getElementById('external-source-cancel').hidden = false;
+  document.getElementById('external-xmltv-name').focus();
+}
+async function saveExternalSource(button) {
+  if (_externalSourceBusy) return;
+  const payload = {name:document.getElementById('external-xmltv-name').value.trim(),url:document.getElementById('external-xmltv-url').value.trim()};
+  const id = _externalEditingSource;
+  const status = document.getElementById('external-xmltv-status');
+  setExternalSourceBusy(true); button.textContent = 'Saving source…'; status.textContent = 'Saving XMLTV source…';
   try {
-    const result = await persistentRequest('/api/xtream/epg/external', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:input.value.trim()})});
-    showExternalXmltvStatus(result.cache || {});
-    await loadEpgLinkSuggestions();
-    if (!document.getElementById('external-station-browser').hidden) await searchExternalStations();
-  } catch (err) { document.getElementById('external-xmltv-status').textContent = `Import failed: ${err.message}`; }
-  finally { button.disabled = false; input.disabled = false; button.textContent = 'Import / Refresh XMLTV'; }
+    const result = await persistentRequest('/api/xtream/epg/external/sources' + (id ? `/${id}` : ''), {
+      method:id ? 'PATCH' : 'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    const savedId = id || result.source.id;
+    renderExternalSources(result.sources || []);
+    cancelExternalSourceEdit();
+    status.textContent = `Importing ${payload.name}…`;
+    await persistentRequest(`/api/xtream/epg/external/sources/${savedId}/refresh`, {method:'POST'});
+    await externalSourceUpdated();
+    status.textContent = `${payload.name} saved and imported.`;
+  } catch (err) {
+    await loadExternalXmltv().catch(() => {});
+    status.textContent = `Could not save or import source: ${err.message}. Saved sources can be retried with Refresh.`;
+  } finally {
+    setExternalSourceBusy(false);
+    button.textContent = _externalEditingSource ? 'Save & refresh source' : 'Add & import source';
+  }
+}
+async function externalSourceUpdated() {
+  await loadExternalXmltv();
+  await loadEpgLinkSuggestions();
+  await loadPersistentChannels();
+  if (!document.getElementById('external-station-browser').hidden) await searchExternalStations();
+}
+async function refreshExternalSource(id, button) {
+  if (_externalSourceBusy) return;
+  const status = document.getElementById('external-xmltv-status');
+  const source = _externalSources.find(item => item.id === id);
+  setExternalSourceBusy(true); button.textContent = 'Importing…';
+  status.textContent = `Refreshing ${source?.name || 'source'}…`;
+  try {
+    await persistentRequest(`/api/xtream/epg/external/sources/${id}/refresh`, {method:'POST'});
+    await externalSourceUpdated();
+    status.textContent = `${source?.name || 'Source'} refreshed.`;
+  } catch (err) {
+    await loadExternalXmltv().catch(() => {});
+    status.textContent = `Import failed: ${err.message}`;
+  } finally { setExternalSourceBusy(false); if (button.isConnected) button.textContent = 'Refresh'; }
+}
+async function removeExternalSource(id) {
+  if (_externalSourceBusy) return;
+  const source = _externalSources.find(item => item.id === id);
+  if (!source || !await showConfirm(`Remove ${source.name}?`, 'Removes this imported snapshot. Reassign or clear any channel guide links using this source first.')) return;
+  setExternalSourceBusy(true);
+  const status = document.getElementById('external-xmltv-status');
+  status.textContent = `Removing ${source.name}…`;
+  try {
+    await persistentRequest(`/api/xtream/epg/external/sources/${id}`, {method:'DELETE'});
+    if (_externalEditingSource === id) cancelExternalSourceEdit();
+    await externalSourceUpdated(); status.textContent = `${source.name} removed.`;
+  } catch (err) { status.textContent = `Could not remove source: ${err.message}`; }
+  finally { setExternalSourceBusy(false); }
+}
+async function browseExternalSource(id) {
+  document.getElementById('external-station-source').value = String(id);
+  await openExternalStations();
 }
 
 async function openExternalStations() {
@@ -257,7 +348,8 @@ async function searchExternalStations(offset = 0, keepPreview = false) {
   const button = document.getElementById('external-station-search');
   if (button.disabled) return;
   const query = document.getElementById('external-station-query').value.trim();
-  if (query !== _externalStationQuery) offset = 0;
+  const sourceId = document.getElementById('external-station-source').value;
+  if (query !== _externalStationQuery || sourceId !== _externalStationSource) offset = 0;
   const sequence = ++_externalBrowseSequence;
   const list = document.getElementById('external-station-list');
   const pagination = document.getElementById('external-station-pagination');
@@ -270,13 +362,13 @@ async function searchExternalStations(offset = 0, keepPreview = false) {
   button.disabled = true; button.textContent = 'Searching…';
   list.textContent = 'Reading imported stations…'; pagination.innerHTML = '';
   try {
-    const result = await persistentRequest(`/api/xtream/epg/external/stations?${new URLSearchParams({q:query,offset:String(offset)})}`);
+    const result = await persistentRequest(`/api/xtream/epg/external/stations?${new URLSearchParams({q:query,offset:String(offset),source_id:sourceId})}`);
     if (sequence !== _externalBrowseSequence) return;
     _externalStations = result.stations || [];
-    _externalStationQuery = query; _externalStationOffset = result.offset;
+    _externalStationQuery = query; _externalStationSource = sourceId; _externalStationOffset = result.offset;
     list.innerHTML = _externalStations.length ? _externalStations.map((station, i) => `<article class="persistent-row external-station-row">
       <div class="persistent-row-main"><strong>${escHtml(station.display_names.join(' / '))}</strong>
-        <div class="persistent-row-meta">${escHtml(station.guide_id)} · ${station.programme_count} imported programmes</div>
+        <div class="persistent-row-meta">${escHtml(station.source_name)} · Station ${escHtml(station.raw_guide_id)} · ${station.programme_count} imported programmes</div>
         <div class="persistent-row-meta">${station.assigned_channels.length ? 'Assigned to: ' + station.assigned_channels.map(c => escHtml(`${c.channel_number} · ${c.display_name}${c.enabled ? '' : ' (disabled)'}`)).join('; ') : 'Not assigned to a persistent channel'}</div></div>
       <button class="btn btn-secondary" type="button" onclick="previewExternalStation(_externalStations[${i}].guide_id)">Preview &amp; assign</button></article>`).join('')
       : result.cache?.refreshed_at ? 'No imported stations match this search. Clear the search to browse all.' : 'Import an XMLTV file first using the URL above.';
@@ -297,7 +389,7 @@ async function previewExternalStation(guideId) {
     if (sequence !== _externalPreviewSequence) return;
     const station = result.station;
     detail.innerHTML = `<h3>${escHtml(station.display_names.join(' / '))}</h3>
-      <div class="persistent-row-meta">${escHtml(station.guide_id)} · Preview of up to 20 current/upcoming programmes · Times shown in your local timezone</div>
+      <div class="persistent-row-meta">${escHtml(station.source_name)} · Station ${escHtml(station.raw_guide_id)} · Preview of up to 20 current/upcoming programmes · Times shown in your local timezone</div>
       <div class="external-schedule">${result.programmes.length ? result.programmes.map(p => `<article class="persistent-row external-station-row"><div class="persistent-row-main">
         <strong>${escHtml(p.title)}</strong><div class="persistent-row-meta">${escHtml(new Date(p.start).toLocaleString())} – ${escHtml(new Date(p.stop).toLocaleString())}</div>
         ${p.description ? `<div class="persistent-row-meta">${escHtml(p.description)}</div>` : ''}</div></article>`).join('') : '<p class="status-muted">This station has no current or upcoming programmes in the imported file. You can assign it, but its guide will remain empty until a valid schedule is imported.</p>'}</div>
@@ -621,6 +713,7 @@ function showPersistentAdd(index) {
   // Search results may reorder while this draft is open. Keep its identity.
   editor.dataset.streamId = stream.stream_id;
   editor.dataset.categoryId = stream.category_id;
+  editor.dataset.providerGuideId = stream.epg_channel_id || "";
   editor.innerHTML = persistentFormHtml({display_name:stream.name, channel_number:nextPersistentNumber(), enabled:true, guide_id:stream.epg_channel_id || ''}, 'add');
   editor.scrollIntoView({behavior:'smooth', block:'nearest'});
 }
@@ -629,6 +722,7 @@ function showPersistentEdit(id) {
   const channel = _persistentChannels.find(item => item.id === id);
   if (!channel) return;
   _epgSetupSequence++;
+  document.getElementById('persistent-editor').dataset.providerGuideId = channel.epg_channel_id || '';
   document.getElementById('persistent-editor').innerHTML = persistentFormHtml(channel, 'edit');
   document.getElementById('persistent-editor').scrollIntoView({behavior:'smooth', block:'nearest'});
 }
@@ -639,7 +733,8 @@ async function findSetupEpgLinks(button, offset = 0) {
   const name = document.getElementById('persistent-form-epg-query').value.trim();
   const mode = document.getElementById('persistent-form-epg-mode').value;
   if (!name && mode !== 'all') { target.textContent = 'Enter a channel name or guide ID, or choose All saved guides.'; pagination.innerHTML = ''; return; }
-  const search = {q:name, mode, limit:'50'};
+  const preferExternal = !document.getElementById('persistent-editor').dataset.providerGuideId;
+  const search = {q:name, mode, limit:'50', prefer_external:String(preferExternal)};
   if (!_epgSetupSearch || _epgSetupSearch.q !== name || _epgSetupSearch.mode !== mode) offset = 0;
   const searchButton = document.getElementById('persistent-form-epg-search');
   if (searchButton.disabled) return;
@@ -661,7 +756,7 @@ async function findSetupEpgLinks(button, offset = 0) {
       return;
     }
     const selected = document.getElementById('persistent-form-epg-source').value.trim();
-    target.innerHTML = '<div class="persistent-row-meta">Review the channel and schedule before choosing. Broader matches may include other station numbers or regions. Your selection is applied when you save this channel.</div>' +
+    target.innerHTML = (preferExternal ? '<p class="status-muted">No provider guide ID: matching imported XMLTV / zap2xml guides are listed first.</p>' : '') + '<div class="persistent-row-meta">Review the channel and schedule before choosing. Broader matches may include other station numbers or regions. Your selection is applied when you save this channel.</div>' +
       _epgSetupCandidates.map((item, index) => `<article class="persistent-row">
         <div aria-hidden="true"></div><div class="persistent-row-main"><strong>${escHtml(item.display_name)}</strong>
           <div class="persistent-row-meta">${escHtml(item.source)} · Guide ${escHtml(item.guide_id)}${mode === 'all' ? '' : ` · ${Math.round(item.similarity * 100)}% match`}</div>
@@ -752,7 +847,7 @@ async function deletePersistentChannel(id) {
 loadPersistentFavoriteTeams().then(loadPersistentChannels);
 loadPersistentChannelCacheStatus();
 loadEpgLinkSuggestions();
-loadExternalXmltv();
+loadExternalXmltv().catch(err => { document.getElementById('external-xmltv-status').textContent = `Could not read sources: ${err.message}`; });
 loadQualityQueue();
 </script>
 {% endblock %}

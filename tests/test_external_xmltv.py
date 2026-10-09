@@ -25,8 +25,8 @@ class ExternalXmltvTests(unittest.TestCase):
         self.import_xml(self.feed())
         xtream_epg_index.replace_snapshot(self.conn, {'ESPN.us': {'names':['ESPN provider'], 'programme_count':3}})
         candidates = xtream_epg_index.search(self.conn, 'ESPN')
-        self.assertEqual({c['guide_id'] for c in candidates}, {'ESPN.us', 'xmltv:ESPN.us'})
-        selected = update_channel(self.conn, self.channel['id'], {'epg_source_id':'xmltv:ESPN.us'})
+        self.assertEqual({c['guide_id'] for c in candidates}, {'ESPN.us', 'xmltv:1:ESPN.us'})
+        selected = update_channel(self.conn, self.channel['id'], {'epg_source_id':'xmltv:1:ESPN.us'})
         self.assertEqual(external_xmltv.apply_selected(self.conn, self.accounts), 1)
         programmes = cached_programmes(self.conn, selected)
         self.assertEqual(programmes[0].get('channel'), self.channel['effective_guide_id'])
@@ -44,12 +44,13 @@ class ExternalXmltvTests(unittest.TestCase):
         self.assertEqual(after['refreshed_at'], before['refreshed_at'])
         self.assertEqual(after['programme_count'], 1)
         self.assertTrue(after['last_error'])
-        self.assertEqual(len(external_xmltv.programmes(self.conn, 'xmltv:ESPN.us')), 1)
+        self.assertEqual(len(external_xmltv.programmes(self.conn, 'xmltv:1:ESPN.us')), 1)
 
     def test_invalid_html_and_credential_urls_not_imported(self):
         with self.assertRaises(ValueError):
             self.import_xml('<html><title>Login</title></html>')
-        self.assertFalse(external_xmltv.status(self.conn))
+        self.assertFalse(external_xmltv.entries(self.conn))
+        self.assertTrue(external_xmltv.status(self.conn)["last_error"])
         for url in ('file:///etc/passwd', 'http://user:secret@host/guide.xml', 'http://host/xml?token=secret'):
             with self.assertRaises(ValueError):
                 external_xmltv.validate_url(url)
@@ -63,13 +64,13 @@ class ExternalXmltvTests(unittest.TestCase):
 
     def test_new_lineup_cannot_replace_selected_numeric_ids(self):
         self.import_xml(self.feed())
-        update_channel(self.conn, self.channel['id'], {'epg_source_id':'xmltv:ESPN.us'})
+        update_channel(self.conn, self.channel['id'], {'epg_source_id':'xmltv:1:ESPN.us'})
         with self.assertRaisesRegex(ValueError, 'Clear the selected'):
             external_xmltv.refresh(self.conn, 'http://different.example/guide.xml')
 
     def test_unknown_or_empty_external_link_does_not_fallback_to_provider(self):
         self.import_xml(self.feed())
-        selected = update_channel(self.conn, self.channel['id'], {'epg_source_id':'xmltv:missing'})
+        selected = update_channel(self.conn, self.channel['id'], {'epg_source_id':'xmltv:1:missing'})
         result = refresh_epg(self.conn, self.client, self.accounts)
         self.assertEqual(result['failed'], 1)
         self.assertFalse(cached_programmes(self.conn, selected))

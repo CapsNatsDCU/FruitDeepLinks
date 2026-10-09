@@ -34,7 +34,7 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
         if "no such table" not in str(exc).lower():
             raise
         row = None
-    from server.services.external_xmltv import status as external_status
+    from server.services.external_xmltv import summary as external_status
     external = external_status(conn)
     provider = dict(zip(("refreshed_at", "channel_count"), row)) if row else {"refreshed_at": None, "channel_count": 0}
     return {"refreshed_at": max(provider["refreshed_at"] or "", external.get("refreshed_at") or "") or None,
@@ -102,7 +102,7 @@ def search(conn: sqlite3.Connection, query: str, *, limit: int = 10) -> list[dic
 
 
 def search_page(conn: sqlite3.Connection, query: str, *, mode: str = "similar",
-                limit: int = 50, offset: int = 0) -> dict[str, Any]:
+                limit: int = 50, offset: int = 0, prefer_external: bool = False) -> dict[str, Any]:
     """Page saved guide identities, with explicit broader matching or full browsing."""
     from server.services.xtream_channel_cache import all_channels
     if mode not in {"similar", "broad", "all"}:
@@ -148,7 +148,8 @@ def search_page(conn: sqlite3.Connection, query: str, *, mode: str = "similar",
         ranked[guide_id] = {"guide_id": guide_id, "display_name": name,
                             "similarity": score, "source": source,
                             "provider_programmes": indexed[guide_id]["programme_count"] if guide_id in indexed else None}
-    result = sorted(ranked.values(), key=lambda item: (0 if mode == "all" else -item["similarity"],
+    result = sorted(ranked.values(), key=lambda item: (not item["guide_id"].startswith("xmltv:") if prefer_external else False,
+                                                      0 if mode == "all" else -item["similarity"],
                                                       item["display_name"].casefold(), item["guide_id"]))
     for item in result:
         item["similarity"] = round(item["similarity"], 2)
@@ -185,7 +186,7 @@ def suggestions(conn: sqlite3.Connection, *, limit: int = 5) -> list[dict[str, A
                 ranked.append({"guide_id": entry["guide_id"], "display_name": matched_name,
                                "similarity": round(score, 2),
                                "provider_programmes": entry["programme_count"], "source": entry.get("source", "Provider XMLTV feed")})
-        ranked.sort(key=lambda item: (-item["similarity"], item["display_name"].casefold(), item["guide_id"]))
+        ranked.sort(key=lambda item: (not item["guide_id"].startswith("xmltv:") if not channel.get("epg_channel_id") else False, -item["similarity"], item["display_name"].casefold(), item["guide_id"]))
         result.append({"persistent_id": channel["id"], "channel_name": channel["display_name"],
                        "current_epg_channel_id": channel.get("epg_source_id") or channel.get("epg_channel_id"),
                        "candidates": ranked[:max(1, min(10, limit))]})
