@@ -76,6 +76,13 @@
   <p class="status-muted">For accounts marked “Reserved for Fruit” in Settings, Fruit checks saved channel resolution slowly in the background: at most one channel per free account every 10 minutes. All resolution checks pause during channel or account activity and for 10 minutes afterward. It skips the check if the provider cannot confirm zero active connections.</p>
   <div id="persistent-list" class="persistent-list" aria-live="polite"><span class="status-muted">Loading persistent channels…</span></div>
 </section>
+<section class="card" aria-labelledby="external-xmltv-title">
+  <h2 id="external-xmltv-title">External XMLTV / zap2xml</h2>
+  <p class="persistent-intro">Connect an existing XMLTV file served by zap2xml or another guide service. Imported station names appear under Find similar EPG links in channel setup. Choose a guide and save the channel to use its schedule. Regular guide refreshes check this file when its saved copy is at least six hours old.</p>
+  <div class="persistent-toolbar"><label>XMLTV file URL<input id="external-xmltv-url" type="url" placeholder="http://your-nas:8098/xmltv-raw.xml" maxlength="2048"></label>
+    <button class="btn btn-secondary" type="button" onclick="refreshExternalXmltv(this)">Import / Refresh XMLTV</button></div>
+  <div id="external-xmltv-status" class="status-muted" role="status" aria-live="polite">Checking external guide…</div>
+</section>
 <section class="card" aria-labelledby="epg-link-index-title">
   <h2 id="epg-link-index-title">Offline EPG Links</h2>
   <p class="persistent-intro">Fruit saves XMLTV channel IDs and names from the provider feed. This index helps find possible guide links for saved channels without programme data. Similar names are suggestions only; no guide is assigned automatically. Refreshing the index reads the provider XMLTV feed once. Regular persistent guide refreshes also update it.</p>
@@ -124,6 +131,33 @@ async function refreshPersistentEpg(button) {
   finally { button.disabled = false; }
 }
 
+function showExternalXmltvStatus(cache) {
+  document.getElementById('external-xmltv-status').textContent = cache.refreshed_at
+    ? `${cache.channel_count} channels · ${cache.programme_count} programmes · refreshed ${cache.refreshed_at}${cache.last_error ? ' · ' + cache.last_error : ''}`
+    : 'No external XMLTV source connected. Enter its file URL and import it.';
+}
+async function loadExternalXmltv() {
+  try {
+    const result = await persistentRequest('/api/xtream/epg/external');
+    document.getElementById('external-xmltv-url').value = result.cache?.url || '';
+    showExternalXmltvStatus(result.cache || {});
+  } catch (err) { document.getElementById('external-xmltv-status').textContent = err.message; }
+}
+async function refreshExternalXmltv(button) {
+  if (button.disabled) return;
+  const input = document.getElementById('external-xmltv-url');
+  button.disabled = true; input.disabled = true;
+  button.textContent = 'Importing XMLTV…';
+  document.getElementById('external-xmltv-status').textContent = 'Downloading and indexing the guide…';
+  try {
+    const result = await persistentRequest('/api/xtream/epg/external', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:input.value.trim()})});
+    showExternalXmltvStatus(result.cache || {});
+    await loadEpgLinkSuggestions();
+  } catch (err) { document.getElementById('external-xmltv-status').textContent = `Import failed: ${err.message}`; }
+  finally { button.disabled = false; input.disabled = false; button.textContent = 'Import / Refresh XMLTV'; }
+}
+
 async function refreshEpgLinkIndex(button) {
   button.disabled = true;
   button.textContent = 'Refreshing EPG links…';
@@ -158,7 +192,7 @@ async function loadEpgLinkSuggestions() {
       <div aria-hidden="true"></div>
       <div class="persistent-row-main"><strong>${escHtml(channel.channel_name)}</strong>
         <div class="persistent-row-meta">${channel.candidates.length ? 'Possible guide links for review:' : 'No close XMLTV name match found.'}</div>
-        ${channel.candidates.map((item, index) => `<div class="persistent-row-meta">${escHtml(item.display_name)} · XMLTV ID ${escHtml(item.guide_id)} · similarity ${Math.round(item.similarity * 100)}% · ${item.provider_programmes} provider programmes
+        ${channel.candidates.map((item, index) => `<div class="persistent-row-meta">${escHtml(item.display_name)} · XMLTV ID ${escHtml(item.guide_id)} · similarity ${Math.round(item.similarity * 100)}% · ${escHtml(item.source || 'XMLTV feed')} · ${item.provider_programmes} programmes
           <button class="btn btn-secondary" type="button" onclick="applyEpgLink(${channel.persistent_id}, ${index})">Use this guide</button></div>`).join('')}
       </div>
     </article>`).join('') : '<div class="status-muted">Every enabled persistent channel currently has cached programmes.</div>';
@@ -614,7 +648,7 @@ async function savePersistentForm(mode, id) {
     document.getElementById('persistent-editor').innerHTML = '';
     await loadPersistentChannels();
     showToast(`${data.channel.display_name} saved`, 'success');
-    if (data.channel.enabled) {
+    if (data.channel.enabled && !String(data.channel.epg_source_id || '').startsWith('xmltv:')) {
       try {
         const guide = await persistentRequest('/api/xtream/epg/refresh', {method:'POST'});
         showToast(`XMLTV guide updated: ${guide.programmes} programmes`, guide.failed ? 'warning' : 'success');
@@ -630,7 +664,7 @@ async function setPersistentEnabled(id, enabled) {
     await persistentRequest(`/api/xtream/persistent-channels/${id}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled})});
     await loadPersistentChannels();
     showToast(`Persistent channel ${enabled ? 'enabled' : 'disabled'}`, 'success');
-    if (enabled) await persistentRequest('/api/xtream/epg/refresh', {method:'POST'});
+    if (enabled && !String(_persistentChannels.find(c => c.id === id)?.epg_source_id || '').startsWith('xmltv:')) await persistentRequest('/api/xtream/epg/refresh', {method:'POST'});
   } catch (err) { persistentError(err.message); }
 }
 
@@ -648,5 +682,6 @@ async function deletePersistentChannel(id) {
 loadPersistentFavoriteTeams().then(loadPersistentChannels);
 loadPersistentChannelCacheStatus();
 loadEpgLinkSuggestions();
+loadExternalXmltv();
 </script>
 {% endblock %}

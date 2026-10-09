@@ -184,6 +184,28 @@ def api_xtream_epg_links_refresh():
         return _safe_error(exc, 502)
 
 
+@bp.route("/api/xtream/epg/external", methods=["GET", "POST"])
+def api_external_xmltv():
+    from server.services import external_xmltv
+    from xtream_accounts import load_accounts
+    if not db_exists(): return _read_database_error()
+    try:
+        with get_conn() as conn:
+            if request.method == "GET":
+                return jsonify(status="success", cache=external_xmltv.status(conn))
+            payload = request.get_json(silent=True) or {}
+            if not isinstance(payload, dict):
+                raise ValueError("Expected a JSON object")
+            accounts = load_accounts(conn)
+            cache = external_xmltv.refresh(conn, payload.get("url"), accounts)
+            programmes = external_xmltv.apply_selected(conn, accounts)
+            return jsonify(status="success", cache=cache, programmes=programmes)
+    except ValueError as exc:
+        return jsonify(status="error", message=str(exc)), 400
+    except Exception as exc:
+        return _safe_error(exc, 502)
+
+
 @bp.route("/m3u/channels")
 @bp.route("/xmltv/channels")
 def channels_lineup():
@@ -657,6 +679,10 @@ def api_xtream_persistent_channels():
                 notes=payload.get("notes"),
                 enabled=payload.get("enabled", True),
             )
+        if str(channel.get("epg_source_id") or "").startswith("xmltv:"):
+            from server.services.external_xmltv import apply_selected
+            with get_conn() as conn:
+                apply_selected(conn)
         log(
             f"Added persistent Xtream channel id={channel['id']} stream_id={channel['stream_id']}",
             "INFO",
@@ -687,6 +713,9 @@ def api_xtream_persistent_channel(persistent_id):
             if not isinstance(payload, dict):
                 raise PersistentChannelError("Expected a JSON object")
             channel = update_channel(conn, persistent_id, payload)
+            if str(channel.get("epg_source_id") or "").startswith("xmltv:"):
+                from server.services.external_xmltv import apply_selected
+                apply_selected(conn)
         log(f"Updated persistent Xtream channel id={persistent_id}", "INFO")
         return jsonify({"status": "success", "channel": channel})
     except Exception as exc:

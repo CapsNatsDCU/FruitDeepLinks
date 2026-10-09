@@ -209,6 +209,14 @@ def refresh_epg(conn, client, accounts=()):
     channels = list_channels(conn, enabled_only=True)
     if not channels:
         return {"channels": 0, "programmes": 0, "failed": 0}
+    from server.services import external_xmltv
+    external_xmltv.refresh_if_due(conn, accounts)
+    external_count = external_xmltv.apply_selected(conn, accounts)
+    external_channels = [c for c in channels if str(c.get("epg_source_id") or "").startswith(external_xmltv.PREFIX)]
+    channels = [c for c in channels if c not in external_channels]
+    if not channels:
+        return {"channels": len(external_channels), "programmes": external_count,
+                "failed": sum(not cached_programmes(conn, c) for c in external_channels)}
     wanted = {str(provider_guide_id(c)) for c in channels if provider_guide_id(c)}
     discovered = {}
     try:
@@ -221,7 +229,8 @@ def refresh_epg(conn, client, accounts=()):
             replace_snapshot(conn, discovered, accounts)
         except ValueError:
             pass
-    totals = {"channels": len(channels), "programmes": 0, "failed": 0}
+    totals = {"channels": len(channels) + len(external_channels), "programmes": external_count,
+              "failed": sum(not cached_programmes(conn, c) for c in external_channels)}
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for channel in channels:
         source_id = str(provider_guide_id(channel) or "")

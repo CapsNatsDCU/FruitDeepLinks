@@ -34,7 +34,11 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
         if "no such table" not in str(exc).lower():
             raise
         row = None
-    return dict(row) if row else {"refreshed_at": None, "channel_count": 0}
+    from server.services.external_xmltv import status as external_status
+    external = external_status(conn)
+    provider = dict(zip(("refreshed_at", "channel_count"), row)) if row else {"refreshed_at": None, "channel_count": 0}
+    return {"refreshed_at": max(provider["refreshed_at"] or "", external.get("refreshed_at") or "") or None,
+            "channel_count": provider["channel_count"] + external.get("channel_count", 0)}
 
 
 def replace_snapshot(conn: sqlite3.Connection, discovered: dict, accounts=()) -> dict[str, Any]:
@@ -66,7 +70,7 @@ def replace_snapshot(conn: sqlite3.Connection, discovered: dict, accounts=()) ->
     return {"refreshed_at": refreshed_at, "channel_count": len(rows)}
 
 
-def entries(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def _provider_entries(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     try:
         rows = conn.execute("SELECT guide_id,display_names_json,programme_count FROM xtream_epg_link_index ORDER BY guide_id")
         return [{"guide_id": row[0], "display_names": json.loads(row[1]),
@@ -75,6 +79,11 @@ def entries(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         if "no such table" not in str(exc).lower():
             raise
         return []
+
+
+def entries(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    from server.services.external_xmltv import entries as external_entries
+    return _provider_entries(conn) + external_entries(conn)
 
 
 _NOISE = {"raw", "hd", "fhd", "uhd", "sd", "4k", "1080p", "720p"}
@@ -96,7 +105,7 @@ def search(conn: sqlite3.Connection, query: str, *, limit: int = 10) -> list[dic
     source_tokens = set(source_name.split())
     source_numbers = set(re.findall(r"\d+", source_name))
     indexed = {item["guide_id"]: item for item in entries(conn)}
-    names = [(item["guide_id"], name, "XMLTV feed")
+    names = [(item["guide_id"], name, item.get("source", "Provider XMLTV feed"))
              for item in indexed.values() for name in item["display_names"]]
     names += [(item["epg_channel_id"], item["name"], item["category_name"])
               for item in all_channels(conn) if item.get("epg_channel_id")]
@@ -156,7 +165,7 @@ def suggestions(conn: sqlite3.Connection, *, limit: int = 5) -> list[dict[str, A
             if score >= 0.65 and matched_name:
                 ranked.append({"guide_id": entry["guide_id"], "display_name": matched_name,
                                "similarity": round(score, 2),
-                               "provider_programmes": entry["programme_count"]})
+                               "provider_programmes": entry["programme_count"], "source": entry.get("source", "Provider XMLTV feed")})
         ranked.sort(key=lambda item: (-item["similarity"], item["display_name"].casefold(), item["guide_id"]))
         result.append({"persistent_id": channel["id"], "channel_name": channel["display_name"],
                        "current_epg_channel_id": channel.get("epg_source_id") or channel.get("epg_channel_id"),
