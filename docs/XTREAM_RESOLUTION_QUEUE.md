@@ -2,7 +2,7 @@
 
 Open **Persistent Channels** and choose **Queue test** beside a configured channel or a cached channel search result. Requests are saved in Fruit's database, so closing the browser or restarting Fruit does not discard them. You do not have to save a search result as a permanent channel to queue it.
 
-The **Resolution check queue**, above Configured Channels, shows manual tests and the next 25 automatic checks in worker order. It shows Waiting, Testing, Completed, Failed, and Cancelled requests. Completed requests show the measured dimensions and frame rate; these measurements also appear beside the channel. Cancel a waiting request using **Cancel**. A short sample already running finishes before another check starts. Choose **Queue test** again to retry a failed or completed request. Duplicate clicks on waiting/running requests do not add more work. The queue holds up to 200 active requests and retains 50 recent finished requests.
+The **Resolution check queue**, at the bottom of Persistent Channels, shows manual tests and the next 25 automatic checks in worker order. It shows Waiting, Testing, Completed, Failed, and Cancelled requests. Completed requests show the measured dimensions and frame rate; these measurements also appear beside the channel. Cancel a waiting request using **Cancel**. A short sample already running finishes before another check starts. Choose **Queue test** again to retry a failed or completed request. Duplicate clicks on waiting/running requests do not add more work. The queue holds up to 200 active requests and retains 50 recent finished requests.
 
 Check order:
 

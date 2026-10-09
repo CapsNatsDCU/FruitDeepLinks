@@ -75,15 +75,6 @@
     <div id="persistent-pagination" class="persistent-toolbar" style="margin-bottom:0"></div>
   </div>
   <div id="persistent-editor"></div>
-<section class="persistent-browser" aria-labelledby="quality-queue-title">
-  <h2 id="quality-queue-title">Resolution check queue</h2>
-  <p class="persistent-intro">Choose Queue test on saved channels or search results. Manual requests are saved and checked in order, even after you close this page. Newly added permanent channels are checked next, newest first, ahead of routine background checks. Successful queued checks are spaced 10 seconds apart, with a 10-second pause after activity. Playback and recordings take priority. Checks need an idle, healthy account marked “Reserved for Fruit” in Settings.</p>
-  <div id="quality-queue-status" class="status-muted" role="status" aria-live="polite">Loading queued checks…</div>
-  <h3>Manual tests</h3>
-  <div id="quality-queue-list" class="persistent-list persistent-epg-results"></div>
-  <h3>Automatic checks next (up to 25)</h3>
-  <div id="quality-automatic-list" class="persistent-list persistent-epg-results"></div>
-</section>
   <h3 style="font-size:14px;margin:16px 0 10px">Configured Channels</h3>
   <p class="status-muted">Resolution updates automatically when playback or a recording starts, using the existing stream. Queue test checks channels without playing them. Queued checks wait for activity to finish, then use a 10-second cooldown and a healthy free account marked “Reserved for Fruit”. Failed checks pause for two minutes.</p>
   <div id="persistent-list" class="persistent-list" aria-live="polite"><span class="status-muted">Loading persistent channels…</span></div>
@@ -116,6 +107,15 @@
   </div>
   <div id="epg-link-index-status" class="status-muted" role="status" aria-live="polite">Checking saved EPG links…</div>
   <div id="epg-link-suggestions" class="persistent-list"></div>
+</section>
+<section class="card" aria-labelledby="quality-queue-title">
+  <h2 id="quality-queue-title">Resolution check queue</h2>
+  <p class="persistent-intro">Choose Queue test on saved channels or search results. Manual requests are saved and checked in order, even after you close this page. Newly added permanent channels are checked next, newest first, ahead of routine background checks. Successful queued checks are spaced 10 seconds apart, with a 10-second pause after activity. Playback and recordings take priority. Checks need an idle, healthy account marked “Reserved for Fruit” in Settings.</p>
+  <div id="quality-queue-status" class="status-muted" role="status" aria-live="polite">Loading queued checks…</div>
+  <h3>Manual tests</h3>
+  <div id="quality-queue-list" class="persistent-list persistent-epg-results"></div>
+  <h3>Automatic checks next (up to 25)</h3>
+  <div id="quality-automatic-list" class="persistent-list persistent-epg-results"></div>
 </section>
 {% endblock %}
 
@@ -165,7 +165,6 @@ async function queueQualityTest(kind, identifier, button) {
       method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({category_id:stream.category_id,stream_id:stream.stream_id})});
     showToast(`Queued ${result.request.channel_name}`, 'success');
     await loadQualityQueue();
-    document.getElementById('quality-queue-title').scrollIntoView({behavior:'smooth',block:'nearest'});
   } catch (err) { persistentError(`Could not queue check: ${err.message}`); button.disabled = false; button.textContent = 'Queue test'; }
 }
 async function cancelQualityTest(id, button) {
