@@ -38,6 +38,10 @@ class ChannelNumberConflict(PersistentChannelError):
     pass
 
 
+class StaleChannelLineup(PersistentChannelError):
+    pass
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -246,6 +250,47 @@ def list_channels(conn: sqlite3.Connection, *, enabled_only: bool = False) -> li
         return result
     finally:
         conn.row_factory = previous_factory
+
+
+def reorder_channels(conn: sqlite3.Connection, order: Any) -> list[dict[str, Any]]:
+    """Move channels between their existing numbers in one atomic lineup edit."""
+    ensure_schema(conn)
+    if not isinstance(order, list) or not all(isinstance(item, dict) for item in order):
+        raise PersistentChannelError("Expected the complete ordered channel list")
+    conn.execute("SAVEPOINT persistent_channel_reorder")
+    try:
+        rows = conn.execute(
+            "SELECT id,channel_number FROM xtream_persistent_channels "
+            "ORDER BY CAST(channel_number AS REAL),channel_number,display_name"
+        ).fetchall()
+        current = [(row[0], row[1]) for row in rows]
+        if len(order) != len(current):
+            raise StaleChannelLineup("The channel list changed. Refresh it and try again")
+        by_id = dict(current)
+        ids = [item.get("id") for item in order]
+        if any(type(channel_id) is not int for channel_id in ids) or set(ids) != set(by_id):
+            raise StaleChannelLineup("The channel list changed. Refresh it and try again")
+        if any(item.get("channel_number") != by_id[item["id"]] for item in order):
+            raise StaleChannelLineup("Channel numbers changed. Refresh the list and try again")
+        numbers = [number for _, number in current]
+        changed = [(item["id"], numbers[index]) for index, item in enumerate(order)
+                   if by_id[item["id"]] != numbers[index]]
+        now = utc_now()
+        # SQLite checks the unique index after each row update. Vacate the
+        # affected numbers before assigning them to their new owners.
+        for channel_id, _ in changed:
+            conn.execute("UPDATE xtream_persistent_channels SET channel_number=? WHERE id=?",
+                         (f"__reordering_{channel_id}__", channel_id))
+        for channel_id, number in changed:
+            conn.execute("UPDATE xtream_persistent_channels SET channel_number=?,updated_at=? WHERE id=?",
+                         (number, now, channel_id))
+        conn.execute("RELEASE SAVEPOINT persistent_channel_reorder")
+        conn.commit()
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT persistent_channel_reorder")
+        conn.execute("RELEASE SAVEPOINT persistent_channel_reorder")
+        raise
+    return list_channels(conn)
 
 
 def get_channel(conn: sqlite3.Connection, channel_id: int) -> Optional[dict[str, Any]]:

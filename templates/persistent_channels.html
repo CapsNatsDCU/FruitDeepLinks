@@ -3,6 +3,7 @@
 {% block title %}Persistent Channels — FruitDeepLinks{% endblock %}
 {% block page_title %}Persistent Channels{% endblock %}
 {% block page_subtitle %}<p class="subtitle">Browse Xtream channels and manage your persistent lineup.</p>{% endblock %}
+{% block head_extra %}<script src="/static/vendor/sortable.min.js"></script>{% endblock %}
 
 {% block extra_style %}
 .favorite-empty { padding:20px; text-align:center; color:var(--text-muted); border:1px dashed var(--border); border-radius:var(--radius); }
@@ -19,6 +20,12 @@
 .persistent-row.external-station-row { grid-template-columns:minmax(0,1fr) auto; }
 .external-schedule { max-height:300px; overflow-y:auto; }
 .persistent-row { display:grid; grid-template-columns:44px minmax(0,1fr) auto; gap:10px; align-items:center; padding:10px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg-inset); }
+.persistent-row.number-mode { grid-template-columns:32px 76px 44px minmax(0,1fr) auto; }
+.persistent-row.sortable-ghost { opacity:.4; }
+.persistent-drag-handle { border:0; background:transparent; color:var(--text-muted); font-size:20px; cursor:grab; touch-action:none; padding:8px 0; }
+.persistent-drag-handle:active { cursor:grabbing; }
+.persistent-channel-number { width:100%; padding:7px 5px; border:1px solid var(--border); border-radius:6px; background:var(--bg-card); color:var(--text); font:inherit; text-align:center; }
+.persistent-channel-number:focus { outline:2px solid var(--accent); outline-offset:1px; }
 .persistent-row img { width:40px; height:40px; border-radius:5px; object-fit:contain; background:var(--bg-card); }
 .persistent-row-main { min-width:0; overflow-wrap:anywhere; }
 .persistent-row-meta { color:var(--text-muted); font-size:11px; margin-top:3px; }
@@ -35,6 +42,7 @@
 .persistent-links { display:flex; gap:14px; flex-wrap:wrap; margin-top:10px; font-size:12px; }
 @media (max-width: 640px) {
   .persistent-row { grid-template-columns:36px minmax(0,1fr); }
+  .persistent-row.number-mode { grid-template-columns:28px 68px 36px minmax(0,1fr); }
   .persistent-row img { width:32px; height:32px; }
   .persistent-actions { grid-column:1/-1; justify-content:flex-start; }
   .persistent-actions .btn { flex:1; justify-content:center; min-width:80px; }
@@ -77,7 +85,10 @@
     <div id="persistent-pagination" class="persistent-toolbar" style="margin-bottom:0"></div>
   </div>
   <div id="persistent-editor"></div>
-  <h3 style="font-size:14px;margin:16px 0 10px">Configured Channels</h3>
+  <div class="persistent-toolbar" style="margin-bottom:0"><h3 style="font-size:14px;margin:16px 0 10px">Configured Channels</h3>
+    <button class="btn btn-secondary" id="persistent-number-mode" type="button" aria-pressed="false" onclick="togglePersistentNumberMode()">Edit channel order</button>
+    <span id="persistent-number-status" class="status-muted" role="status" aria-live="polite"></span>
+  </div>
   <p class="status-muted">Resolution updates automatically when playback or a recording starts, using the existing stream. Queue test checks channels without playing them. Queued checks wait for activity to finish, then use a 10-second cooldown and a healthy free account marked “Reserved for Fruit”. Failed checks pause for two minutes.</p>
   <div id="persistent-list" class="persistent-list" aria-live="polite"><span class="status-muted">Loading persistent channels…</span></div>
 </section>
@@ -147,6 +158,11 @@ let _externalStationSelected = null;
 let _qualityQueueRequests = [];
 let _qualityQueueTimer = null;
 let _qualityQueueLoading = false;
+let _persistentNumberMode = false;
+let _persistentNumberEditing = false;
+let _persistentOrderSaving = false;
+let _persistentDragging = false;
+let _persistentSortable = null;
 
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -513,6 +529,7 @@ async function persistentRequest(url, options = {}) {
 async function loadPersistentChannels() {
   try {
     const data = await persistentRequest('/api/xtream/persistent-channels');
+    if (_persistentNumberEditing || _persistentOrderSaving || _persistentDragging || hasUnsavedPersistentNumbers()) return;
     _persistentChannels = Array.isArray(data.channels) ? data.channels : [];
     renderPersistentChannels();
     persistentError('');
@@ -561,28 +578,130 @@ function persistentStatusLabel(channel) {
   return ({available:'Available', unavailable:'Unavailable', needs_attention:'Needs attention', unknown:'Not checked'})[channel.availability_status] || 'Not checked';
 }
 
+function hasUnsavedPersistentNumbers() {
+  if (!_persistentNumberMode) return false;
+  return Array.from(document.getElementById('persistent-list').querySelectorAll('[data-channel-id]')).some(row => {
+    const channel = _persistentChannels.find(item => item.id === Number(row.dataset.channelId));
+    const input = row.querySelector('.persistent-channel-number');
+    return channel && input && input.value.trim() !== channel.channel_number;
+  });
+}
+
 function renderPersistentChannels() {
   const list = document.getElementById('persistent-list');
+  if (_persistentSortable) { _persistentSortable.destroy(); _persistentSortable = null; }
   if (!_persistentChannels.length) {
     list.innerHTML = '<div class="favorite-empty"><strong>No persistent channels configured.</strong><br>Browse an Xtream category to add one.</div>';
     return;
   }
-  list.innerHTML = _persistentChannels.map(channel => `<article class="persistent-row">
+  list.innerHTML = _persistentChannels.map(channel => `<article class="persistent-row${_persistentNumberMode ? ' number-mode' : ''}" data-channel-id="${channel.id}">
+    ${_persistentNumberMode ? `<button class="persistent-drag-handle" type="button" aria-label="Drag ${escHtml(channel.display_name)} to rearrange" title="Drag to rearrange">⋮⋮</button>
+      <input class="persistent-channel-number" type="text" inputmode="decimal" aria-label="Channel number for ${escHtml(channel.display_name)}" value="${escHtml(channel.channel_number)}" onfocus="_persistentNumberEditing=true" onblur="_persistentNumberEditing=false" onkeydown="if(event.key==='Enter'){event.preventDefault();savePersistentNumber(${channel.id}, this)}">` : ''}
     ${channel.logo ? `<img src="${escHtml(String(channel.logo))}" alt="">` : '<div aria-hidden="true"></div>'}
     <div class="persistent-row-main">
-      <strong>${escHtml(channel.channel_number)} | ${escHtml(channel.display_name)}</strong>
+      <strong>${_persistentNumberMode ? '' : escHtml(channel.channel_number) + ' | '}${escHtml(channel.display_name)}</strong>
       <div style="margin-top:4px"><span class="persistent-status ${escHtml(channel.availability_status)}">${persistentStatusLabel(channel)}</span></div>
       <div class="persistent-row-meta">${escHtml(channel.category_name || channel.category_id)} · stream_id ${escHtml(channel.stream_id)}${channel.favorite_team ? ` · Team: ${escHtml(channel.favorite_team)}` : ''}</div>
       <div class="persistent-row-meta">${persistentQualityText(channel)}</div>
       ${channel.unavailable_reason ? `<div class="persistent-row-meta" style="color:var(--warning)">${escHtml(channel.unavailable_reason)}</div>` : ''}
     </div>
     <div class="persistent-actions">
+      ${_persistentNumberMode ? `<button class="btn btn-secondary" type="button" onclick="savePersistentNumber(${channel.id}, this.parentElement.parentElement.querySelector('.persistent-channel-number'))">Save number</button>` : ''}
       ${qualityQueueButton(channel, 'configured', channel.id)}
       <button class="btn btn-secondary" type="button" onclick="showPersistentEdit(${channel.id})">Edit</button>
       <button class="btn btn-secondary" type="button" onclick="setPersistentEnabled(${channel.id}, ${channel.enabled ? 'false' : 'true'})">${channel.enabled ? 'Disable' : 'Enable'}</button>
       <button class="btn btn-danger" type="button" onclick="deletePersistentChannel(${channel.id})">Delete</button>
     </div>
   </article>`).join('');
+  if (_persistentNumberMode && typeof Sortable !== 'undefined') {
+    _persistentSortable = new Sortable(list, {animation:150, handle:'.persistent-drag-handle',
+      ghostClass:'sortable-ghost', onStart:() => { _persistentDragging = true; },
+      onEnd:() => { _persistentDragging = false; savePersistentOrder(); }});
+  }
+}
+
+function togglePersistentNumberMode() {
+  if (_persistentOrderSaving) return;
+  _persistentNumberMode = !_persistentNumberMode;
+  _persistentNumberEditing = false;
+  const button = document.getElementById('persistent-number-mode');
+  button.textContent = _persistentNumberMode ? 'Done editing order' : 'Edit channel order';
+  button.setAttribute('aria-pressed', String(_persistentNumberMode));
+  document.getElementById('persistent-number-status').textContent = _persistentNumberMode
+    ? 'Enter a number and select Save number, or drag the grip to rearrange channels.' : '';
+  persistentError('');
+  renderPersistentChannels();
+}
+
+async function savePersistentNumber(id, input) {
+  if (_persistentOrderSaving || !input) return;
+  const channel = _persistentChannels.find(item => item.id === id);
+  if (!channel) return;
+  const number = input.value.trim();
+  if (number === channel.channel_number) return;
+  _persistentOrderSaving = true;
+  const button = input.parentElement.querySelector('.persistent-actions button');
+  if (button) { button.disabled = true; button.textContent = 'Saving…'; }
+  document.getElementById('persistent-number-status').textContent = 'Saving channel number…';
+  try {
+    const result = await persistentRequest(`/api/xtream/persistent-channels/${id}`, {method:'PATCH',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({channel_number:number})});
+    channel.channel_number = result.channel.channel_number;
+    _persistentChannels.sort((a, b) => Number(a.channel_number) - Number(b.channel_number)
+      || a.channel_number.localeCompare(b.channel_number) || a.display_name.localeCompare(b.display_name));
+    _persistentNumberEditing = false;
+    document.getElementById('persistent-number-status').textContent = `Channel moved to ${result.channel.channel_number}.`;
+    showToast('Channel number saved', 'success');
+    renderPersistentChannels();
+  } catch (err) {
+    persistentError(`Could not save channel number: ${err.message}`);
+    document.getElementById('persistent-number-status').textContent = 'Channel number was not saved.';
+    if (button) { button.disabled = false; button.textContent = 'Save number'; }
+  } finally { _persistentOrderSaving = false; }
+}
+
+async function savePersistentOrder() {
+  if (_persistentOrderSaving) { renderPersistentChannels(); return; }
+  const list = document.getElementById('persistent-list');
+  const rows = Array.from(list.querySelectorAll('[data-channel-id]'));
+  const order = rows.map(row => {
+    const channel = _persistentChannels.find(item => item.id === Number(row.dataset.channelId));
+    return {id:channel.id, channel_number:channel.channel_number};
+  });
+  if (rows.some(row => {
+    const channel = _persistentChannels.find(item => item.id === Number(row.dataset.channelId));
+    return row.querySelector('.persistent-channel-number').value.trim() !== channel.channel_number;
+  })) {
+    persistentError('Save the edited channel number before dragging.');
+    renderPersistentChannels();
+    return;
+  }
+  if (order.every((item, index) => item.id === _persistentChannels[index].id)) return;
+  _persistentOrderSaving = true;
+  let needsRefresh = false;
+  let failureMessage = '';
+  document.getElementById('persistent-number-mode').disabled = true;
+  document.getElementById('persistent-number-status').textContent = 'Saving channel order…';
+  try {
+    const result = await persistentRequest('/api/xtream/persistent-channels/reorder', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({order})});
+    _persistentChannels = result.channels;
+    persistentError('');
+    document.getElementById('persistent-number-status').textContent = 'Channel order saved.';
+    showToast('Channel order saved', 'success');
+  } catch (err) {
+    failureMessage = `Could not save channel order: ${err.message}`;
+    persistentError(failureMessage);
+    document.getElementById('persistent-number-status').textContent = 'Channel order was not saved.';
+    needsRefresh = err.code === 'stale_channel_lineup';
+  } finally {
+    _persistentOrderSaving = false;
+    document.getElementById('persistent-number-mode').disabled = false;
+    if (needsRefresh) {
+      await loadPersistentChannels();
+      persistentError(failureMessage);
+    } else renderPersistentChannels();
+  }
 }
 
 async function openPersistentBrowser() {

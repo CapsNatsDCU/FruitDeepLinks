@@ -17,6 +17,7 @@ from server.services.xtream_persistent import (
     ChannelNumberConflict,
     DuplicatePersistentChannel,
     PersistentChannelError,
+    StaleChannelLineup,
     create_channel,
     delete_channel,
     ensure_schema as ensure_persistent_schema,
@@ -24,6 +25,7 @@ from server.services.xtream_persistent import (
     list_channels,
     page_streams,
     quality_for_stream,
+    reorder_channels,
     render_m3u,
     render_xmltv,
     save_stream_quality,
@@ -370,6 +372,8 @@ def _read_database_error():
 
 
 def _safe_error(exc: Exception, status: int = 400):
+    if isinstance(exc, StaleChannelLineup):
+        return jsonify({"status": "error", "message": str(exc), "code": "stale_channel_lineup"}), 409
     if isinstance(exc, ChannelNumberConflict):
         return jsonify({"status": "error", "message": str(exc), "code": "channel_number_conflict"}), 409
     if isinstance(exc, DuplicatePersistentChannel):
@@ -871,6 +875,20 @@ def api_xtream_persistent_channels():
             "INFO",
         )
         return jsonify({"status": "success", "channel": channel}), 201
+    except Exception as exc:
+        return _safe_error(exc)
+
+
+@bp.route("/api/xtream/persistent-channels/reorder", methods=["POST"])
+def api_xtream_persistent_channels_reorder():
+    _ensure_database()
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"status": "error", "message": "Expected a JSON object"}), 400
+    try:
+        with get_conn() as conn:
+            channels = reorder_channels(conn, payload.get("order"))
+        return jsonify({"status": "success", "channels": channels})
     except Exception as exc:
         return _safe_error(exc)
 

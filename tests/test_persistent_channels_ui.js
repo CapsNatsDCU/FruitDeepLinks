@@ -69,3 +69,48 @@ test('add draft saves the selected stream after search results reorder or disapp
   assert.equal(p.run('capturedSave.category_id'), 'sports');
   assert.equal(p.run('capturedSave.display_name'), 'Unsaved name');
 });
+
+test('channel order mode puts the number input before the logo and saves an inline edit', async () => {
+  const p = page();
+  p.run(`_persistentChannels[0].logo = '/static/logo.png'; togglePersistentNumberMode();`);
+  const html = p.document.getElementById('persistent-list').innerHTML;
+  assert.ok(html.indexOf('class="persistent-channel-number"') < html.indexOf('<img src="/static/logo.png"'));
+  assert.equal(p.document.getElementById('persistent-number-mode').textContent, 'Done editing order');
+  p.run(`
+    const inlineInput = {value:'8', parentElement:{querySelector(){ return {disabled:false,textContent:''}; }}};
+    persistentRequest = async (url, options) => {
+      savedNumberUrl = url;
+      savedNumberPayload = JSON.parse(options.body);
+      return {channel:{..._persistentChannels[0], channel_number:'8'}};
+    };
+  `);
+  await p.run('savePersistentNumber(7, inlineInput)');
+  assert.equal(p.run('savedNumberUrl'), '/api/xtream/persistent-channels/7');
+  assert.equal(p.run('savedNumberPayload.channel_number'), '8');
+  assert.equal(p.run('_persistentChannels[0].channel_number'), '8');
+});
+
+test('drag submits the complete channel order with original numbers', async () => {
+  const p = page();
+  const rows = [3, 1, 2].map(id => ({dataset:{channelId:String(id)},
+    querySelector() { return {value:{1:'2', 2:'7.5', 3:'20'}[id]}; }}));
+  p.document.getElementById('persistent-list').querySelectorAll = () => rows;
+  p.run(`
+    _persistentNumberMode = true;
+    _persistentChannels = [
+      {id:1,channel_number:'2',display_name:'One'},
+      {id:2,channel_number:'7.5',display_name:'Two'},
+      {id:3,channel_number:'20',display_name:'Three'}
+    ];
+    persistentRequest = async (url, options) => {
+      savedOrderUrl = url;
+      savedOrder = JSON.parse(options.body).order;
+      return {channels:_persistentChannels};
+    };
+  `);
+  await p.run('savePersistentOrder()');
+  assert.equal(p.run('savedOrderUrl'), '/api/xtream/persistent-channels/reorder');
+  assert.deepEqual(JSON.parse(JSON.stringify(p.run('savedOrder'))), [
+    {id:3,channel_number:'20'}, {id:1,channel_number:'2'}, {id:2,channel_number:'7.5'},
+  ]);
+});
