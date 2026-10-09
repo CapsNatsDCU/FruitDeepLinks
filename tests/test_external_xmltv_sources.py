@@ -117,6 +117,27 @@ class MultipleSourcesTests(unittest.TestCase):
             xmltv.refresh_if_due(self.conn)
         self.assertEqual([one,two],[call.kwargs['source_id'] for call in refresh.call_args_list])
 
+    def test_search_filters_provider_imports_and_named_sources_before_pagination(self):
+        one,two=self.source(),self.source('Satellite','http://guide.example/satellite.xml')
+        self.refresh(one);self.refresh(two)
+        index.replace_snapshot(self.conn,{f'provider{i}':{'names':[f'ESPN guide {i:03}'],'programme_count':5} for i in range(60)})
+        from server.services.xtream_channel_cache import replace_snapshot
+        replace_snapshot(self.conn,[('10','Sports')],[('10','123','ESPN cache alias','espn cache alias',None,'cached-guide','ts')])
+        client=create_app().test_client()
+        with patch('requests.sessions.Session.request',side_effect=AssertionError('Filters must stay offline')):
+            responses={source:client.get('/api/xtream/epg/links/search?mode=all&source='+source).get_json() for source in ('all','provider','external','xmltv:1','xmltv:2')}
+            page=client.get('/api/xtream/epg/links/search?mode=all&source=provider&offset=50').get_json()
+            for invalid in ('missing','xmltv:0','xmltv:999','xmltv:-1','xmltv:abc'):
+                self.assertEqual(400,client.get('/api/xtream/epg/links/search?mode=all&source='+invalid).status_code)
+        self.assertEqual(63,responses['all']['total'])
+        self.assertEqual(61,responses['provider']['total'])
+        self.assertEqual(11,len(page['candidates']))
+        self.assertEqual(2,responses['external']['total'])
+        self.assertEqual(['xmltv:1:ESPN.us'],[c['guide_id'] for c in responses['xmltv:1']['candidates']])
+        self.assertEqual(['xmltv:2:ESPN.us'],[c['guide_id'] for c in responses['xmltv:2']['candidates']])
+        self.assertFalse(any(c['guide_id'].startswith('xmltv:') for c in responses['provider']['candidates']+page['candidates']))
+        self.assertIsNone(get_channel(self.conn,self.channel['id'])['epg_source_id'])
+
     def test_external_preference_reorders_only_matching_candidates_and_preserves_selection(self):
         one=self.source();self.refresh(one,name='ESPN Sports')
         index.replace_snapshot(self.conn,{'provider':{'names':['ESPN'],'programme_count':5}})

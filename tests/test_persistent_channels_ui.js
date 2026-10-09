@@ -114,3 +114,30 @@ test('drag submits the complete channel order with original numbers', async () =
     {id:3,channel_number:'20'}, {id:1,channel_number:'2'}, {id:2,channel_number:'7.5'},
   ]);
 });
+
+
+test('guide source changes reset pagination and preserve unsaved selection', async () => {
+  const p = page();
+  p.run(`
+    showPersistentEdit(7);
+    const target = document.getElementById('persistent-form-epg-links'); target.isConnected = true;
+    document.getElementById('persistent-form-epg-query').value = 'ESPN';
+    document.getElementById('persistent-form-epg-mode').value = 'similar';
+    document.getElementById('persistent-form-epg-filter').value = 'all';
+    document.getElementById('persistent-form-epg-source').value = 'xmltv:1:chosen';
+    document.getElementById('persistent-form-name').value = 'Unsaved channel name';
+    document.getElementById('persistent-form-epg-search').isConnected = true;
+    const urls = [];
+    persistentRequest = async url => { urls.push(url); return {candidates:[], cache:{refreshed_at:'now'}}; };
+  `);
+  await p.run("findSetupEpgLinks(document.getElementById('persistent-form-epg-search'))");
+  await p.run("findSetupEpgLinks(document.getElementById('persistent-form-epg-search'), 50)");
+  p.run("document.getElementById('persistent-form-epg-filter').value = 'xmltv:2'");
+  await p.run("findSetupEpgLinks(document.getElementById('persistent-form-epg-search'), 50)");
+  assert.equal(new URL(p.run('urls[1]'), 'http://fixture').searchParams.get('offset'), '50');
+  const filtered = new URL(p.run('urls[2]'), 'http://fixture').searchParams;
+  assert.equal(filtered.get('source'), 'xmltv:2');
+  assert.equal(filtered.get('offset'), '0');
+  assert.equal(p.document.getElementById('persistent-form-epg-source').value, 'xmltv:1:chosen');
+  assert.equal(p.document.getElementById('persistent-form-name').value, 'Unsaved channel name');
+});

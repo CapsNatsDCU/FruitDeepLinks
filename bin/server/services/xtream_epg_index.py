@@ -102,7 +102,7 @@ def search(conn: sqlite3.Connection, query: str, *, limit: int = 10) -> list[dic
 
 
 def search_page(conn: sqlite3.Connection, query: str, *, mode: str = "similar",
-                limit: int = 50, offset: int = 0, prefer_external: bool = False) -> dict[str, Any]:
+                limit: int = 50, offset: int = 0, prefer_external: bool = False, source_filter: str = "all") -> dict[str, Any]:
     """Page saved guide identities, with explicit broader matching or full browsing."""
     from server.services.xtream_channel_cache import all_channels
     if mode not in {"similar", "broad", "all"}:
@@ -113,11 +113,22 @@ def search_page(conn: sqlite3.Connection, query: str, *, mode: str = "similar",
     source_name = _match_name(query)
     source_tokens = set(source_name.split())
     source_numbers = set(re.findall(r"\d+", source_name))
-    indexed = {item["guide_id"]: item for item in entries(conn)}
+    from server.services import external_xmltv
+    source_id = None
+    if source_filter not in {"all", "provider", "external"}:
+        match = re.fullmatch(r"xmltv:([1-9][0-9]*)", source_filter)
+        if not match or not external_xmltv.status(conn, int(match[1])):
+            raise ValueError("Choose all sources, provider guides, imported guides, or a saved XMLTV source")
+        source_id = int(match[1])
+    selected = _provider_entries(conn) if source_filter in {"all", "provider"} else []
+    if source_filter != "provider":
+        selected += external_xmltv.entries(conn, source_id)
+    indexed = {item["guide_id"]: item for item in selected}
     names = [(item["guide_id"], name, item.get("source", "Provider XMLTV feed"))
              for item in indexed.values() for name in item["display_names"]]
-    names += [(item["epg_channel_id"], item["name"], item["category_name"])
-              for item in all_channels(conn) if item.get("epg_channel_id")]
+    if source_filter in {"all", "provider"}:
+        names += [(item["epg_channel_id"], item["name"], item["category_name"])
+                  for item in all_channels(conn) if item.get("epg_channel_id")]
     ranked = {}
     for guide_id, name, source in names:
         candidate = _match_name(name)

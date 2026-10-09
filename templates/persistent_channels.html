@@ -12,7 +12,7 @@
 .persistent-intro { color:var(--text-muted); font-size:13px; line-height:1.5; max-width:900px; }
 .persistent-toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:end; margin:14px 0; }
 .persistent-toolbar input[type="url"] { background:var(--bg-inset); border:1px solid var(--border); border-radius:6px; color:var(--text); padding:7px 10px; font-size:13px; font-family:inherit; width:100%; }
-.persistent-toolbar [hidden] { display:none; }
+.persistent-toolbar[hidden], .persistent-toolbar [hidden] { display:none; }
 .persistent-toolbar label { flex:1; min-width:180px; }
 .persistent-browser { margin:12px 0 18px; padding:14px; background:var(--bg-inset); border:1px solid var(--border); border-radius:var(--radius); }
 .persistent-results, .persistent-list { display:flex; flex-direction:column; gap:8px; }
@@ -798,6 +798,34 @@ function favoriteTeamOptions(selected = '') {
   return `<option value="">No team association</option>${names.map(name => `<option value="${escHtml(name)}" ${name === selected ? 'selected' : ''}>${escHtml(name)}</option>`).join('')}`;
 }
 
+function setupEpgSourceOptions(sources = _externalSources) {
+  return '<option value="all">All sources</option><option value="provider">Provider guides only</option><option value="external">All imported XMLTV / zap2xml guides</option>' + sources.map(source => `<option value="xmltv:${source.id}">${escHtml(source.name)}</option>`).join('');
+}
+async function toggleSetupEpgSources(button) {
+  const panel = document.getElementById('persistent-form-epg-filter-panel');
+  panel.hidden = !panel.hidden;
+  button.setAttribute('aria-expanded', String(!panel.hidden));
+  if (panel.hidden) return;
+  const select = document.getElementById('persistent-form-epg-filter');
+  const status = document.getElementById('persistent-form-epg-filter-status');
+  button.disabled = true; select.disabled = true;
+  status.textContent = 'Loading saved sources…';
+  try {
+    const result = await persistentRequest('/api/xtream/epg/external/sources');
+    if (!panel.isConnected) return;
+    const selected = select.value;
+    const sources = result.sources || [];
+    // Keep a removed source selected until the operator picks its replacement.
+    select.innerHTML = setupEpgSourceOptions(sources) + (selected.startsWith('xmltv:') && !sources.some(source => `xmltv:${source.id}` === selected) ? `<option value="${escHtml(selected)}">Previously selected source (removed)</option>` : '');
+    select.value = selected;
+    status.textContent = 'Choose a source to filter results. Your guide selection stays unchanged until you save.';
+  } catch (err) { if (status.isConnected) status.textContent = `Could not load sources: ${err.message}`; }
+  finally {
+    if (button.isConnected) button.disabled = false;
+    if (select.isConnected) select.disabled = document.getElementById('persistent-form-epg-search').disabled;
+  }
+}
+
 function persistentFormHtml(values, mode) {
   return `<div class="persistent-form"><h3 style="margin:0 0 10px">${mode === 'add' ? 'Add Persistent Channel' : 'Edit Persistent Channel'}</h3>
     <div class="persistent-form-grid">
@@ -811,7 +839,12 @@ function persistentFormHtml(values, mode) {
         <div class="persistent-row-meta">If this channel has no guide, choose a link from a similar channel carrying the same schedule. Leave blank to use its own provider guide.</div>
         <div class="persistent-toolbar"><label>Search guide names or IDs<input id="persistent-form-epg-query" type="text" value="${escHtml((values.original_name || values.display_name || '').slice(0,512))}" maxlength="512" placeholder="Network, callsign, or guide ID" onkeydown="if(event.key==='Enter'){event.preventDefault();findSetupEpgLinks(document.getElementById('persistent-form-epg-search'))}"></label>
           <label>Match options<select id="persistent-form-epg-mode"><option value="similar">Similar names</option><option value="broad">Broader name matches</option><option value="all">All saved guides</option></select></label>
-          <button id="persistent-form-epg-search" class="btn btn-secondary" type="button" onclick="findSetupEpgLinks(this)">Find EPG links</button></div>
+          <button id="persistent-form-epg-search" class="btn btn-secondary" type="button" onclick="findSetupEpgLinks(this)">Find EPG links</button>
+          <button id="persistent-form-epg-filter-button" class="btn btn-secondary" type="button" aria-expanded="false" aria-controls="persistent-form-epg-filter-panel" onclick="toggleSetupEpgSources(this)">Filter sources</button></div>
+        <div id="persistent-form-epg-filter-panel" class="persistent-toolbar" hidden>
+          <label>Guide source<select id="persistent-form-epg-filter" onchange="findSetupEpgLinks(document.getElementById('persistent-form-epg-search'))">${setupEpgSourceOptions()}</select></label>
+          <span id="persistent-form-epg-filter-status" class="status-muted" role="status" aria-live="polite"></span>
+        </div>
         <div class="persistent-row-meta">Try Broader name matches for more options. To browse every saved provider and zap2xml station, choose All saved guides and clear the search.</div>
         <div id="persistent-form-epg-pagination" class="persistent-toolbar"></div>
         <div id="persistent-form-epg-links" class="persistent-results persistent-epg-results" role="status" aria-live="polite"></div>
@@ -853,13 +886,15 @@ async function findSetupEpgLinks(button, offset = 0) {
   const mode = document.getElementById('persistent-form-epg-mode').value;
   if (!name && mode !== 'all') { target.textContent = 'Enter a channel name or guide ID, or choose All saved guides.'; pagination.innerHTML = ''; return; }
   const preferExternal = !document.getElementById('persistent-editor').dataset.providerGuideId;
-  const search = {q:name, mode, limit:'50', prefer_external:String(preferExternal)};
-  if (!_epgSetupSearch || _epgSetupSearch.q !== name || _epgSetupSearch.mode !== mode) offset = 0;
+  const sourceFilter = document.getElementById('persistent-form-epg-filter');
+  const search = {q:name, mode, limit:'50', prefer_external:String(preferExternal), source:sourceFilter.value};
+  if (!_epgSetupSearch || _epgSetupSearch.q !== name || _epgSetupSearch.mode !== mode || _epgSetupSearch.source !== search.source) offset = 0;
   const searchButton = document.getElementById('persistent-form-epg-search');
   if (searchButton.disabled) return;
   const sequence = ++_epgSetupSequence;
   searchButton.disabled = true;
   searchButton.textContent = 'Finding EPG links…';
+  sourceFilter.disabled = true;
   pagination.innerHTML = '';
   _epgSetupCandidates = [];
   target.textContent = 'Searching saved guide stations…';
@@ -870,12 +905,12 @@ async function findSetupEpgLinks(button, offset = 0) {
     _epgSetupCandidates = result.candidates || [];
     if (!_epgSetupCandidates.length) {
       target.textContent = (result.cache?.refreshed_at || result.channel_cache?.refreshed_at)
-        ? 'No matching EPG links found. Try Broader name matches, a callsign, or All saved guides with an empty search.'
+        ? 'No matching EPG links found in this source filter. Try another source, Broader name matches, a callsign, or All saved guides with an empty search.'
         : 'No guide links are saved yet. Refresh Channel Cache or the EPG Link Index, or import an external XMLTV file, then try again.';
       return;
     }
     const selected = document.getElementById('persistent-form-epg-source').value.trim();
-    target.innerHTML = (preferExternal ? '<p class="status-muted">No provider guide ID: matching imported XMLTV / zap2xml guides are listed first.</p>' : '') + '<div class="persistent-row-meta">Review the channel and schedule before choosing. Broader matches may include other station numbers or regions. Your selection is applied when you save this channel.</div>' +
+    target.innerHTML = (preferExternal && search.source === 'all' ? '<p class="status-muted">No provider guide ID: matching imported XMLTV / zap2xml guides are listed first.</p>' : '') + '<div class="persistent-row-meta">Review the channel and schedule before choosing. Broader matches may include other station numbers or regions. Your selection is applied when you save this channel.</div>' +
       _epgSetupCandidates.map((item, index) => `<article class="persistent-row">
         <div aria-hidden="true"></div><div class="persistent-row-main"><strong>${escHtml(item.display_name)}</strong>
           <div class="persistent-row-meta">${escHtml(item.source)} · Guide ${escHtml(item.guide_id)}${mode === 'all' ? '' : ` · ${Math.round(item.similarity * 100)}% match`}</div>
@@ -888,6 +923,7 @@ async function findSetupEpgLinks(button, offset = 0) {
   } catch (err) {
     if (sequence === _epgSetupSequence && target.isConnected) target.textContent = `Could not find EPG links: ${err.message}`;
   } finally {
+    if (sourceFilter.isConnected) sourceFilter.disabled = false;
     if (searchButton.isConnected) { searchButton.disabled = false; searchButton.textContent = 'Find EPG links'; }
   }
 }

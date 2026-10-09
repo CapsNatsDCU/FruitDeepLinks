@@ -163,7 +163,9 @@ def api_xtream_epg_link_search():
         with get_conn() as conn:
             return jsonify({"status": "success", "cache": xtream_epg_index.status(conn),
                             "channel_cache": channel_cache.status(conn),
-                            **xtream_epg_index.search_page(conn, query, mode=mode, limit=limit, offset=offset, prefer_external=request.args.get("prefer_external") == "true")})
+                            **xtream_epg_index.search_page(conn, query, mode=mode, limit=limit, offset=offset, prefer_external=request.args.get("prefer_external") == "true", source_filter=request.args.get("source", "all"))})
+    except ValueError as exc:
+        return jsonify(status="error", message=str(exc)), 400
     except Exception as exc:
         return _safe_error(exc)
 
