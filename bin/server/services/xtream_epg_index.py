@@ -98,10 +98,19 @@ def _match_name(value: str) -> str:
 
 def search(conn: sqlite3.Connection, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
     """Name suggestions only; read cached IDs without fetching or assigning."""
+    return search_page(conn, query, limit=limit)["candidates"]
+
+
+def search_page(conn: sqlite3.Connection, query: str, *, mode: str = "similar",
+                limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    """Page saved guide identities, with explicit broader matching or full browsing."""
     from server.services.xtream_channel_cache import all_channels
+    if mode not in {"similar", "broad", "all"}:
+        raise ValueError("Unknown guide search mode")
+    limit = max(1, min(100, limit))
+    offset = max(0, offset)
+    literal_query = normalize_name(query)
     source_name = _match_name(query)
-    if not source_name:
-        return []
     source_tokens = set(source_name.split())
     source_numbers = set(re.findall(r"\d+", source_name))
     indexed = {item["guide_id"]: item for item in entries(conn)}
@@ -112,29 +121,39 @@ def search(conn: sqlite3.Connection, query: str, *, limit: int = 10) -> list[dic
     ranked = {}
     for guide_id, name, source in names:
         candidate = _match_name(name)
-        if not candidate:
-            continue
         tokens = set(candidate.split())
         candidate_numbers = set(re.findall(r"\d+", candidate))
-        if source_numbers and candidate_numbers and source_numbers != candidate_numbers:
+        direct = bool(literal_query and (literal_query in normalize_name(name)
+                                         or literal_query in normalize_name(guide_id)))
+        if (mode == "similar" and literal_query != normalize_name(guide_id)
+                and source_numbers and candidate_numbers and source_numbers != candidate_numbers):
             continue
         shared = len(source_tokens & tokens)
-        score = max(SequenceMatcher(None, source_name, candidate).ratio(),
-                    shared / len(source_tokens | tokens))
+        score = max(SequenceMatcher(None, source_name, candidate).ratio() if source_name and candidate else 0,
+                    shared / len(source_tokens | tokens) if source_tokens | tokens else 0)
         # A short station query should find its longer provider label.
-        if shared == len(source_tokens):
+        if source_tokens and shared == len(source_tokens):
             score = max(score, 0.95)
         elif len(source_tokens) > 1 and shared / len(source_tokens) >= 0.75:
             score = max(score, 0.9 * shared / len(source_tokens))
-        if score < 0.65 or score <= ranked.get(guide_id, {}).get("similarity", -1):
+        if direct:
+            score = max(score, 0.95)
+        if mode == "all":
+            if literal_query and not direct:
+                continue
+        elif not literal_query or score < (0.4 if mode == "broad" else 0.65):
+            continue
+        if score <= ranked.get(guide_id, {}).get("similarity", -1):
             continue
         ranked[guide_id] = {"guide_id": guide_id, "display_name": name,
                             "similarity": score, "source": source,
                             "provider_programmes": indexed[guide_id]["programme_count"] if guide_id in indexed else None}
-    result = sorted(ranked.values(), key=lambda item: (-item["similarity"], item["display_name"].casefold(), item["guide_id"]))
+    result = sorted(ranked.values(), key=lambda item: (0 if mode == "all" else -item["similarity"],
+                                                      item["display_name"].casefold(), item["guide_id"]))
     for item in result:
         item["similarity"] = round(item["similarity"], 2)
-    return result[:max(1, min(25, limit))]
+    return {"candidates": result[offset:offset + limit], "total": len(result),
+            "offset": offset, "limit": limit, "has_more": offset + limit < len(result)}
 
 
 def suggestions(conn: sqlite3.Connection, *, limit: int = 5) -> list[dict[str, Any]]:

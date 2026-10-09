@@ -144,14 +144,24 @@ def api_xtream_epg_link_search():
     """Browse similar guide links from saved XMLTV and channel snapshots."""
     from server.services import xtream_epg_index
     query = request.args.get("q", "").strip()
-    if not query or len(query) > 512:
+    mode = request.args.get("mode", "similar")
+    if mode not in {"similar", "broad", "all"}:
+        return jsonify({"status": "error", "message": "Choose similar, broad, or all guide search"}), 400
+    if (not query and mode != "all") or len(query) > 512:
         return jsonify({"status": "error", "message": "Enter a channel name of up to 512 characters"}), 400
+    try:
+        limit = int(request.args.get("limit", "50"))
+        offset = int(request.args.get("offset", "0"))
+        if not 1 <= limit <= 100 or offset < 0:
+            raise ValueError
+    except ValueError:
+        return jsonify({"status": "error", "message": "Use a page size of 1–100 and a nonnegative offset"}), 400
     if not db_exists(): return _read_database_error()
     try:
         with get_conn() as conn:
             return jsonify({"status": "success", "cache": xtream_epg_index.status(conn),
                             "channel_cache": channel_cache.status(conn),
-                            "candidates": xtream_epg_index.search(conn, query)})
+                            **xtream_epg_index.search_page(conn, query, mode=mode, limit=limit, offset=offset)})
     except Exception as exc:
         return _safe_error(exc)
 

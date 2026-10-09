@@ -13,6 +13,7 @@
 .persistent-toolbar label { flex:1; min-width:180px; }
 .persistent-browser { margin:12px 0 18px; padding:14px; background:var(--bg-inset); border:1px solid var(--border); border-radius:var(--radius); }
 .persistent-results, .persistent-list { display:flex; flex-direction:column; gap:8px; }
+.persistent-epg-results { max-height:min(480px,60vh); overflow-y:auto; }
 .persistent-row { display:grid; grid-template-columns:44px minmax(0,1fr) auto; gap:10px; align-items:center; padding:10px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg-inset); }
 .persistent-row img { width:40px; height:40px; border-radius:5px; object-fit:contain; background:var(--bg-card); }
 .persistent-row-main { min-width:0; overflow-wrap:anywhere; }
@@ -84,7 +85,7 @@
 </section>
 <section class="card" aria-labelledby="external-xmltv-title">
   <h2 id="external-xmltv-title">External XMLTV / zap2xml</h2>
-  <p class="persistent-intro">Connect an existing XMLTV file served by zap2xml or another guide service. Imported station names appear under Find similar EPG links in channel setup. Choose a guide and save the channel to use its schedule. Regular guide refreshes check this file when its saved copy is at least six hours old.</p>
+  <p class="persistent-intro">Connect an existing XMLTV file served by zap2xml or another guide service. Imported station names appear under Find EPG links in channel setup. Choose a guide and save the channel to use its schedule. Regular guide refreshes check this file when its saved copy is at least six hours old.</p>
   <div class="persistent-toolbar"><label>XMLTV file URL<input id="external-xmltv-url" type="url" placeholder="http://your-nas:8098/xmltv-raw.xml" maxlength="2048"></label>
     <button class="btn btn-secondary" type="button" onclick="refreshExternalXmltv(this)">Import / Refresh XMLTV</button></div>
   <div id="external-xmltv-status" class="status-muted" role="status" aria-live="polite">Checking external guide…</div>
@@ -115,6 +116,7 @@ let _persistentQualityInFlight = false;
 let _epgLinkSuggestions = [];
 let _epgSetupCandidates = [];
 let _epgSetupSequence = 0;
+let _epgSetupSearch = null;
 let _qualityQueueRequests = [];
 let _qualityQueueTimer = null;
 let _qualityQueueLoading = false;
@@ -611,8 +613,12 @@ function persistentFormHtml(values, mode) {
       <div class="full">
         <label>Alternative EPG link<input id="persistent-form-epg-source" type="text" value="${escHtml(values.epg_source_id || '')}" placeholder="Use this channel’s provider guide" maxlength="512"></label>
         <div class="persistent-row-meta">If this channel has no guide, choose a link from a similar channel carrying the same schedule. Leave blank to use its own provider guide.</div>
-        <div class="persistent-toolbar"><label>Search guide names<input id="persistent-form-epg-query" type="text" value="${escHtml((values.original_name || values.display_name || '').slice(0,512))}" maxlength="512"></label><button class="btn btn-secondary" type="button" onclick="findSetupEpgLinks(this)">Find similar EPG links</button></div>
-        <div id="persistent-form-epg-links" class="persistent-results" role="status" aria-live="polite"></div>
+        <div class="persistent-toolbar"><label>Search guide names or IDs<input id="persistent-form-epg-query" type="text" value="${escHtml((values.original_name || values.display_name || '').slice(0,512))}" maxlength="512" placeholder="Network, callsign, or guide ID" onkeydown="if(event.key==='Enter'){event.preventDefault();findSetupEpgLinks(document.getElementById('persistent-form-epg-search'))}"></label>
+          <label>Match options<select id="persistent-form-epg-mode"><option value="similar">Similar names</option><option value="broad">Broader name matches</option><option value="all">All saved guides</option></select></label>
+          <button id="persistent-form-epg-search" class="btn btn-secondary" type="button" onclick="findSetupEpgLinks(this)">Find EPG links</button></div>
+        <div class="persistent-row-meta">Try Broader name matches for more options. To browse every saved provider and zap2xml station, choose All saved guides and clear the search.</div>
+        <div id="persistent-form-epg-pagination" class="persistent-toolbar"></div>
+        <div id="persistent-form-epg-links" class="persistent-results persistent-epg-results" role="status" aria-live="polite"></div>
       </div>
       <label class="full">Logo override<input id="persistent-form-logo" type="text" value="${escHtml(values.logo_override || '')}" placeholder="Optional image URL"></label>
       <label class="full">Favorite team association<select id="persistent-form-team">${favoriteTeamOptions(values.favorite_team || '')}</select></label>
@@ -641,35 +647,48 @@ function showPersistentEdit(id) {
   document.getElementById('persistent-editor').scrollIntoView({behavior:'smooth', block:'nearest'});
 }
 
-async function findSetupEpgLinks(button) {
+async function findSetupEpgLinks(button, offset = 0) {
   const target = document.getElementById('persistent-form-epg-links');
+  const pagination = document.getElementById('persistent-form-epg-pagination');
   const name = document.getElementById('persistent-form-epg-query').value.trim();
-  if (!name) { target.textContent = 'Enter the channel name first.'; return; }
+  const mode = document.getElementById('persistent-form-epg-mode').value;
+  if (!name && mode !== 'all') { target.textContent = 'Enter a channel name or guide ID, or choose All saved guides.'; pagination.innerHTML = ''; return; }
+  const search = {q:name, mode, limit:'50'};
+  if (!_epgSetupSearch || _epgSetupSearch.q !== name || _epgSetupSearch.mode !== mode) offset = 0;
+  const searchButton = document.getElementById('persistent-form-epg-search');
+  if (searchButton.disabled) return;
   const sequence = ++_epgSetupSequence;
-  button.disabled = true;
-  button.textContent = 'Finding EPG links…';
-  target.textContent = 'Looking for similar channel names…';
+  searchButton.disabled = true;
+  searchButton.textContent = 'Finding EPG links…';
+  pagination.innerHTML = '';
+  _epgSetupCandidates = [];
+  target.textContent = 'Searching saved guide stations…';
   try {
-    const result = await persistentRequest(`/api/xtream/epg/links/search?${new URLSearchParams({q:name})}`);
+    const result = await persistentRequest(`/api/xtream/epg/links/search?${new URLSearchParams({...search, offset:String(offset)})}`);
     if (sequence !== _epgSetupSequence || !target.isConnected) return;
+    _epgSetupSearch = search;
     _epgSetupCandidates = result.candidates || [];
     if (!_epgSetupCandidates.length) {
       target.textContent = (result.cache?.refreshed_at || result.channel_cache?.refreshed_at)
-        ? 'No similar EPG links found. Try a simpler channel name, or refresh the EPG link index for more links.'
-        : 'No guide links are saved yet. Refresh Channel Cache or the EPG Link Index, then try again.';
+        ? 'No matching EPG links found. Try Broader name matches, a callsign, or All saved guides with an empty search.'
+        : 'No guide links are saved yet. Refresh Channel Cache or the EPG Link Index, or import an external XMLTV file, then try again.';
       return;
     }
-    target.innerHTML = '<div class="persistent-row-meta">Review the channel and schedule before choosing. Your selection is applied when you save this channel.</div>' +
+    const selected = document.getElementById('persistent-form-epg-source').value.trim();
+    target.innerHTML = '<div class="persistent-row-meta">Review the channel and schedule before choosing. Broader matches may include other station numbers or regions. Your selection is applied when you save this channel.</div>' +
       _epgSetupCandidates.map((item, index) => `<article class="persistent-row">
         <div aria-hidden="true"></div><div class="persistent-row-main"><strong>${escHtml(item.display_name)}</strong>
-          <div class="persistent-row-meta">${escHtml(item.source)} · Guide ${escHtml(item.guide_id)} · ${Math.round(item.similarity * 100)}% name match</div>
+          <div class="persistent-row-meta">${escHtml(item.source)} · Guide ${escHtml(item.guide_id)}${mode === 'all' ? '' : ` · ${Math.round(item.similarity * 100)}% match`}</div>
           <div class="persistent-row-meta">${item.provider_programmes === null ? 'Guide programmes have not been checked in the saved XMLTV feed.' : `${item.provider_programmes} programmes in the saved XMLTV feed.`}</div></div>
-        <button class="btn btn-secondary" type="button" onclick="selectSetupEpgLink(${index}, this)">Choose this guide</button>
+        <button data-epg-choice class="btn btn-secondary" type="button" onclick="selectSetupEpgLink(${index}, this)">${selected === item.guide_id ? 'Selected — save channel to apply' : 'Choose this guide'}</button>
       </article>`).join('');
+    pagination.innerHTML = `<span class="status-muted">Showing ${result.offset + 1}–${result.offset + _epgSetupCandidates.length} of ${result.total} guide links</span>
+      ${result.offset > 0 ? `<button class="btn btn-secondary" type="button" onclick="findSetupEpgLinks(this, ${Math.max(0, result.offset - result.limit)})">Previous 50</button>` : ''}
+      ${result.has_more ? `<button class="btn btn-secondary" type="button" onclick="findSetupEpgLinks(this, ${result.offset + result.limit})">Next 50</button>` : ''}`;
   } catch (err) {
     if (sequence === _epgSetupSequence && target.isConnected) target.textContent = `Could not find EPG links: ${err.message}`;
   } finally {
-    if (button.isConnected) { button.disabled = false; button.textContent = 'Find similar EPG links'; }
+    if (searchButton.isConnected) { searchButton.disabled = false; searchButton.textContent = 'Find EPG links'; }
   }
 }
 
@@ -678,7 +697,7 @@ function selectSetupEpgLink(index, button) {
   const input = document.getElementById('persistent-form-epg-source');
   if (!candidate || !input) return;
   input.value = candidate.guide_id;
-  document.querySelectorAll('#persistent-form-epg-links button').forEach(item => { item.textContent = 'Choose this guide'; });
+  document.querySelectorAll('#persistent-form-epg-links [data-epg-choice]').forEach(item => { item.textContent = 'Choose this guide'; });
   button.textContent = 'Selected — save channel to apply';
 }
 
