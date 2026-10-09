@@ -17,6 +17,7 @@ from server.services.xtream_persistent import ensure_schema, save_stream_quality
 from server.services.xtream_quality import (
     QualityProbeDeferred, _probe_bytes, _require_quiet, _sample_media, quality_probe_guard,
 )
+from server.services import xtream_quality_queue as quality_queue
 from update_protocol import installation_active
 from xtream_ingest import XtreamClient
 from xtream_pool import PoolUnavailable, XtreamPool
@@ -42,6 +43,9 @@ def _ensure_state(conn):
 def _next_channel(conn, now):
     ensure_schema(conn)
     _ensure_state(conn)
+    queued = quality_queue.next_request(conn)
+    if queued is not None:
+        return queued
     return conn.execute("""
         SELECT c.id, c.category_id, c.stream_id, c.stream_extension
         FROM xtream_persistent_channels AS c
@@ -117,6 +121,7 @@ def _run_background_quality(db_path: Path | None = None, *, pool=None) -> str:
             now = time.time()
             with pool.connection() as conn:
                 _ensure_state(conn)
+                quality_queue.recover_interrupted(conn)
                 channel = _next_channel(conn, now)
                 if channel is None:
                     return "no_due_channel"
@@ -131,6 +136,7 @@ def _run_background_quality(db_path: Path | None = None, *, pool=None) -> str:
                     (account.id,),
                 ).fetchone() or (0,))[0])
             account = accounts[0]
+            queue_id = channel.get("queue_id") if isinstance(channel, dict) else None
             try:
                 lease = pool.acquire(channel["stream_id"], "quality_probe",
                                      excluded={item.id for item in pool.accounts if item.id != account.id})
@@ -147,6 +153,8 @@ def _run_background_quality(db_path: Path | None = None, *, pool=None) -> str:
                     _require_quiet(path)
                     first = client.get_probe_active_connections(lease.gate_fd)
                     if first != 0:
+                        with pool.connection() as conn:
+                            quality_queue.mark(conn, queue_id, 'pending', 'Provider account is occupied or its activity is unknown')
                         return "provider_occupied_or_unknown"
                     time.sleep(ACTIVITY_RECHECK_SECONDS)
                     if (installation_active() or refresh_status["running"] or
@@ -155,23 +163,45 @@ def _run_background_quality(db_path: Path | None = None, *, pool=None) -> str:
                     _require_quiet(path)
                     second = client.get_probe_active_connections(lease.gate_fd)
                     if second != 0:
+                        with pool.connection() as conn:
+                            quality_queue.mark(conn, queue_id, 'pending', 'Provider account is occupied or its activity is unknown')
                         return "provider_occupied_or_unknown"
                 finally:
                     client.session.close()
                 with pool.connection() as conn:
-                    conn.execute("""INSERT INTO xtream_background_quality_channels(channel_id,last_attempt)
+                    if queue_id is not None:
+                        try:
+                            if not quality_queue.start(conn, channel):
+                                return 'queue_cancelled'
+                        except Exception:
+                            quality_queue.mark(conn, queue_id, 'failed', 'The selected channel is no longer available in the saved catalog')
+                            return 'queue_unavailable'
+                    if channel['id'] is not None:
+                        conn.execute("""INSERT INTO xtream_background_quality_channels(channel_id,last_attempt)
                         VALUES(?,?) ON CONFLICT(channel_id) DO UPDATE SET last_attempt=excluded.last_attempt""",
                         (channel["id"], time.time()))
                 _require_quiet(path)
                 sample = _sample_media(lease, channel["stream_id"], channel["stream_extension"])
+            except QualityProbeDeferred:
+                with pool.connection() as conn:
+                    quality_queue.mark(conn, queue_id, 'pending', 'Paused for channel or account activity')
+                raise
             except Exception:
                 outcome = "upstream_error"
+                with pool.connection() as conn:
+                    quality_queue.mark(conn, queue_id, 'failed', 'Resolution check failed; choose Queue test to retry')
                 raise
             finally:
                 lease.release(outcome)
-            measured = _probe_bytes(sample)
-            with pool.connection() as conn:
-                save_stream_quality(conn, channel["category_id"], channel["stream_id"], measured)
+            try:
+                measured = _probe_bytes(sample)
+                with pool.connection() as conn:
+                    save_stream_quality(conn, channel["category_id"], channel["stream_id"], measured)
+                    quality_queue.mark(conn, queue_id, 'completed')
+            except Exception:
+                with pool.connection() as conn:
+                    quality_queue.mark(conn, queue_id, 'failed', 'The sample had no usable video resolution; choose Queue test to retry')
+                raise
             log(f"Background Xtream resolution measured persistent channel {channel['id']} using {account.id}", "INFO")
             return "measured"
     except (QualityProbeDeferred, PoolUnavailable):

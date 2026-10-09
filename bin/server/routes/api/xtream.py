@@ -582,6 +582,45 @@ def api_xtream_persistent_search():
         return _safe_error(exc, 502)
 
 
+@bp.route("/api/xtream/persistent-channels/quality/queue", methods=["GET", "POST"])
+@bp.route("/api/xtream/persistent-channels/quality/queue/<int:queue_id>", methods=["DELETE"])
+def api_xtream_quality_queue(queue_id=None):
+    from server.services import xtream_quality_queue
+    from xtream_activity import normal_activity_remaining
+    from xtream_pool import XtreamPool
+    if not db_exists(): return _read_database_error()
+    try:
+        with get_conn() as conn:
+            if request.method == 'POST':
+                payload = request.get_json(silent=True) or {}
+                if not isinstance(payload, dict):
+                    raise PersistentChannelError('Expected a JSON object')
+                queued = xtream_quality_queue.enqueue(conn, payload.get('category_id'), payload.get('stream_id'))
+                return jsonify(status='success', request=queued), 202
+            if request.method == 'DELETE':
+                xtream_quality_queue.cancel(conn, queue_id)
+                return jsonify(status='success')
+            items = xtream_quality_queue.entries(conn)
+            for item in items:
+                if item['state'] == 'completed':
+                    item['measured_quality'] = quality_for_stream(conn, item['category_id'], item['stream_id'])
+        pool = XtreamPool(resolve_db_path()).status()
+        wait = normal_activity_remaining(resolve_db_path())
+        if os.getenv('XTREAM_BACKGROUND_QUALITY_ENABLED', 'true').lower() in {'0', 'false', 'no'}:
+            reason = 'The background resolution worker is disabled in the deployment.'
+        elif pool['active'] or any(a['busy'] for a in pool['accounts']):
+            reason = 'Waiting for channel or account activity to finish.'
+        elif wait > 0:
+            reason = f'Waiting for the activity cooldown: {int(wait) + 1} seconds remaining.'
+        elif not any(a['reserved_for_fruit'] and a['enabled'] and a['health'] == 'healthy' and a['available'] > 0 for a in pool['accounts']):
+            reason = 'Waiting for a healthy free account marked Reserved for Fruit in Settings.'
+        else:
+            reason = 'Waiting for the next worker tick and account check interval.'
+        return jsonify(status='success', requests=items, wait_reason=reason)
+    except Exception as exc:
+        return _safe_error(exc)
+
+
 @bp.route("/api/xtream/persistent-channels/quality", methods=["POST"])
 def api_xtream_persistent_quality():
     """Measure one provider stream on demand and cache its observed video quality."""

@@ -76,6 +76,12 @@
   <p class="status-muted">For accounts marked “Reserved for Fruit” in Settings, Fruit checks saved channel resolution slowly in the background: at most one channel per free account every 10 minutes. All resolution checks pause during channel or account activity and for 10 minutes afterward. It skips the check if the provider cannot confirm zero active connections.</p>
   <div id="persistent-list" class="persistent-list" aria-live="polite"><span class="status-muted">Loading persistent channels…</span></div>
 </section>
+<section class="card" aria-labelledby="quality-queue-title">
+  <h2 id="quality-queue-title">Resolution check queue</h2>
+  <p class="persistent-intro">Choose Queue test on saved channels or search results. Requests are saved and checked in order, ahead of routine background checks, even after you close this page. Checks wait for the activity cooldown and an idle, healthy account marked “Reserved for Fruit” in Settings.</p>
+  <div id="quality-queue-status" class="status-muted" role="status" aria-live="polite">Loading queued checks…</div>
+  <div id="quality-queue-list" class="persistent-list"></div>
+</section>
 <section class="card" aria-labelledby="external-xmltv-title">
   <h2 id="external-xmltv-title">External XMLTV / zap2xml</h2>
   <p class="persistent-intro">Connect an existing XMLTV file served by zap2xml or another guide service. Imported station names appear under Find similar EPG links in channel setup. Choose a guide and save the channel to use its schedule. Regular guide refreshes check this file when its saved copy is at least six hours old.</p>
@@ -109,6 +115,9 @@ let _persistentQualityInFlight = false;
 let _epgLinkSuggestions = [];
 let _epgSetupCandidates = [];
 let _epgSetupSequence = 0;
+let _qualityQueueRequests = [];
+let _qualityQueueTimer = null;
+let _qualityQueueLoading = false;
 
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -120,6 +129,61 @@ async function loadPersistentFavoriteTeams() {
     _favoriteState.teams = [];
   }
 }
+
+function qualityQueueButton(stream, kind, identifier) {
+  const request = _qualityQueueRequests.find(item => item.category_id === String(stream.category_id) && item.stream_id === String(stream.stream_id) && ['pending','running'].includes(item.state));
+  return `<button class="btn btn-secondary" type="button" ${request ? 'disabled' : ''} onclick="queueQualityTest('${kind}', ${identifier}, this)">${request ? (request.state === 'running' ? 'Testing…' : 'Queued') : 'Queue test'}</button>`;
+}
+async function queueQualityTest(kind, identifier, button) {
+  const stream = kind === 'configured' ? _persistentChannels.find(c => c.id === identifier) : _persistentResults[identifier];
+  if (!stream || button.disabled) return;
+  button.disabled = true; button.textContent = 'Queuing…';
+  try {
+    const result = await persistentRequest('/api/xtream/persistent-channels/quality/queue', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({category_id:stream.category_id,stream_id:stream.stream_id})});
+    showToast(`Queued ${result.request.channel_name}`, 'success');
+    await loadQualityQueue();
+  } catch (err) { persistentError(`Could not queue check: ${err.message}`); button.disabled = false; button.textContent = 'Queue test'; }
+}
+async function cancelQualityTest(id, button) {
+  button.disabled = true; button.textContent = 'Cancelling…';
+  try {
+    await persistentRequest(`/api/xtream/persistent-channels/quality/queue/${id}`, {method:'DELETE'});
+    await loadQualityQueue();
+  } catch (err) { persistentError(err.message); button.disabled = false; button.textContent = 'Cancel'; }
+}
+async function loadQualityQueue() {
+  if (_qualityQueueLoading) return;
+  clearTimeout(_qualityQueueTimer);
+  _qualityQueueLoading = true;
+  const status = document.getElementById('quality-queue-status');
+  try {
+    const result = await persistentRequest('/api/xtream/persistent-channels/quality/queue');
+    const previous = new Map(_qualityQueueRequests.map(item => [item.id, item.state]));
+    _qualityQueueRequests = result.requests || [];
+    const active = _qualityQueueRequests.filter(item => ['pending','running'].includes(item.state));
+    const running = active.filter(item => item.state === 'running').length;
+    status.textContent = active.length ? `${active.length - running} waiting · ${running} testing · ${running ? 'Checking a short media sample.' : result.wait_reason}` : 'No checks waiting. Choose Queue test to add a channel.';
+    const labels = {pending:'Waiting',running:'Testing…',completed:'Completed',failed:'Failed',cancelled:'Cancelled'};
+    document.getElementById('quality-queue-list').innerHTML = _qualityQueueRequests.map(item => `<article class="persistent-row">
+      <div aria-hidden="true"></div><div class="persistent-row-main"><strong>${escHtml(item.channel_name)}</strong>
+        <div class="persistent-row-meta">${labels[item.state] || escHtml(item.state)}${item.state === 'completed' && item.measured_quality ? ' · ' + escHtml(item.measured_quality.width) + ' × ' + escHtml(item.measured_quality.height) + (item.measured_quality.fps ? ' · ' + escHtml(item.measured_quality.fps) + ' fps' : '') : ''}${item.last_error ? ' · ' + escHtml(item.last_error) : ''}</div></div>
+      ${item.state === 'pending' ? `<button class="btn btn-secondary" type="button" onclick="cancelQualityTest(${item.id}, this)">Cancel</button>` : ''}
+    </article>`).join('');
+    if (_qualityQueueRequests.some(item => ['completed','failed'].includes(item.state) && previous.has(item.id) && previous.get(item.id) !== item.state)) {
+      await loadPersistentChannels();
+      if (!document.getElementById('persistent-browser').hidden) await searchPersistentStreams(_persistentPage);
+    } else {
+      renderPersistentChannels();
+      if (!document.getElementById('persistent-browser').hidden) document.getElementById('persistent-results').innerHTML = persistentResultRows();
+    }
+  } catch (err) { status.textContent = `Could not read queue: ${err.message}`; }
+  finally {
+    _qualityQueueLoading = false;
+    _qualityQueueTimer = setTimeout(loadQualityQueue, 15000);
+  }
+}
+window.addEventListener('pagehide', () => clearTimeout(_qualityQueueTimer));
 
 async function refreshPersistentEpg(button) {
   button.disabled = true;
@@ -311,6 +375,7 @@ function renderPersistentChannels() {
     </div>
     <div class="persistent-actions">
       <button class="btn btn-secondary" type="button" onclick="detectConfiguredPersistentQuality(${channel.id}, this)">Detect quality</button>
+      ${qualityQueueButton(channel, 'configured', channel.id)}
       <button class="btn btn-secondary" type="button" onclick="showPersistentEdit(${channel.id})">Edit</button>
       <button class="btn btn-secondary" type="button" onclick="setPersistentEnabled(${channel.id}, ${channel.enabled ? 'false' : 'true'})">${channel.enabled ? 'Disable' : 'Enable'}</button>
       <button class="btn btn-danger" type="button" onclick="deletePersistentChannel(${channel.id})">Delete</button>
@@ -402,6 +467,7 @@ function persistentResultRows() {
       <div class="persistent-row-meta">${escHtml(stream.category_name)} · category ${escHtml(stream.category_id)} · stream_id ${escHtml(stream.stream_id)}${stream.epg_channel_id ? ` · EPG ${escHtml(String(stream.epg_channel_id))}` : ''}</div>
       <div class="persistent-row-meta">${persistentQualityText(stream)}</div></div>
     <div class="persistent-actions"><button class="btn btn-secondary" type="button" onclick="detectPersistentQuality(${index}, this)">Detect quality</button>
+      ${qualityQueueButton(stream, 'search', index)}
       <button class="btn" type="button" onclick="showPersistentAdd(${index})">Add Channel</button></div>
   </div>`).join('');
 }
@@ -683,5 +749,6 @@ loadPersistentFavoriteTeams().then(loadPersistentChannels);
 loadPersistentChannelCacheStatus();
 loadEpgLinkSuggestions();
 loadExternalXmltv();
+loadQualityQueue();
 </script>
 {% endblock %}
