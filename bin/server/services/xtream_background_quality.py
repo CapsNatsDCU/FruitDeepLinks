@@ -54,7 +54,10 @@ def _next_channel(conn, now):
         LEFT JOIN xtream_background_quality_channels AS attempted ON attempted.channel_id=c.id
         WHERE c.enabled=1 AND c.availability_status='available'
           AND (attempted.last_attempt IS NULL OR attempted.last_attempt<=?)
-        ORDER BY (q.measured_at IS NOT NULL), COALESCE(attempted.last_attempt,0),
+        ORDER BY (attempted.last_attempt IS NOT NULL),
+                 CASE WHEN attempted.last_attempt IS NULL THEN c.created_at END DESC,
+                 CASE WHEN attempted.last_attempt IS NULL THEN c.id END DESC,
+                 (q.measured_at IS NOT NULL), COALESCE(attempted.last_attempt,0),
                  q.measured_at, c.id
         LIMIT 1
     """, (now - CHANNEL_INTERVAL_SECONDS,)).fetchone()

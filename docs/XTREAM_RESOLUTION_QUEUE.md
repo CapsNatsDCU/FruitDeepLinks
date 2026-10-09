@@ -4,6 +4,14 @@ Open **Persistent Channels** and choose **Queue test** beside a configured chann
 
 The **Resolution check queue** section shows Waiting, Testing, Completed, Failed, and Cancelled requests. Completed requests show the measured dimensions and frame rate; these measurements also appear beside the channel. Cancel a waiting request using **Cancel**. A short sample already running finishes before another check starts. Choose **Queue test** again to retry a failed or completed request. Duplicate clicks on waiting/running requests do not add more work. The queue holds up to 200 active requests and retains 50 recent finished requests.
 
+Check order:
+
+1. Manually queued requests, in the order you queued them.
+2. Permanent channels awaiting their first automatic attempt, newest additions first. A previously cached resolution does not remove this priority.
+3. Routine repeat checks, using the existing due-channel ordering.
+
+After its first media-check attempt, a new channel returns to normal repeat-check scheduling. This ordering is saved through the channel creation timestamp and durable attempt records, so it survives restarts.
+
 Operator requests take priority over the normal background scan. The existing worker checks the queue once a minute and makes at most one attempt per tick. Queued tests use the existing safeguards: no checks during app updates, refreshes or channel/account activity; the existing ten-minute activity quiet period and ten-minute per-account spacing; enabled, healthy, free accounts marked **Reserved for Fruit** in Settings; two fresh provider readings confirming zero connections before media sampling; the normal short sample limit and failure pause. Queueing does not contact the provider. Cached channel presence is not playback proof. Missing/occupied provider activity leaves the request waiting for a later eligible attempt. The UI explains why work is waiting.
 
 An interrupted running request is returned to the queue after the probe gate and surviving leases confirm that no previous sample is still active. Failure details use fixed messages, without provider credentials or authenticated URLs. Existing measurements and permanent-channel identity are preserved when a request is cancelled.

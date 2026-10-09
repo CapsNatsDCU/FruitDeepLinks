@@ -6,7 +6,7 @@ from tests import test_xtream_background_quality as fixtures
 from tests.test_xtream_pool import account_rows, pool_environment
 from server.services import xtream_quality_queue as queue
 from server.services.xtream_background_quality import _next_channel, run_background_quality
-from server.services.xtream_persistent import PersistentChannelError, quality_for_stream
+from server.services.xtream_persistent import PersistentChannelError, quality_for_stream, create_channel, save_stream_quality
 from server.services.xtream_quality import quality_probe_guard
 from server.services.xtream_channel_cache import replace_snapshot
 from xtream_ingest import XtreamError
@@ -38,6 +38,22 @@ class QualityQueueTests(unittest.TestCase):
         self.assertEqual(1, len(self.entries()))
         with self.pool.connection() as conn:
             self.assertEqual('437220', _next_channel(conn, 100000)['stream_id'])
+
+    def test_new_additions_follow_manual_requests_then_leave_first_check_priority(self):
+        manual = self.enqueue()
+        with self.pool.connection() as conn:
+            first = create_channel(conn, {'stream_id':'437221','name':'First new station'}, category_id='sports', channel_number='9')
+            newest = create_channel(conn, {'stream_id':'437222','name':'Newest station'}, category_id='sports', channel_number='10')
+            save_stream_quality(conn, 'sports', '437222', {'width':1920,'height':1080})
+            self.assertEqual(manual['id'], _next_channel(conn, 100000)['queue_id'])
+            queue.cancel(conn, manual['id'])
+        # Read on a new connection: priority survives a restarted worker.
+        with self.pool.connection() as conn:
+            self.assertEqual(newest['id'], _next_channel(conn, 100000)['id'])
+            conn.execute('INSERT INTO xtream_background_quality_channels VALUES (?,?)', (newest['id'], 98000))
+            self.assertEqual(first['id'], _next_channel(conn, 100000)['id'])
+            conn.execute('INSERT INTO xtream_background_quality_channels VALUES (?,?)', (first['id'], 98000))
+            self.assertEqual(7, _next_channel(conn, 100000)['id'])
 
     def test_queued_measurement_completes_and_saves_actual_quality(self):
         self.enqueue()

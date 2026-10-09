@@ -37,11 +37,11 @@ class BackgroundQualityTests(unittest.TestCase):
             conn.execute("""INSERT INTO xtream_persistent_channels
                 (id,stream_id,category_id,original_name,display_name,channel_number,
                  availability_status,created_at,updated_at)
-                VALUES (7,'437219','sports','Sports 1','Sports 1','7','available','now','now')""")
+                VALUES (7,'437219','sports','Sports 1','Sports 1','7','available','2024-01-02T00:00:00Z','now')""")
             conn.execute("""INSERT INTO xtream_persistent_channels
                 (id,stream_id,category_id,original_name,display_name,channel_number,
                  availability_status,created_at,updated_at)
-                VALUES (8,'437220','sports','Sports 2','Sports 2','8','available','now','now')""")
+                VALUES (8,'437220','sports','Sports 2','Sports 2','8','available','2024-01-01T00:00:00Z','now')""")
         self.patches = [
             patch("server.services.xtream_background_quality.installation_active", return_value=False),
             patch("server.services.xtream_background_quality.quality_probe_guard", side_effect=open_probe_guard),
