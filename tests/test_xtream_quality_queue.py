@@ -42,8 +42,9 @@ class QualityQueueTests(unittest.TestCase):
     def test_new_additions_follow_manual_requests_then_leave_first_check_priority(self):
         manual = self.enqueue()
         with self.pool.connection() as conn:
-            first = create_channel(conn, {'stream_id':'437221','name':'First new station'}, category_id='sports', channel_number='9')
-            newest = create_channel(conn, {'stream_id':'437222','name':'Newest station'}, category_id='sports', channel_number='10')
+            first = create_channel(conn, {'stream_id':'437221','name':'First new station'}, category_id='sports', category_name='Sports', channel_number='9')
+            newest = create_channel(conn, {'stream_id':'437222','name':'Newest station'}, category_id='sports', category_name='Sports', channel_number='10')
+            conn.execute("UPDATE xtream_persistent_channels SET created_at='2025-01-01T00:00:00Z' WHERE id IN (?,?)", (first['id'], newest['id']))
             save_stream_quality(conn, 'sports', '437222', {'width':1920,'height':1080})
             self.assertEqual(manual['id'], _next_channel(conn, 100000)['queue_id'])
             queue.cancel(conn, manual['id'])
