@@ -264,6 +264,19 @@ credentials. At tune time FruitDeepLinks reads `XTREAM_USERNAME` and
 `XTREAM_PASSWORD` for a legacy deployment, or selects an available pooled account,
 and proxies the provider media. Persistent XMLTV includes cached provider
 programmes when available and channel definitions without invented schedules otherwise.
+
+For a stream dedicated to one team, choose **Guide mode → Team schedule** in its
+persistent-channel editor, select the league/team, and optionally adjust pre/post
+coverage (default 30 minutes each) and estimated duration (default 180 minutes).
+**Preview team guide** shows the next seven days before saving. Fruit generates
+matchup entries and **No game scheduled** gaps from the saved My Sports league
+schedule. Missing, failed, or more than 72-hour-old schedules produce **Schedule
+unavailable** instead. Refresh the league schedule in My Sports to update the data;
+guide reads do not fetch IPTV or sports providers. Missing game end times use the
+configured duration. This describes scheduled games, not actual stream availability
+or verified broadcast content. Each team channel gets a unique `xtream.team.<id>`
+XMLTV identity in both persistent and combined exports. Switching back to
+**Provider / imported XMLTV** restores its previous guide mapping.
 The **Offline EPG Links** section stores channel IDs and names from the provider
 XMLTV feed in SQLite, without storing its credential-bearing URL. A normal
 persistent-guide refresh updates this index from the same XMLTV download; **Refresh

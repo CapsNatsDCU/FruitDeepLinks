@@ -37,6 +37,7 @@
 .persistent-form-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
 .persistent-form-grid .full { grid-column:1/-1; }
 .persistent-form-grid label { display:block; }
+.persistent-form-grid [hidden] { display:none; }
 .persistent-form-grid input, .persistent-form-grid textarea, .persistent-form-grid select { margin-top:4px; }
 .persistent-form-grid textarea { min-height:70px; resize:vertical; }
 .persistent-links { display:flex; gap:14px; flex-wrap:wrap; margin-top:10px; font-size:12px; }
@@ -166,6 +167,9 @@ let _persistentSortable = null;
 
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
+let _teamScheduleTeams = [];
+let _teamGuidePreviewSequence = 0;
+
 async function loadPersistentFavoriteTeams() {
   try {
     const data = await persistentRequest('/api/settings/favorite-teams');
@@ -173,6 +177,10 @@ async function loadPersistentFavoriteTeams() {
   } catch (_) {
     _favoriteState.teams = [];
   }
+  try {
+    const data = await persistentRequest('/api/xtream/persistent-channels/team-schedule/teams');
+    _teamScheduleTeams = data.teams || [];
+  } catch (_) { _teamScheduleTeams = []; }
 }
 
 function qualityQueueButton(stream, kind, identifier) {
@@ -411,7 +419,7 @@ async function previewExternalStation(guideId) {
         ${p.description ? `<div class="persistent-row-meta">${escHtml(p.description)}</div>` : ''}</div></article>`).join('') : '<p class="status-muted">This station has no current or upcoming programmes in the imported file. You can assign it, but its guide will remain empty until a valid schedule is imported.</p>'}</div>
       <div class="persistent-toolbar"><label>Assign to persistent channel<select id="external-assign-channel"><option value="">Choose a channel…</option>${_persistentChannels.map(c => `<option value="${c.id}">${escHtml(`${c.channel_number} · ${c.display_name}${c.enabled ? '' : ' (disabled)'}${c.epg_source_id === guideId ? ' — already assigned' : ''}`)}</option>`).join('')}</select></label>
         <button class="btn" type="button" ${_persistentChannels.length ? '' : 'disabled'} onclick="assignExternalStation(this)">Assign guide</button></div>
-      <p class="persistent-row-meta">Assignment replaces this channel’s guide source. Its stream, channel number, and exported guide ID stay the same. One station may be assigned to multiple channels carrying the same schedule.</p>
+      <p class="persistent-row-meta">Assignment replaces this channel’s guide source. Its stream and channel number stay the same. A Team schedule switches back to Provider / imported XMLTV and restores its standard exported guide ID. One station may be assigned to multiple channels carrying the same schedule.</p>
       ${_persistentChannels.length ? '' : '<p class="status-muted">Add a persistent channel first, then reopen this browser to assign its guide.</p>'}`;
     detail.scrollIntoView({behavior:'smooth',block:'nearest'});
   } catch (err) { if (sequence === _externalPreviewSequence) detail.textContent = `Could not preview schedule: ${err.message}`; }
@@ -425,7 +433,7 @@ async function assignExternalStation(button) {
   if (!channel || !guideId) { status.textContent = 'Choose a persistent channel first.'; return; }
   button.disabled = true; select.disabled = true;
   try {
-    if (!await showConfirm('Assign imported guide?', `Use ${guideId} for ${channel.channel_number} · ${channel.display_name}? This replaces its current guide source. Check that the station carries the same schedule.`)) return;
+    if (!await showConfirm('Assign imported guide?', `Use ${guideId} for ${channel.channel_number} · ${channel.display_name}? This replaces its current guide source.${channel.guide_mode === 'team' ? ' It switches off Team schedule and restores the standard exported guide ID.' : ''} Check that the station carries the same schedule.`)) return;
     button.textContent = 'Assigning…'; status.textContent = 'Saving guide assignment…';
     const result = await persistentRequest('/api/xtream/epg/external/assign', {method:'POST', headers:{'Content-Type':'application/json'},
       body:JSON.stringify({persistent_id:channel.id,guide_id:guideId,expected_source_id:channel.epg_source_id || null})});
@@ -493,7 +501,7 @@ async function applyEpgLink(persistentId, candidateIndex) {
   try {
     await persistentRequest(`/api/xtream/persistent-channels/${persistentId}`, {
       method:'PATCH', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({epg_source_id:candidate.guide_id}),
+      body:JSON.stringify({epg_source_id:candidate.guide_id,guide_mode:"standard"}),
     });
     await loadPersistentChannels();
     try {
@@ -602,6 +610,7 @@ function renderPersistentChannels() {
       <strong>${_persistentNumberMode ? '' : escHtml(channel.channel_number) + ' | '}${escHtml(channel.display_name)}</strong>
       <div style="margin-top:4px"><span class="persistent-status ${escHtml(channel.availability_status)}">${persistentStatusLabel(channel)}</span></div>
       <div class="persistent-row-meta">${escHtml(channel.category_name || channel.category_id)} · stream_id ${escHtml(channel.stream_id)}${channel.favorite_team ? ` · Team: ${escHtml(channel.favorite_team)}` : ''}</div>
+      ${channel.guide_mode === 'team' ? `<div class="persistent-row-meta">Guide: Team schedule · ${escHtml(_teamScheduleTeams.find(t => t.key === channel.team_schedule_key)?.team || String(channel.team_schedule_key || '').split('|').pop())}</div>` : ''}
       <div class="persistent-row-meta">${persistentQualityText(channel)}</div>
       ${channel.unavailable_reason ? `<div class="persistent-row-meta" style="color:var(--warning)">${escHtml(channel.unavailable_reason)}</div>` : ''}
     </div>
@@ -826,6 +835,45 @@ async function toggleSetupEpgSources(button) {
   }
 }
 
+function teamScheduleOptions(selected) {
+  const options = [..._teamScheduleTeams];
+  if (selected && !options.some(t => t.key === selected)) options.push({key:selected, team:selected.split('|').pop(), league:'Saved selection'});
+  return '<option value="">Choose a team…</option>' + options.map(t => `<option value="${escHtml(t.key)}" ${t.key === selected ? 'selected' : ''}>${escHtml(t.league + ' · ' + t.team)}</option>`).join('');
+}
+function teamGuideChanged() {
+  _teamGuidePreviewSequence++;
+  const mode = document.getElementById('persistent-form-guide-mode').value;
+  document.getElementById('persistent-standard-guide').hidden = mode === 'team';
+  document.getElementById('persistent-team-guide').hidden = mode !== 'team';
+  document.getElementById('persistent-standard-guide-id').hidden = mode === 'team';
+  document.getElementById('persistent-team-preview').textContent = '';
+}
+function readTeamGuideConfig() {
+  return {
+    guide_mode:document.getElementById('persistent-form-guide-mode').value,
+    team_schedule_key:document.getElementById('persistent-form-schedule-team').value,
+    team_pre_minutes:Number(document.getElementById('persistent-form-pre').value),
+    team_post_minutes:Number(document.getElementById('persistent-form-post').value),
+    team_duration_minutes:Number(document.getElementById('persistent-form-duration').value),
+  };
+}
+async function previewTeamGuide(button) {
+  if (button.disabled) return;
+  const target = document.getElementById('persistent-team-preview');
+  const sequence = ++_teamGuidePreviewSequence;
+  button.disabled = true;
+  target.textContent = 'Building guide preview…';
+  try {
+    const result = await persistentRequest('/api/xtream/persistent-channels/team-schedule/preview?' + new URLSearchParams(readTeamGuideConfig()));
+    if (sequence !== _teamGuidePreviewSequence || !target.isConnected) return;
+    const localTime = value => new Date(value.replace(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2}) \+0000$/, '$1-$2-$3T$4:$5:$6Z')).toLocaleString();
+    target.innerHTML = `<p>${result.schedule_status === 'ready' ? 'Saved schedule ready' : 'Schedule unavailable — refresh this league in My Sports'}${result.last_success ? ' · Last success: ' + escHtml(new Date(result.last_success).toLocaleString()) : ''}</p>` +
+      result.programmes.map(p => `<article class="persistent-row"><div></div><div class="persistent-row-main"><strong>${escHtml(p.title)}</strong><div class="persistent-row-meta">${escHtml(localTime(p.start))} – ${escHtml(localTime(p.stop))}</div><div class="persistent-row-meta">${escHtml(p.description)}</div></div></article>`).join('');
+  } catch (err) {
+    if (sequence === _teamGuidePreviewSequence && target.isConnected) target.textContent = 'Could not preview guide: ' + err.message;
+  } finally { if (button.isConnected) button.disabled = false; }
+}
+
 function persistentFormHtml(values, mode) {
   return `<div class="persistent-form"><h3 style="margin:0 0 10px">${mode === 'add' ? 'Add Persistent Channel' : 'Edit Persistent Channel'}</h3>
     <div class="persistent-form-grid">
@@ -833,8 +881,21 @@ function persistentFormHtml(values, mode) {
       <label>Channel number<input id="persistent-form-number" type="text" inputmode="decimal" value="${escHtml(values.channel_number || '')}" required></label>
       <label>Enabled<select id="persistent-form-enabled"><option value="true" ${values.enabled !== false ? 'selected' : ''}>Enabled</option><option value="false" ${values.enabled === false ? 'selected' : ''}>Disabled</option></select></label>
       <label>Channel ID<input id="persistent-form-channel-id" type="text" value="${escHtml(values.channel_id || '')}" placeholder="Optional"></label>
-      <label>XMLTV / guide ID<input id="persistent-form-guide-id" type="text" value="${escHtml(values.guide_id || '')}" placeholder="Optional"></label>
-      <div class="full">
+      <label id="persistent-standard-guide-id" ${values.guide_mode === 'team' ? 'hidden' : ''}>XMLTV / guide ID<input id="persistent-form-guide-id" type="text" value="${escHtml(values.guide_id || '')}" placeholder="Optional"></label>
+      <label class="full">Guide mode<select id="persistent-form-guide-mode" onchange="teamGuideChanged()"><option value="standard" ${values.guide_mode !== 'team' ? 'selected' : ''}>Provider / imported XMLTV</option><option value="team" ${values.guide_mode === 'team' ? 'selected' : ''}>Team schedule</option></select></label>
+      <div id="persistent-team-guide" class="full" ${values.guide_mode !== 'team' ? 'hidden' : ''}>
+        <label>Schedule team<select id="persistent-form-schedule-team" onchange="teamGuideChanged()">${teamScheduleOptions(values.team_schedule_key || '')}</select></label>
+        <div class="persistent-row-meta">Uses saved My Sports schedules. Games show matchups; gaps show No game scheduled. Missing, failed or stale schedules show Schedule unavailable. This guide does not verify what the stream is showing. Each team channel receives its own XMLTV ID automatically.</div>
+        ${!_teamScheduleTeams.length ? '<p class="status-muted">No saved teams yet. Refresh the league schedule in My Sports, then reopen this editor.</p>' : ''}
+        <div class="persistent-toolbar">
+          <label>Minutes before game<input id="persistent-form-pre" type="number" min="0" max="240" step="1" value="${values.team_pre_minutes ?? 30}" onchange="teamGuideChanged()"></label>
+          <label>Minutes after game<input id="persistent-form-post" type="number" min="0" max="240" step="1" value="${values.team_post_minutes ?? 30}" onchange="teamGuideChanged()"></label>
+          <label>Game duration when end time is missing (minutes)<input id="persistent-form-duration" type="number" min="15" max="720" step="1" value="${values.team_duration_minutes ?? 180}" onchange="teamGuideChanged()"></label>
+          <button class="btn btn-secondary" type="button" onclick="previewTeamGuide(this)">Preview team guide</button>
+        </div>
+        <div id="persistent-team-preview" class="persistent-results persistent-epg-results" role="status" aria-live="polite"></div>
+      </div>
+      <div id="persistent-standard-guide" class="full" ${values.guide_mode === 'team' ? 'hidden' : ''}>
         <label>Alternative EPG link<input id="persistent-form-epg-source" type="text" value="${escHtml(values.epg_source_id || '')}" placeholder="Use this channel’s provider guide" maxlength="512"></label>
         <div class="persistent-row-meta">If this channel has no guide, choose a link from a similar channel carrying the same schedule. Leave blank to use its own provider guide.</div>
         <div class="persistent-toolbar"><label>Search guide names or IDs<input id="persistent-form-epg-query" type="text" value="${escHtml((values.original_name || values.display_name || '').slice(0,512))}" maxlength="512" placeholder="Network, callsign, or guide ID" onkeydown="if(event.key==='Enter'){event.preventDefault();findSetupEpgLinks(document.getElementById('persistent-form-epg-search'))}"></label>
@@ -861,6 +922,7 @@ function showPersistentAdd(index) {
   const stream = _persistentResults[index];
   if (!stream) return;
   _epgSetupSequence++;
+  _teamGuidePreviewSequence++;
   const editor = document.getElementById('persistent-editor');
   // Search results may reorder while this draft is open. Keep its identity.
   editor.dataset.streamId = stream.stream_id;
@@ -874,6 +936,7 @@ function showPersistentEdit(id) {
   const channel = _persistentChannels.find(item => item.id === id);
   if (!channel) return;
   _epgSetupSequence++;
+  _teamGuidePreviewSequence++;
   document.getElementById('persistent-editor').dataset.providerGuideId = channel.epg_channel_id || '';
   document.getElementById('persistent-editor').innerHTML = persistentFormHtml(channel, 'edit');
   document.getElementById('persistent-editor').scrollIntoView({behavior:'smooth', block:'nearest'});
@@ -939,6 +1002,7 @@ function selectSetupEpgLink(index, button) {
 
 function readPersistentForm() {
   return {
+    ...readTeamGuideConfig(),
     display_name:document.getElementById('persistent-form-name').value.trim(),
     channel_number:document.getElementById('persistent-form-number').value.trim(),
     enabled:document.getElementById('persistent-form-enabled').value === 'true',
@@ -968,7 +1032,7 @@ async function savePersistentForm(mode, id) {
     document.getElementById('persistent-editor').innerHTML = '';
     await loadPersistentChannels();
     showToast(`${data.channel.display_name} saved`, 'success');
-    if (data.channel.enabled && !String(data.channel.epg_source_id || '').startsWith('xmltv:')) {
+    if (data.channel.enabled && data.channel.guide_mode !== 'team' && !String(data.channel.epg_source_id || '').startsWith('xmltv:')) {
       try {
         const guide = await persistentRequest('/api/xtream/epg/refresh', {method:'POST'});
         showToast(`XMLTV guide updated: ${guide.programmes} programmes`, guide.failed ? 'warning' : 'success');
@@ -984,7 +1048,7 @@ async function setPersistentEnabled(id, enabled) {
     await persistentRequest(`/api/xtream/persistent-channels/${id}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled})});
     await loadPersistentChannels();
     showToast(`Persistent channel ${enabled ? 'enabled' : 'disabled'}`, 'success');
-    if (enabled && !String(_persistentChannels.find(c => c.id === id)?.epg_source_id || '').startsWith('xmltv:')) await persistentRequest('/api/xtream/epg/refresh', {method:'POST'});
+    if (enabled && _persistentChannels.find(c => c.id === id)?.guide_mode !== 'team' && !String(_persistentChannels.find(c => c.id === id)?.epg_source_id || '').startsWith('xmltv:')) await persistentRequest('/api/xtream/epg/refresh', {method:'POST'});
   } catch (err) { persistentError(err.message); }
 }
 

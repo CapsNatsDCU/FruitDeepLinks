@@ -324,6 +324,8 @@ def apply_selected(conn, accounts=(), *, persistent_id=None, source_id=None):
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     count = 0
     for channel in list_channels(conn, enabled_only=True):
+        if channel.get("guide_mode") == "team":
+            continue
         if persistent_id is not None and channel["id"] != persistent_id:
             continue
         source = channel.get("epg_source_id") or ""

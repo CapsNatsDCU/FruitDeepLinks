@@ -141,3 +141,45 @@ test('guide source changes reset pagination and preserve unsaved selection', asy
   assert.equal(p.document.getElementById('persistent-form-epg-source').value, 'xmltv:1:chosen');
   assert.equal(p.document.getElementById('persistent-form-name').value, 'Unsaved channel name');
 });
+
+test('team guide config survives polling and saving avoids provider refresh', async () => {
+  const p = page();
+  p.run(`_teamScheduleTeams = [{key:'nhl|washington capitals',team:'Washington Capitals',league:'NHL'}]; showPersistentEdit(7);`);
+  const values = {
+    'persistent-form-guide-mode':'team', 'persistent-form-schedule-team':'nhl|washington capitals',
+    'persistent-form-pre':'15', 'persistent-form-post':'45', 'persistent-form-duration':'210',
+    'persistent-form-name':'Capitals', 'persistent-form-number':'7', 'persistent-form-enabled':'true',
+  };
+  for (const [id,value] of Object.entries(values)) p.document.getElementById(id).value=value;
+  p.run('teamGuideChanged()');
+  assert.equal(p.document.getElementById('persistent-standard-guide').hidden,true);
+  assert.equal(p.document.getElementById('persistent-standard-guide-id').hidden,true);
+  assert.equal(p.document.getElementById('persistent-team-guide').hidden,false);
+  await p.run('loadQualityQueue()');
+  assert.equal(p.run('readPersistentForm().team_duration_minutes'),210);
+  p.run(`requests = []; persistentRequest = async (url, options) => {
+    requests.push(url);
+    if(options) { capturedSave=JSON.parse(options.body); return {channel:{display_name:'Capitals',enabled:true,guide_mode:'team'}}; }
+    return {channels:[]};
+  };`);
+  await p.run('savePersistentForm("edit",7)');
+  assert.equal(p.run('capturedSave.guide_mode'),'team');
+  assert.equal(p.run('capturedSave.team_pre_minutes'),15);
+  assert.equal(p.run('requests.includes("/api/xtream/epg/refresh")'),false);
+});
+
+test('changing team settings rejects an outdated preview response', async () => {
+  const p = page();
+  p.context.Date = Date;
+  p.document.getElementById('persistent-team-preview').isConnected=true;
+  p.run(`persistentRequest = () => new Promise(resolve => {resolvePreview=resolve});`);
+  const button={disabled:false,isConnected:true};
+  p.context.fixtureButton=button;
+  const pending=p.run('previewTeamGuide(fixtureButton)');
+  assert.equal(button.disabled,true);
+  assert.equal(p.document.getElementById('persistent-team-preview').textContent,'Building guide preview…');
+  p.run('teamGuideChanged(); resolvePreview({schedule_status:"ready",programmes:[]})');
+  await pending;
+  assert.equal(p.document.getElementById('persistent-team-preview').textContent,'');
+  assert.equal(button.disabled,false);
+});

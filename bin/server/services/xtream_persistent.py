@@ -119,6 +119,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
         "epg_channel_id": "TEXT",
         "epg_source_id": "TEXT",
+        "guide_mode": "TEXT NOT NULL DEFAULT 'standard'",
+        "team_schedule_key": "TEXT",
+        "team_pre_minutes": "INTEGER NOT NULL DEFAULT 30",
+        "team_post_minutes": "INTEGER NOT NULL DEFAULT 30",
+        "team_duration_minutes": "INTEGER NOT NULL DEFAULT 180",
     }
     for column, declaration in additions.items():
         if column not in existing:
@@ -228,6 +233,7 @@ def _row_to_dict(row: sqlite3.Row | tuple, columns: Optional[list[str]] = None) 
         result["metadata"] = {}
     result["logo"] = result.get("logo_override") or result.get("icon")
     result["effective_guide_id"] = (
+        f"xtream.team.{result.get('id')}" if result.get("guide_mode") == "team" else
         result.get("guide_id") or result.get("channel_id") or f"xtream.persistent.{result.get('id')}"
     )
     result["advertised_quality"] = advertised_quality(result.get("original_name"))
@@ -334,6 +340,11 @@ def create_channel(
     favorite_team: Any = None,
     notes: Any = None,
     enabled: bool = True,
+    guide_mode: str = "standard",
+    team_schedule_key: str = "",
+    team_pre_minutes: int = 30,
+    team_post_minutes: int = 30,
+    team_duration_minutes: int = 180,
 ) -> dict[str, Any]:
     ensure_schema(conn)
     from xtream_accounts import public_metadata
@@ -347,6 +358,10 @@ def create_channel(
     number = normalize_channel_number(channel_number)
     _check_lane_number(conn, number)
     now = utc_now()
+    from server.services.team_channel_epg import validate_config
+    team_config = validate_config(conn, {"guide_mode": guide_mode, "team_schedule_key": team_schedule_key,
+        "team_pre_minutes": team_pre_minutes, "team_post_minutes": team_post_minutes,
+        "team_duration_minutes": team_duration_minutes})
     epg_id = stream.get("epg_channel_id") or stream.get("epg_id")
     try:
         cursor = conn.execute(
@@ -383,6 +398,8 @@ def create_channel(
         )
         conn.execute("UPDATE xtream_persistent_channels SET epg_channel_id=?,epg_source_id=? WHERE id=?",
                      (_clean_optional(epg_id, limit=512), _clean_optional(epg_source_id, limit=512), cursor.lastrowid))
+        conn.execute("UPDATE xtream_persistent_channels SET " + ",".join(key + "=?" for key in team_config) + " WHERE id=?",
+                     (*team_config.values(), cursor.lastrowid))
         conn.commit()
     except sqlite3.IntegrityError as exc:
         conn.rollback()
@@ -393,6 +410,7 @@ def create_channel(
 _EDITABLE_FIELDS = {
     "display_name", "channel_number", "channel_id", "guide_id", "logo_override",
     "favorite_team", "notes", "enabled", "epg_source_id",
+    "guide_mode", "team_schedule_key", "team_pre_minutes", "team_post_minutes", "team_duration_minutes",
 }
 
 
@@ -402,6 +420,9 @@ def update_channel(conn: sqlite3.Connection, persistent_id: int,
     current = get_channel(conn, persistent_id)
     if not current:
         raise KeyError("Persistent channel not found")
+    from server.services.team_channel_epg import DEFAULTS, validate_config
+    if any(key in updates for key in DEFAULTS):
+        updates = {**updates, **validate_config(conn, updates, current=current)}
     assignments: list[str] = []
     values: list[Any] = []
     for key in _EDITABLE_FIELDS:

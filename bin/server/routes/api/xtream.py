@@ -88,6 +88,10 @@ def api_xtream_epg_refresh():
     from xtream_epg import refresh_epg
     from xtream_pool import XtreamPool
     try:
+        with get_conn() as conn:
+            channels = list_channels(conn, enabled_only=True)
+            if not channels or all(c.get("guide_mode") == "team" for c in channels):
+                return jsonify({"status": "success", **refresh_epg(conn, None)})
         pool = XtreamPool(resolve_db_path())
         pool.check_accounts()
         with get_conn() as conn:
@@ -112,6 +116,17 @@ def api_xtream_epg_status():
             rows = [dict(r) for r in conn.execute("SELECT * FROM xtream_epg_status ORDER BY persistent_id")]
         except sqlite3.OperationalError:
             rows = []
+        from server.services.team_channel_epg import guide
+        for channel in list_channels(conn, enabled_only=True):
+            if channel.get("guide_mode") != "team":
+                continue
+            generated = guide(conn, channel)
+            rows = [row for row in rows if row["persistent_id"] != channel["id"]]
+            rows.append({"persistent_id": channel["id"], "guide_mode": "team",
+                         "programme_count": len(generated["programmes"]),
+                         "last_success": generated["last_success"],
+                         "schedule_status": generated["schedule_status"],
+                         "last_error": None if generated["schedule_status"] == "ready" else "Schedule unavailable"})
     return jsonify({"status": "success", "channels": rows})
 
 
@@ -332,7 +347,7 @@ def api_external_xmltv_assign():
             if ("expected_source_id" in payload
                     and payload["expected_source_id"] != current.get("epg_source_id")):
                 return jsonify(status="error", message="This channel’s guide changed. Refresh the channel list and try again."), 409
-            channel = update_channel(conn, current["id"], {"epg_source_id": guide_id})
+            channel = update_channel(conn, current["id"], {"epg_source_id": guide_id, "guide_mode": "standard"})
             count = external_xmltv.apply_selected(conn, persistent_id=current["id"])
             return jsonify(status="success", channel=channel, programmes=count)
     except ValueError as exc:
@@ -867,6 +882,8 @@ def api_xtream_persistent_channels():
                 favorite_team=payload.get("favorite_team"),
                 notes=payload.get("notes"),
                 enabled=payload.get("enabled", True),
+                **{key: payload[key] for key in ("guide_mode", "team_schedule_key", "team_pre_minutes",
+                   "team_post_minutes", "team_duration_minutes") if key in payload},
             )
         if str(channel.get("epg_source_id") or "").startswith("xmltv:"):
             from server.services.external_xmltv import apply_selected
@@ -877,6 +894,39 @@ def api_xtream_persistent_channels():
             "INFO",
         )
         return jsonify({"status": "success", "channel": channel}), 201
+    except Exception as exc:
+        return _safe_error(exc)
+
+
+@bp.route("/api/xtream/persistent-channels/team-schedule/teams", methods=["GET"])
+def api_team_schedule_teams():
+    if not db_exists(): return _read_database_error()
+    try:
+        from server.services.team_channel_epg import team_options
+        with get_conn() as conn:
+            teams = team_options(conn)
+        return jsonify({"status": "success", "teams": teams})
+    except Exception as exc:
+        return _safe_error(exc)
+
+
+@bp.route("/api/xtream/persistent-channels/team-schedule/preview", methods=["GET"])
+def api_team_schedule_preview():
+    if not db_exists(): return _read_database_error()
+    try:
+        from server.services.team_channel_epg import DEFAULTS, validate_config, guide
+        values = {"guide_mode": "team", "team_schedule_key": request.args.get("team_schedule_key", "")}
+        for key in ("team_pre_minutes", "team_post_minutes", "team_duration_minutes"):
+            try:
+                values[key] = int(request.args.get(key, DEFAULTS[key]))
+            except (ValueError, TypeError):
+                raise PersistentChannelError("Use whole minutes for coverage and duration") from None
+        with get_conn() as conn:
+            result = guide(conn, validate_config(conn, values))
+        programmes = [{"start": p.get("start"), "stop": p.get("stop"),
+                       "title": p.findtext("title"), "description": p.findtext("desc")}
+                      for p in result.pop("programmes")]
+        return jsonify({"status": "success", **result, "programmes": programmes[:30]})
     except Exception as exc:
         return _safe_error(exc)
 
