@@ -34,18 +34,18 @@ priority set is NFL, NHL, MLB, NBA, MLS, UEFA Champions League, English Premier
 League, Formula 1, NASCAR Cup, IndyCar, NCAA FBS, and UFL.  Each league can be
 enabled or disabled with a checkbox.
 
-Set `SERPAPI_API_KEY` in deployment secrets to check NFL, NHL, MLB, NBA, MLS,
-Champions League, Premier League, and NCAA FBS through SerpApi's structured
-Google Sports feed.  Formula 1, NASCAR Cup, IndyCar, and UFL use free ESPN
-schedule feeds and do not consume SerpApi searches.  The scheduled refresh
-runs this audit at most every 72 hours, reserves 25 of the free plan's 250
-monthly searches, and shows tracked usage in My Sports.
-The My Sports count records successful searches made by this Xsort database;
-it is not the SerpApi account's billing counter. If the running app reports
-`serpapi_configured: false` or a league reports `key_required`, set the key in
-the deployed container environment and recreate that container before using
-**Check now**. A key in a separate local `.env` does not configure a remote
-stack.
+All default leagues use public ESPN schedule feeds without an API key or paid
+search credits. Team leagues fetch each calendar month intersecting the bounded
+coverage window, merging the results only after every month succeeds. This avoids
+ESPN's failing date-range requests and year-wide response truncation. An invalid,
+failed or capped response retains the prior snapshot and reports a failed check.
+NCAA FBS currently caps its public feed at 25 entries; Fruit reports that limit
+instead of treating a partial response as a complete team schedule.
+Formula 1, NASCAR Cup, IndyCar and UFL retain their season/year feeds.
+
+The scheduled refresh runs at most every 72 hours; **Outside Schedule Coverage → Check now** in
+My Sports refreshes it explicitly. The optional SerpApi adapter still supports
+configured keys and search-budget guards, but the default registry never uses it.
 
 External events live only in `sports_schedule_reference_events`.  They can
 report `missing_from_ingestion`, `no_playable`, `playable_found`, or

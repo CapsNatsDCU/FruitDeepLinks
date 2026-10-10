@@ -122,6 +122,40 @@ class TeamChannelGuideTests(unittest.TestCase):
             self.assertEqual(export.status_code,200)
             self.assertIn('Washington Capitals',export.get_data(as_text=True))
 
+    def catalog_team(self, league, name, aliases=()):
+        from sports_metadata import ensure_schema as metadata_schema, _upsert_named
+        metadata_schema(self.conn)
+        league_id = _upsert_named(self.conn, 'leagues', league)
+        team_id = _upsert_named(self.conn, 'teams', name, league_id=league_id, aliases=aliases)
+        self.conn.commit()
+        return team_id
+
+    def test_catalog_teams_remain_selectable_when_only_ufl_downloaded(self):
+        self.seed(league='ufl', teams=['DC Defenders', 'Birmingham Stallions'])
+        self.catalog_team('NHL', 'Washington Capitals', aliases=['Caps'])
+        self.catalog_team('National Football League', 'Washington Commanders')
+        self.catalog_team('NBA', 'Washington Wizards')
+        self.catalog_team('Premier League - Lebanon', 'Unrelated')
+        options = team_epg.team_options(self.conn)
+        self.assertTrue({'NHL','NFL','NBA','UFL'}.issubset({t['league'] for t in options}))
+        self.assertFalse(any(t['team'] == 'Unrelated' for t in options))
+        config = team_epg.validate_config(self.conn, {'guide_mode':'team','team_schedule_key':'nhl|washington capitals'})
+        result = team_epg.guide(self.conn, config, now=self.now)
+        self.assertEqual(result['schedule_status'], 'unavailable')
+        self.assertTrue(all(p.findtext('title') == 'Schedule unavailable' for p in result['programmes']))
+
+    def test_catalog_alias_matches_schedule_but_unmatched_identity_stays_unavailable(self):
+        self.catalog_team('NHL','Washington Capitals', aliases=['Caps'])
+        self.seed(teams=['Caps','Pittsburgh Penguins'])
+        options=team_epg.team_options(self.conn)
+        self.assertFalse(any(t['key'] == 'nhl|caps' for t in options))
+        generated=team_epg.guide(self.conn,self.select(),now=self.now)
+        self.assertEqual(generated['schedule_status'],'ready')
+        self.assertTrue(any(p.findtext('category') == 'Sports' for p in generated['programmes']))
+        self.catalog_team('NHL','Washington Wizards')
+        unknown=team_epg.guide(self.conn,{'team_schedule_key':'nhl|washington wizards'},now=self.now)
+        self.assertEqual(unknown['schedule_status'],'unavailable')
+
     def test_create_team_mode_through_api_and_distinct_export_ids(self):
         self.seed()
         from server.services.xtream_channel_cache import replace_snapshot

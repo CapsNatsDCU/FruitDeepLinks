@@ -835,8 +835,35 @@ async function toggleSetupEpgSources(button) {
   }
 }
 
-function teamScheduleOptions(selected) {
-  const options = [..._teamScheduleTeams];
+function scheduleTeamName(value) {
+  return String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+function guessScheduleTeam(channelName) {
+  const text = ' ' + scheduleTeamName(channelName) + ' ';
+  const contains = (name, minimum = 4) => { const term = scheduleTeamName(name); return term.replace(/ /g,'').length >= minimum && text.includes(' ' + term + ' '); };
+  const candidates = _teamScheduleTeams.map(t => ({team:t, score:(contains(t.team) ? 100 : (t.aliases || []).some(alias => contains(alias)) ? 80 : 0) + (contains(t.league, 2) ? 5 : 0)})).filter(t => t.score >= 80);
+  const best = Math.max(0, ...candidates.map(t => t.score));
+  const winners = candidates.filter(t => t.score === best);
+  return {team:winners.length === 1 ? winners[0].team : null, ambiguous:winners.length > 1};
+}
+function suggestScheduleTeam() {
+  const guess = guessScheduleTeam(document.getElementById('persistent-form-name').value);
+  const status = document.getElementById('persistent-team-suggestion');
+  if (guess.team) {
+    document.getElementById('persistent-team-search').value = '';
+    document.getElementById('persistent-form-schedule-team').innerHTML = teamScheduleOptions(guess.team.key);
+    document.getElementById('persistent-form-schedule-team').value = guess.team.key;
+    teamGuideChanged();
+    status.textContent = 'Suggested from channel name: ' + guess.team.league + ' · ' + guess.team.team + '. Review before saving.';
+  } else status.textContent = guess.ambiguous ? 'More than one team matches this channel name. Choose the team below.' : 'No clear team match. Choose the team below.';
+}
+function filterScheduleTeams() {
+  const select = document.getElementById('persistent-form-schedule-team');
+  select.innerHTML = teamScheduleOptions(select.value, document.getElementById('persistent-team-search').value);
+}
+function teamScheduleOptions(selected, query = '') {
+  const terms = scheduleTeamName(query).split(' ').filter(Boolean);
+  const options = _teamScheduleTeams.filter(t => t.key === selected || terms.every(term => scheduleTeamName([t.league,t.team,...(t.aliases || [])].join(' ')).includes(term)));
   if (selected && !options.some(t => t.key === selected)) options.push({key:selected, team:selected.split('|').pop(), league:'Saved selection'});
   return '<option value="">Choose a team…</option>' + options.map(t => `<option value="${escHtml(t.key)}" ${t.key === selected ? 'selected' : ''}>${escHtml(t.league + ' · ' + t.team)}</option>`).join('');
 }
@@ -875,6 +902,8 @@ async function previewTeamGuide(button) {
 }
 
 function persistentFormHtml(values, mode) {
+  const guess = values.team_schedule_key ? {team:null, ambiguous:false} : guessScheduleTeam(values.display_name || values.original_name);
+  if (guess.team) values = {...values, team_schedule_key:guess.team.key};
   return `<div class="persistent-form"><h3 style="margin:0 0 10px">${mode === 'add' ? 'Add Persistent Channel' : 'Edit Persistent Channel'}</h3>
     <div class="persistent-form-grid">
       <label class="full">Display name<input id="persistent-form-name" type="text" value="${escHtml(values.display_name || '')}" required></label>
@@ -884,9 +913,12 @@ function persistentFormHtml(values, mode) {
       <label id="persistent-standard-guide-id" ${values.guide_mode === 'team' ? 'hidden' : ''}>XMLTV / guide ID<input id="persistent-form-guide-id" type="text" value="${escHtml(values.guide_id || '')}" placeholder="Optional"></label>
       <label class="full">Guide mode<select id="persistent-form-guide-mode" onchange="teamGuideChanged()"><option value="standard" ${values.guide_mode !== 'team' ? 'selected' : ''}>Provider / imported XMLTV</option><option value="team" ${values.guide_mode === 'team' ? 'selected' : ''}>Team schedule</option></select></label>
       <div id="persistent-team-guide" class="full" ${values.guide_mode !== 'team' ? 'hidden' : ''}>
-        <label>Schedule team<select id="persistent-form-schedule-team" onchange="teamGuideChanged()">${teamScheduleOptions(values.team_schedule_key || '')}</select></label>
-        <div class="persistent-row-meta">Uses saved My Sports schedules. Games show matchups; gaps show No game scheduled. Missing, failed or stale schedules show Schedule unavailable. This guide does not verify what the stream is showing. Each team channel receives its own XMLTV ID automatically.</div>
-        ${!_teamScheduleTeams.length ? '<p class="status-muted">No saved teams yet. Refresh the league schedule in My Sports, then reopen this editor.</p>' : ''}
+        <label>Search teams<input id="persistent-team-search" type="text" placeholder="Team or league, e.g. Capitals or NHL" oninput="filterScheduleTeams()"></label>
+        <button class="btn btn-secondary" type="button" onclick="suggestScheduleTeam()">Suggest from channel name</button>
+        <div id="persistent-team-suggestion" class="status-muted" role="status" aria-live="polite">${guess.team ? escHtml('Suggested from channel name: ' + guess.team.league + ' · ' + guess.team.team + '. Review before saving.') : guess.ambiguous ? 'More than one team matches this channel name. Choose the team below.' : ''}</div>
+        <label>Schedule team<select id="persistent-form-schedule-team" onchange="document.getElementById('persistent-team-suggestion').textContent='';teamGuideChanged()">${teamScheduleOptions(values.team_schedule_key || '')}</select></label>
+        <div class="persistent-row-meta">Uses saved My Sports schedules. Games show matchups; gaps show No game scheduled. Missing, failed, stale or unmatched team schedules show Schedule unavailable. This guide does not verify what the stream is showing. Each team channel receives its own XMLTV ID automatically.</div>
+        ${!_teamScheduleTeams.length ? '<p class="status-muted">No teams in the saved sports catalog or schedules yet. Import your team catalog or refresh the league schedule in My Sports, then reopen this editor.</p>' : ''}
         <div class="persistent-toolbar">
           <label>Minutes before game<input id="persistent-form-pre" type="number" min="0" max="240" step="1" value="${values.team_pre_minutes ?? 30}" onchange="teamGuideChanged()"></label>
           <label>Minutes after game<input id="persistent-form-post" type="number" min="0" max="240" step="1" value="${values.team_post_minutes ?? 30}" onchange="teamGuideChanged()"></label>

@@ -183,3 +183,36 @@ test('changing team settings rejects an outdated preview response', async () => 
   assert.equal(p.document.getElementById('persistent-team-preview').textContent,'');
   assert.equal(button.disabled,false);
 });
+
+test('channel names suggest a clear team but do not enable team mode or replace a saved selection', () => {
+  const p=page();
+  p.run(`_teamScheduleTeams = [
+    {key:'nhl|washington capitals',team:'Washington Capitals',league:'NHL',aliases:['Caps']},
+    {key:'nhl|pittsburgh penguins',team:'Pittsburgh Penguins',league:'NHL'},
+    {key:'nfl|new york giants',team:'New York Giants',league:'NFL',aliases:['Giants']},
+    {key:'mlb|san francisco giants',team:'San Francisco Giants',league:'MLB',aliases:['Giants']},
+  ];`);
+  assert.equal(p.run('guessScheduleTeam("US: WASHINGTON CAPITALS HD").team.key'),'nhl|washington capitals');
+  assert.equal(p.run('guessScheduleTeam("US: Caps 4K").team.key'),'nhl|washington capitals');
+  assert.equal(p.run('guessScheduleTeam("Giants").team'),null);
+  assert.equal(p.run('guessScheduleTeam("Giants").ambiguous'),true);
+  assert.equal(p.run('guessScheduleTeam("US: NFL Giants HD").team.key'),'nfl|new york giants');
+  assert.equal(p.run('guessScheduleTeam("Washington Capitals vs Pittsburgh Penguins").team'),null);
+  assert.equal(p.run('guessScheduleTeam("Capital One Sports").team'),null);
+  const form=p.run('persistentFormHtml({display_name:"US: WASHINGTON CAPITALS",enabled:true},"add")');
+  assert.ok(form.includes('Suggested from channel name: NHL'));
+  assert.ok(form.includes('value="nhl|washington capitals" selected'));
+  assert.ok(form.includes('value="standard" selected'));
+  const saved=p.run('persistentFormHtml({display_name:"Washington Capitals",team_schedule_key:"nhl|pittsburgh penguins"},"edit")');
+  assert.ok(saved.includes('value="nhl|pittsburgh penguins" selected'));
+});
+
+test('team search filters the catalog and keeps an existing selected team', () => {
+  const p=page();
+  p.run(`_teamScheduleTeams=[{key:'caps',team:'Washington Capitals',league:'NHL'}, {key:'wizards',team:'Washington Wizards',league:'NBA'}];`);
+  const filtered=p.run('teamScheduleOptions("", "NHL Capitals")');
+  assert.ok(filtered.includes('Washington Capitals'));
+  assert.ok(!filtered.includes('Washington Wizards'));
+  const selected=p.run('teamScheduleOptions("wizards", "NHL")');
+  assert.ok(selected.includes('value="wizards" selected'));
+});

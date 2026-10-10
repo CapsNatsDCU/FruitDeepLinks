@@ -268,10 +268,14 @@ programmes when available and channel definitions without invented schedules oth
 For a stream dedicated to one team, choose **Guide mode → Team schedule** in its
 persistent-channel editor, select the league/team, and optionally adjust pre/post
 coverage (default 30 minutes each) and estimated duration (default 180 minutes).
-**Preview team guide** shows the next seven days before saving. Fruit generates
+Teams come from the supported league catalog as well as saved schedules, so a
+failed download does not hide the team selector. A clear channel-name match is
+preselected as a suggestion; review it before saving. Ambiguous names require a
+manual choice. **Preview team guide** shows the next seven days before saving. Fruit generates
 matchup entries and **No game scheduled** gaps from the saved My Sports league
 schedule. Missing, failed, or more than 72-hour-old schedules produce **Schedule
-unavailable** instead. Refresh the league schedule in My Sports to update the data;
+unavailable** instead. Refresh the league schedule in My Sports to update the data. Supported team leagues
+use public ESPN feeds without an API key, fetching bounded calendar months;
 guide reads do not fetch IPTV or sports providers. Missing game end times use the
 configured duration. This describes scheduled games, not actual stream availability
 or verified broadcast content. Each team channel gets a unique `xtream.team.<id>`

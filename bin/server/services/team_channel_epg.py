@@ -42,22 +42,53 @@ def _members(value):
 
 
 def team_options(conn):
-    """Read exact league-scoped team identities from saved reference schedules."""
-    from sports_schedule_audit import LEAGUE_BY_KEY
+    """Use the supported league catalog even before a schedule has downloaded."""
+    from sports_schedule_audit import LEAGUES, LEAGUE_BY_KEY
     options = {}
     tables = _tables(conn)
+    league_keys = {_normal(alias): spec.key for spec in LEAGUES
+                   for alias in (spec.key, spec.name, *spec.aliases)}
 
-    def add(league, team):
+    def add(league, team, aliases=()):
         if league not in LEAGUE_BY_KEY or not isinstance(team, str) or not team.strip():
             return
         name = " ".join(team.split())
         key = league + "|" + _normal(name)
-        options.setdefault(key, {"key": key, "team": name, "league": LEAGUE_BY_KEY[league].name})
+        item = options.setdefault(key, {"key": key, "team": name,
+                                       "league": LEAGUE_BY_KEY[league].name, "aliases": []})
+        item["aliases"] = sorted(set(item["aliases"]) | {a for a in aliases if isinstance(a, str) and a.strip()})
 
+    aliases = {}
+    league_aliases = {}
+    if "catalog_aliases" in tables:
+        for row in conn.execute("SELECT entity_type,fruit_id,alias FROM catalog_aliases WHERE entity_type IN ('team','league')"):
+            target = aliases if row[0] == "team" else league_aliases
+            target.setdefault(row[1], []).append(row[2])
+    if {"teams", "leagues"}.issubset(tables):
+        join = ""
+        condition = ""
+        if "catalog_entity_state" in tables:
+            join = " LEFT JOIN catalog_entity_state s ON s.entity_type='team' AND s.fruit_id=t.id"
+            condition = " WHERE COALESCE(s.archived,0)=0 AND s.merged_into_id IS NULL"
+        for row in conn.execute("SELECT t.id,t.name,t.aliases_json,l.id,l.name FROM teams t JOIN leagues l ON l.id=t.league_id" + join + condition):
+            league = next((league_keys[_normal(name)] for name in [row[4], *league_aliases.get(row[3], [])]
+                           if _normal(name) in league_keys), None)
+            add(league, row[1], [*_members(row[2]), *aliases.get(row[0], [])])
+    # Only uniquely owned aliases are usable for schedule identity matching.
+    owners = {}
+    for item in options.values():
+        league = item["key"].split("|", 1)[0]
+        for name in [item["team"], *item["aliases"]]:
+            owners.setdefault((league, _normal(name)), set()).add(item["key"])
+    for item in options.values():
+        league = item["key"].split("|", 1)[0]
+        item["aliases"] = [name for name in item["aliases"] if len(owners[(league, _normal(name))]) == 1]
     if "sports_schedule_reference_events" in tables:
         for row in conn.execute("SELECT league_key,participants_json FROM sports_schedule_reference_events"):
             for team in _members(row[1]):
-                add(row[0], team)
+                owner = owners.get((row[0], _normal(team)), set())
+                if len(owner) != 1:
+                    add(row[0], team)
     return sorted(options.values(), key=lambda item: (item["league"].casefold(), item["team"].casefold()))
 
 
@@ -76,15 +107,18 @@ def validate_config(conn, values, *, current=None):
             raise PersistentChannelError("Use whole minutes: pre/post coverage 0–240; game duration 15–720")
     key = config["team_schedule_key"] or ""
     if not isinstance(key, str) or len(key) > 512:
-        raise PersistentChannelError("Select a team from the saved sports schedules")
+        raise PersistentChannelError("Select a team from the sports catalog")
     config["team_schedule_key"] = key
     if config["guide_mode"] == "team":
-        known = {item["key"] for item in team_options(conn)}
+        options = team_options(conn)
+        known = {item["key"] for item in options}
+        known.update(item["key"].split("|", 1)[0] + "|" + _normal(alias)
+                     for item in options for alias in item["aliases"])
         # Retain an existing selection if its schedule source disappears. The
         # generated guide reports unavailable, while unrelated edits still work.
         retained = key and current and key == current.get("team_schedule_key")
         if key not in known and not retained:
-            raise PersistentChannelError("Select a team from the saved sports schedules")
+            raise PersistentChannelError("Select a team from the sports catalog")
     return config
 
 
@@ -94,8 +128,9 @@ def guide(conn, channel, *, now=None):
     begin = current.replace(minute=0, second=0, microsecond=0)
     finish = begin + timedelta(days=GUIDE_DAYS)
     league, _, member = str(channel.get("team_schedule_key") or "").partition("|")
-    team = next((t["team"] for t in team_options(conn)
-                 if t["key"] == channel.get("team_schedule_key")), member)
+    option = next((t for t in team_options(conn) if t["key"] == channel.get("team_schedule_key")), None)
+    team = option["team"] if option else member
+    identities = {member, *(_normal(a) for a in (option or {}).get("aliases", []))}
     tables = _tables(conn)
     state = None
     if "sports_schedule_league_state" in tables:
@@ -110,6 +145,12 @@ def guide(conn, channel, *, now=None):
         and timedelta(0) <= current - state["last_success"] <= timedelta(hours=FRESH_HOURS)
         and "sports_schedule_reference_events" in tables
     )
+    identity_known = False
+    if healthy:
+        identity_known = any(identities.intersection(_normal(n) for n in _members(row[0]))
+            for row in conn.execute("SELECT participants_json FROM sports_schedule_reference_events WHERE league_key=? AND source=?",
+                                    (league, state["source"])))
+    healthy = healthy and identity_known
     windows = []
     if healthy:
         rows = conn.execute(
@@ -120,7 +161,7 @@ def guide(conn, channel, *, now=None):
         )
         for row in rows:
             names = _members(row[3])
-            if member not in {_normal(name) for name in names}:
+            if not identities.intersection(_normal(name) for name in names):
                 continue
             status = _normal(row[4])
             if any(marker in status for marker in ("cancel", "postpon", "suspend", "tbd")):
@@ -160,7 +201,7 @@ def guide(conn, channel, *, now=None):
         f"No game for {team} is listed in the saved league schedule during this period. "
         "This does not indicate whether the stream is online."
         if healthy else
-        "The saved league schedule is missing, failed, or more than three days old. "
+        "The saved league schedule is missing, failed, more than three days old, or has no verified identity for this team. "
         "Refresh it in My Sports before relying on this guide."
     )
     blocks = []

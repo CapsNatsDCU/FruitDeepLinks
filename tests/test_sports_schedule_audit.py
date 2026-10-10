@@ -2,6 +2,8 @@ import json
 import sqlite3
 import sys
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -88,7 +90,8 @@ class SportsScheduleAuditTests(unittest.TestCase):
                 "teams": [{"name": "Washington Commanders"}, {"name": "Philadelphia Eagles"}],
             }]}]}})
 
-        result = refresh(self.conn, api_key=secret, force=True, now=NOW, getter=getter)
+        with patch.dict(LEAGUE_BY_KEY, nfl=replace(LEAGUE_BY_KEY["nfl"], source="serpapi")):
+            result = refresh(self.conn, api_key=secret, force=True, now=NOW, getter=getter)
         self.assertEqual(1, result["successful_searches"])
         dump = "\n".join(str(value) for row in self.conn.iterdump() for value in [row])
         self.assertNotIn(secret, dump)
@@ -104,9 +107,45 @@ class SportsScheduleAuditTests(unittest.TestCase):
         def unexpected_request(*_args, **_kwargs):
             raise AssertionError("budget guard contacted SerpApi")
 
-        result = refresh(self.conn, api_key="configured", force=True, now=NOW, getter=unexpected_request)
+        with patch.dict(LEAGUE_BY_KEY, nfl=replace(LEAGUE_BY_KEY["nfl"], source="serpapi")):
+            result = refresh(self.conn, api_key="configured", force=True, now=NOW, getter=unexpected_request)
         self.assertEqual("budget_reserved", result["details"]["nfl"])
         self.assertEqual(0, result["successful_searches"])
+
+    def test_default_team_feeds_need_no_key_and_fetch_whole_months(self):
+        save_enabled_keys(self.conn, ['nhl','nba'])
+        calls=[]
+        def getter(url, **kwargs):
+            params=kwargs['params']; calls.append((url,params))
+            self.assertNotIn('api_key',params)
+            self.assertRegex(params['dates'], r'^\d{6}$')
+            return Response({'events':[{'id':'game','date':'2026-10-04T19:00Z','name':'Matchup',
+                'competitions':[{'competitors':[{'team':{'displayName':'Washington Capitals'}},
+                                               {'team':{'displayName':'Pittsburgh Penguins'}}]}]}]})
+        result=refresh(self.conn,api_key=None,force=True,now=NOW,getter=getter)
+        self.assertEqual(result['status'],'complete')
+        self.assertEqual(result['successful_searches'],0)
+        self.assertEqual(result['event_count'],2)
+        self.assertEqual([p['dates'] for _,p in calls],['202609','202610','202609','202610'])
+        self.assertTrue(all('espn.com' in url for url,_ in calls))
+
+    def test_failed_month_retains_whole_previous_snapshot(self):
+        save_enabled_keys(self.conn,['nhl'])
+        def successful(*args,**kwargs):
+            return Response({'events':[{'id':'old','date':'2026-10-04T19:00Z','name':'Old'}]})
+        refresh(self.conn,force=True,now=NOW,getter=successful)
+        for body,status in [({},200),({'events':[{}]*1000},200),({},500)]:
+            def fails_later(url,**kwargs):
+                return Response({'events':[{'id':'new','date':'2026-10-05T19:00Z','name':'New'}]}) if kwargs['params']['dates']=='202609' else Response(body,status)
+            result=refresh(self.conn,force=True,now=NOW,getter=fails_later)
+            self.assertEqual(result['status'],'unavailable')
+            self.assertEqual([r[0] for r in self.conn.execute('SELECT source_event_id FROM sports_schedule_reference_events WHERE active=1')],['old'])
+
+    def test_college_public_feed_cap_does_not_claim_complete_schedule(self):
+        save_enabled_keys(self.conn,['ncaa-fbs'])
+        result=refresh(self.conn,force=True,now=NOW,getter=lambda *a,**kw:Response({'events':[{}]*25}))
+        self.assertEqual(result['status'],'unavailable')
+        self.assertEqual(result['details']['ncaa-fbs'],'response_limit_reached')
 
     def test_snapshot_reports_missing_playable_and_scheduled_without_authorizing_events(self):
         save_enabled_keys(self.conn, ["nfl"])

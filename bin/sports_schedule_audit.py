@@ -43,21 +43,22 @@ class LeagueSpec:
 
 
 # This is an operator-editable priority registry, not scheduling authority.
-# KGMIDs are stable Google/Freebase entity identifiers exposed by Wikidata.
+# Public ESPN feeds require no key. KGMIDs remain available for optional
+# SerpApi adapters; the default registry never spends paid search credits.
 LEAGUES: tuple[LeagueSpec, ...] = (
-    LeagueSpec("nfl", "NFL", "American football", "serpapi", "af", "/m/059yj",
+    LeagueSpec("nfl", "NFL", "American football", "espn", "af", "/m/059yj", espn_sport="football", espn_league="nfl",
                aliases=("National Football League",)),
-    LeagueSpec("nhl", "NHL", "Ice hockey", "serpapi", "ih", "/m/05gwr",
+    LeagueSpec("nhl", "NHL", "Ice hockey", "espn", "ih", "/m/05gwr", espn_sport="hockey", espn_league="nhl",
                aliases=("National Hockey League",)),
-    LeagueSpec("mlb", "MLB", "Baseball", "serpapi", "bb", "/m/09p14",
+    LeagueSpec("mlb", "MLB", "Baseball", "espn", "bb", "/m/09p14", espn_sport="baseball", espn_league="mlb",
                aliases=("Major League Baseball",)),
-    LeagueSpec("nba", "NBA", "Basketball", "serpapi", "bs", "/m/05jvx",
+    LeagueSpec("nba", "NBA", "Basketball", "espn", "bs", "/m/05jvx", espn_sport="basketball", espn_league="nba",
                aliases=("National Basketball Association",)),
-    LeagueSpec("mls", "MLS", "Soccer", "serpapi", "ft", "/m/0jfpf",
+    LeagueSpec("mls", "MLS", "Soccer", "espn", "ft", "/m/0jfpf", espn_sport="soccer", espn_league="usa.1",
                aliases=("Major League Soccer",)),
-    LeagueSpec("uefa-champions-league", "UEFA Champions League", "Soccer", "serpapi", "ft", "/m/0c1q0",
+    LeagueSpec("uefa-champions-league", "UEFA Champions League", "Soccer", "espn", "ft", "/m/0c1q0", espn_sport="soccer", espn_league="uefa.champions",
                aliases=("Champions League", "UCL")),
-    LeagueSpec("english-premier-league", "English Premier League", "Soccer", "serpapi", "ft", "/m/02_tc",
+    LeagueSpec("english-premier-league", "English Premier League", "Soccer", "espn", "ft", "/m/02_tc", espn_sport="soccer", espn_league="eng.1",
                aliases=("Premier League", "EPL")),
     LeagueSpec("formula-1", "Formula 1", "Motorsport", "espn", espn_sport="racing", espn_league="f1",
                aliases=("F1",)),
@@ -65,7 +66,7 @@ LEAGUES: tuple[LeagueSpec, ...] = (
                aliases=("NASCAR", "NASCAR Cup")),
     LeagueSpec("indycar", "IndyCar Series", "Motorsport", "espn", espn_sport="racing", espn_league="irl",
                aliases=("IndyCar", "IRL")),
-    LeagueSpec("ncaa-fbs", "NCAA FBS", "American football", "serpapi", "af", "/m/012hfxch",
+    LeagueSpec("ncaa-fbs", "NCAA FBS", "American football", "espn", "af", "/m/012hfxch", espn_sport="football", espn_league="college-football",
                aliases=("NCAA Division I Football Bowl Subdivision", "College Football", "NCAAF")),
     LeagueSpec("ufl", "UFL", "American football", "espn", espn_sport="football", espn_league="ufl",
                aliases=("United Football League",)),
@@ -288,8 +289,7 @@ def parse_espn_events(spec: LeagueSpec, payload: Mapping[str, Any]) -> list[dict
 
 
 def _upsert_events(conn: sqlite3.Connection, spec: LeagueSpec, events: Iterable[Mapping[str, Any]], now_text: str) -> int:
-    conn.execute("UPDATE sports_schedule_reference_events SET active=0 WHERE source=? AND league_key=?",
-                 (spec.source, spec.key))
+    conn.execute("UPDATE sports_schedule_reference_events SET active=0 WHERE league_key=?", (spec.key,))
     count = 0
     for event in events:
         conn.execute("""
@@ -404,7 +404,8 @@ def refresh(conn: sqlite3.Connection, *, api_key: str | None = None, days: int =
                 params = {
                     "engine": "google_sports", "kgmid": spec.kgmid, "sp": spec.sport_code,
                     "type": "league", "tab": "gm", "gl": "us", "hl": "en",
-                    "moa": utc_now(window_start), "mob": utc_now(window_end), "api_key": api_key,
+                    "moa": utc_now(window_start.replace(microsecond=0)),
+                    "mob": utc_now(window_end.replace(microsecond=0)), "api_key": api_key,
                 }
                 status_code, payload = _get_json(getter, SERPAPI_URL, params=params, timeout=timeout)
                 if status_code >= 400 or payload.get("error"):
@@ -417,18 +418,44 @@ def refresh(conn: sqlite3.Connection, *, api_key: str | None = None, days: int =
                 events = parse_serpapi_events(spec, payload)
             else:
                 url = ESPN_SCOREBOARD_URL.format(sport=spec.espn_sport, league=spec.espn_league)
-                status_code, payload = _get_json(
-                    getter, url, params={"dates": str(current.year), "limit": 1000}, timeout=timeout,
-                    # ESPN currently rejects application-specific agents while
-                    # serving its public JSON feed to curl's standard agent.
-                    user_agent="curl/8.7.1",
-                )
-                if status_code >= 400:
-                    error = f"http_{status_code}"
+                # Team feeds support YYYYMM. Year-wide NHL/NBA responses can
+                # hit the 1000-event cap before reaching today's games, while
+                # date-range requests currently return 400. Fetch each month
+                # in our bounded window and merge only after every request succeeds.
+                if spec.key in {"formula-1", "nascar-cup", "indycar", "ufl"}:
+                    dates = [str(year) for year in range(window_start.year, window_end.year + 1)]
+                else:
+                    month = window_start.replace(day=1)
+                    dates = []
+                    while (month.year, month.month) <= (window_end.year, window_end.month):
+                        dates.append(month.strftime("%Y%m"))
+                        month = month.replace(year=month.year + 1, month=1) if month.month == 12 else month.replace(month=month.month + 1)
+                collected = {}
+                error = None
+                for date in dates:
+                    params = {"dates": date, "limit": 1000}
+                    if spec.key == "ncaa-fbs":
+                        params["groups"] = 80
+                    status_code, payload = _get_json(getter, url, params=params, timeout=timeout,
+                                                    user_agent="curl/8.7.1")
+                    rows = payload.get("events")
+                    if status_code >= 400:
+                        error = f"http_{status_code}"
+                    elif not isinstance(rows, list):
+                        error = "invalid_response"
+                    elif len(rows) >= (25 if spec.key == "ncaa-fbs" else 1000):
+                        # NCAA's public scoreboard currently caps at 25 even
+                        # when asked for 1000. Do not claim a complete schedule.
+                        error = "response_limit_reached"
+                    if error:
+                        break
+                    for event in parse_espn_events(spec, payload):
+                        collected[event["id"]] = event
+                if error:
                     _set_league_state(conn, spec, status="failed", now_text=now_text, error=error)
                     details[spec.key] = error
                     continue
-                events = parse_espn_events(spec, payload)
+                events = list(collected.values())
             count = _upsert_events(conn, spec, events, now_text)
             _set_league_state(conn, spec, status="ok", now_text=now_text, event_count=count, success=True)
             details[spec.key] = {"status": "ok", "events": count}
