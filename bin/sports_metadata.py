@@ -497,6 +497,27 @@ def _upsert_named(conn: sqlite3.Connection, table: str, name: str, *, sport_id: 
     if not name:
         return None
     normalized = _norm(name)
+    def merged_target(entity_type: str, identifier: str) -> str:
+        """Keep later imports on the survivor without renaming it to a source label."""
+        seen = set()
+        current = identifier
+        while current not in seen:
+            seen.add(current)
+            try:
+                state = conn.execute(
+                    "SELECT merged_into_id FROM catalog_entity_state WHERE entity_type=? AND fruit_id=?",
+                    (entity_type, current),
+                ).fetchone()
+            except sqlite3.DatabaseError:
+                return current  # pre-migration catalogs have no merge state
+            target = str(state[0]) if state and state[0] else None
+            if not target:
+                return current
+            if not conn.execute(f"SELECT 1 FROM {table} WHERE id=?", (target,)).fetchone():
+                raise ValueError("merged catalog target is missing")
+            current = target
+        raise ValueError("catalog merge redirect cycle")
+
     def operator_owns_name(entity_type: str, identifier: str) -> bool:
         try:
             row = conn.execute("SELECT operator_fields_json FROM catalog_entity_state WHERE entity_type=? AND fruit_id=?", (entity_type, identifier)).fetchone()
@@ -509,6 +530,9 @@ def _upsert_named(conn: sqlite3.Connection, table: str, name: str, *, sport_id: 
         if not row:
             row = conn.execute("SELECT s.id FROM catalog_aliases a JOIN sports s ON s.id=a.fruit_id WHERE a.entity_type='sport' AND a.normalized_alias=?", (normalized,)).fetchone()
         identifier = row[0] if row else _key("sport", normalized)
+        target = merged_target("sport", identifier)
+        if target != identifier:
+            return target
         if row:
             if not operator_owns_name("sport", identifier): conn.execute("UPDATE sports SET name=?,updated_utc=? WHERE id=?", (name, utc_now(), identifier))
         else:
@@ -518,6 +542,9 @@ def _upsert_named(conn: sqlite3.Connection, table: str, name: str, *, sport_id: 
         if not row:
             row = conn.execute("SELECT l.id FROM catalog_aliases a JOIN leagues l ON l.id=a.fruit_id WHERE a.entity_type='league' AND a.normalized_alias=? AND l.sport_id IS ?", (normalized, sport_id)).fetchone()
         identifier = row[0] if row else _key("league", sport_id, normalized)
+        target = merged_target("league", identifier)
+        if target != identifier:
+            return target
         if row:
             if not operator_owns_name("league", identifier): conn.execute("UPDATE leagues SET name=?,updated_utc=? WHERE id=?", (name, utc_now(), identifier))
         else:
@@ -528,6 +555,9 @@ def _upsert_named(conn: sqlite3.Connection, table: str, name: str, *, sport_id: 
         if not row:
             row = conn.execute("SELECT t.id FROM catalog_aliases a JOIN teams t ON t.id=a.fruit_id WHERE a.entity_type='team' AND a.normalized_alias=? AND t.league_id IS ?", (normalized, league_id)).fetchone()
         identifier = row[0] if row else _key("team", league_id, normalized)
+        target = merged_target("team", identifier)
+        if target != identifier:
+            return target
         prior = conn.execute("SELECT aliases_json FROM teams WHERE id=?", (identifier,)).fetchone()
         merged = sorted({_norm(x): x for x in [*(_json(prior[0]) if prior else []), *aliases] if _norm(x)}.values(), key=str.casefold)
         if row:

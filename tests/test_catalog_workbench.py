@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import sys
 import unittest
@@ -13,6 +14,7 @@ from catalog_workbench import merge_selected_entities
 from catalog_workbench import run_ai_review
 from sports_catalog import apply_catalog_records
 from sports_metadata import _upsert_named, ensure_schema, save_rule
+from team_name_forms import obvious_abbreviations_for_name
 
 
 class CatalogWorkbenchTests(unittest.TestCase):
@@ -44,6 +46,15 @@ class CatalogWorkbenchTests(unittest.TestCase):
         undo_merge(self.conn, merge_id)
         self.assertFalse(entity_state(self.conn, "team", self.second)["archived"])
         self.assertEqual(self.second, self.conn.execute("SELECT target_id FROM sports_rules").fetchone()[0])
+
+    def test_refresh_reuses_survivor_after_team_merge(self):
+        league_id = self.conn.execute("SELECT league_id FROM teams WHERE id=?", (self.first,)).fetchone()[0]
+        merge_entities(self.conn, entity_type="team", survivor_id=self.first, source_id=self.second)
+        refreshed = _upsert_named(self.conn, "teams", "North Stars Legacy", league_id=league_id)
+        self.assertEqual(self.first, refreshed)
+        self.assertEqual("North Stars", self.conn.execute(
+            "SELECT name FROM teams WHERE id=?", (self.first,)).fetchone()[0])
+        self.assertTrue(entity_state(self.conn, "team", self.second)["archived"])
 
     def test_checked_team_merge_is_atomic_and_requires_one_scope(self):
         apply_catalog_records(self.conn, [
@@ -107,15 +118,28 @@ class CatalogWorkbenchTests(unittest.TestCase):
         self.conn.execute("INSERT INTO user_preferences VALUES ('setting:local_ai_event_parsing_base_url','http://local','now')")
         self.conn.execute("INSERT INTO user_preferences VALUES ('setting:local_ai_event_parsing_model','test','now')")
         def requester(_config, _payload):
+            records = json.loads(_payload["messages"][1]["content"])["catalog_records"]
+            teams = [row for row in records if row["entity_type"] == "team"]
+            self.assertTrue(teams)
+            self.assertTrue(all(not {"id", "sport_id", "league_id"} & row.keys() for row in teams))
+            self.assertNotIn(self.first, _payload["messages"][1]["content"])
             return {"proposals": [
-                {"entity_type": "team", "action": "alias", "target_id": self.first,
+                {"entity_type": "team", "action": "alias", "target_name": "North Stars",
+                 "sport": "Hockey", "league": "NHL",
                  "payload": {"alias": "AI Stars"}, "confidence": .95, "reason": "fixture"},
-                {"entity_type": "team", "action": "merge", "target_id": self.first,
-                 "payload": {"name": "North Stars Legacy"}, "confidence": .95, "reason": "missing source ID"},
+                {"entity_type": "team", "action": "merge", "sport": "Hockey", "league": "NHL",
+                 "payload": {"survivor_name": "North Stars"}, "confidence": .95, "reason": "missing source name"},
+                {"entity_type": "team", "action": "merge", "sport": "Hockey", "league": "NHL",
+                 "payload": {"survivor_name": "North Stars", "source_name": "North Stars Legacy"},
+                 "confidence": .95, "reason": "fixture"},
+                {"entity_type": "team", "action": "alias", "target_id": self.first,
+                 "payload": {"alias": "Legacy ID response"}, "confidence": .95, "reason": "must reject ID"},
             ]}
         result = run_ai_review(self.conn, requester=requester)
         self.assertEqual("completed", result["status"])
-        self.assertEqual(1, self.conn.execute("SELECT COUNT(*) FROM catalog_change_proposals WHERE status='pending'").fetchone()[0])
+        self.assertEqual(2, self.conn.execute("SELECT COUNT(*) FROM catalog_change_proposals WHERE status='pending'").fetchone()[0])
+        self.assertEqual({"survivor_id": self.first, "source_id": self.second}, json.loads(self.conn.execute(
+            "SELECT payload_json FROM catalog_change_proposals WHERE action='merge'").fetchone()[0]))
         self.assertEqual(0, self.conn.execute("SELECT COUNT(*) FROM catalog_aliases WHERE alias='AI Stars'").fetchone()[0])
 
     def test_ai_review_failure_records_safe_transport_reason(self):
@@ -138,10 +162,18 @@ class CatalogWorkbenchTests(unittest.TestCase):
         ).fetchone()[0])
         self.assertNotIn("private token", str(result))
 
-    def test_catalog_ai_prompt_requires_both_merge_ids(self):
-        system = _catalog_ai_payload([])["messages"][0]["content"]
-        self.assertIn("survivor_id", system)
-        self.assertIn("source_id", system)
+    def test_catalog_ai_prompt_requires_team_names_and_scope(self):
+        prompt = _catalog_ai_payload([{"entity_type": "team", "name": "North Stars",
+                                       "sport": "Hockey", "league": "NHL",
+                                       "id": "private-team-id", "sport_id": "private-sport-id",
+                                       "league_id": "private-league-id"}])
+        system = prompt["messages"][0]["content"]
+        self.assertIn("survivor_name", system)
+        self.assertIn("source_name", system)
+        self.assertIn("sport, league", system)
+        self.assertNotIn("private-", prompt["messages"][1]["content"])
+        self.assertEqual(["NY Yankees"], obvious_abbreviations_for_name("New York Yankees"))
+        self.assertEqual(["#14 MIZ"], obvious_abbreviations_for_name("#14 Missouri"))
 
     def test_manual_name_lock_survives_legacy_import_spelling(self):
         set_entity_fields(self.conn, entity_type="team", fruit_id=self.first, fields={"name": "Northern Stars"})
