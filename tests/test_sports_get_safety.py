@@ -100,6 +100,21 @@ class SportsGetSafetyTests(unittest.TestCase):
         self.assertEqual(200, page.status_code)
         self.assertIn(b"Search sports, leagues, teams", page.data)
 
+    def test_rule_selector_labels_legacy_ranks_and_excludes_saved_title_fragments(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany(
+                "INSERT INTO teams(id,name,normalized_name,created_utc,updated_utc) VALUES(?,?,?,?,?)",
+                [("legacy-rank", "#1 TEX", "1 tex", "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z"),
+                 ("legacy-title", "#10 Pitt (Virginia Tech vs. #10 Pitt) (2026-10-09 19:04:50)",
+                  "10 pitt virginia tech vs 10 pitt 2026 10 09 19 04 50",
+                  "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z")],
+            )
+        teams = {team["id"]: team for team in self.client.get("/api/sports/catalog").get_json()["teams"]}
+        self.assertEqual("TEX", teams["legacy-rank"]["rule_label"])
+        self.assertIsNone(teams["legacy-title"]["rule_label"])
+        self.assertEqual("#1 TEX", teams["legacy-rank"]["name"])
+        self.assertIn(b"x.rule_label", self.client.get("/my-sports").data)
+
     def test_coverage_exposes_the_configured_display_timezone(self):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("CREATE TABLE IF NOT EXISTS user_preferences (key TEXT PRIMARY KEY, value TEXT, updated_utc TEXT)")

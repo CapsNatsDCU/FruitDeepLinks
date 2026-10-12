@@ -126,6 +126,16 @@ class FavoriteTeamSettingsServiceTest(unittest.TestCase):
         self.assertEqual("NHL", by_team["Washington Capitals"]["league"])
         self.assertEqual(1, by_team["Tampa Bay Lightning"]["event_count"])
 
+    def test_discover_team_options_omits_provider_title_fragments(self):
+        self.conn.execute(
+            "CREATE TABLE events (title TEXT, title_brief TEXT, classification_json TEXT, raw_attributes_json TEXT)"
+        )
+        self.conn.executemany("INSERT INTO events VALUES (?, NULL, NULL, NULL)", [
+            ("#1 TEX vs. #2 LSU",),
+            ("#10 Pitt (Virginia Tech vs. #10 Pitt) (2026-10-09 19:04:50)",),
+        ])
+        self.assertEqual(["LSU", "TEX"], sorted(option["team"] for option in discover_team_options(self.conn)))
+
     def test_edit_enable_disable_and_delete(self):
         create_team(self.conn, CAPITALS)
         updated = update_team(self.conn, 0, {

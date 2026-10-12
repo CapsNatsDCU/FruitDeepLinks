@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 from fruit_export_lanes import build_lanes_xmltv
 from sports_metadata import (applicable_rule, coverage, ensure_schema, resolve_source_event,
                              save_rule, sync_legacy_events, utc_instant, utc_text)
+from team_identity import clean_team_name
 
 
 class SportsMetadataTests(unittest.TestCase):
@@ -21,6 +22,33 @@ class SportsMetadataTests(unittest.TestCase):
 
     def tearDown(self):
         self.conn.close()
+
+    def test_team_name_gate_cleans_rank_and_rejects_provider_title_fragments(self):
+        self.assertEqual("TEX", clean_team_name("#1 TEX"))
+        self.assertEqual("Miami (OH)", clean_team_name("Miami (OH)"))
+        for title in (
+            "#1 Wisconsin (2026-10-01 19:50:00)",
+            "#12 UConn Oct 03 3:00PM ET",
+            "#10 Pitt (Virginia Tech vs. #10 Pitt) (2026-10-09 19:04:50)",
+            "#14 MIZ - DART vs. YALE (T&M vs. #14 MIZ ) (2026-10-10 12:02:10)",
+        ):
+            self.assertIsNone(clean_team_name(title), title)
+
+    def test_title_parser_does_not_materialize_composite_names(self):
+        bad = resolve_source_event(self.conn, source="xtream", source_event_id="composite", data={
+            "title": "#14 MIZ - DART vs. YALE (T&M vs. #14 MIZ ) (2026-10-10 12:02:10)",
+            "sport_name": "American football", "league_name": "NCAA FBS",
+            "start_utc": "2026-10-10T17:00:00Z",
+        })
+        self.assertFalse(bad["scheduling_eligible"])
+        self.assertEqual(0, self.conn.execute("SELECT COUNT(*) FROM teams").fetchone()[0])
+        good = resolve_source_event(self.conn, source="xtream", source_event_id="ranked", data={
+            "title": "#1 TEX vs. #2 LSU", "sport_name": "American football",
+            "league_name": "NCAA FBS", "start_utc": "2026-10-10T20:00:00Z",
+        })
+        self.assertTrue(good["resolved"])
+        self.assertEqual(["LSU", "TEX"], [row[0] for row in self.conn.execute(
+            "SELECT name FROM teams ORDER BY name")])
 
     def event(self, source, source_id, *, team_a="Washington Capitals", team_b="New York Rangers", start="2026-09-13T20:25:00Z", league="NHL", sport="Hockey", event_type="regular"):
         return resolve_source_event(self.conn, source=source, source_event_id=source_id, data={

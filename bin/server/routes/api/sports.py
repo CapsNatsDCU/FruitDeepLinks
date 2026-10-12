@@ -64,6 +64,9 @@ def catalog():
             for entity in entities:
                 entity["state"] = entity_state(conn, entity_type, entity["id"])
                 entity["effective_visibility"] = effective_visibility(conn, entity_type, entity["id"])
+        from team_identity import clean_team_name
+        for team in teams:
+            team["rule_label"] = clean_team_name(team["name"])
         proposals = [dict(r) for r in conn.execute("SELECT id,run_id,entity_type,action,target_id,payload_json,evidence_json,confidence,status,result_json,created_utc,decided_utc FROM catalog_change_proposals ORDER BY id DESC LIMIT 250")]
         runs = [dict(r) for r in conn.execute("SELECT * FROM catalog_change_runs ORDER BY id DESC LIMIT 25")]
         merges = [dict(r) for r in conn.execute("SELECT id,entity_type,survivor_id,source_id,status,created_utc,undone_utc FROM catalog_merge_groups ORDER BY id DESC LIMIT 250")]

@@ -8,6 +8,7 @@ from typing import Any
 
 from db.preferences import save_settings
 from event_naming import extract_team_names
+from team_identity import clean_team_name
 from team_preferences import (
     TeamPreferenceValidationError,
     normalize_favorite_teams,
@@ -61,7 +62,10 @@ def discover_team_options(conn: sqlite3.Connection, limit: int = 500) -> list[di
         names = extract_team_names(event)
         league = _metadata_dimension(event, "league")
         sport = _metadata_dimension(event, "sport")
-        for name in names:
+        for raw_name in names:
+            name = clean_team_name(raw_name)
+            if not name:
+                continue
             marker = " ".join(name.casefold().split())
             if len(marker.replace(" ", "")) < 3:
                 continue

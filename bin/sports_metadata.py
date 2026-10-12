@@ -20,6 +20,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
+from team_identity import clean_team_name
+
 
 UTC = timezone.utc
 LOG = logging.getLogger(__name__)
@@ -588,6 +590,20 @@ def _participants(data: Mapping[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _clean_participants(participants: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    cleaned = []
+    seen = set()
+    for participant in participants:
+        if not isinstance(participant, Mapping):
+            continue
+        name = clean_team_name(participant.get("name"))
+        marker = _norm(name)
+        if name and marker not in seen:
+            seen.add(marker)
+            cleaned.append({**participant, "name": name})
+    return cleaned
+
+
 def _title_participants(title: Any) -> list[dict[str, Any]]:
     """Conservative fallback for provider names that omit competitor objects."""
     text = str(title or "").strip()
@@ -602,6 +618,7 @@ def _title_participants(title: Any) -> list[dict[str, Any]]:
     # event context, not part of the away team ("MLB: Nationals" / "MLS DC").
     away = re.sub(r"^(?:NFL|NHL|MLB|MLS|NBA|WNBA|NCAAF|NCAA(?: FOOTBALL)?|F1|FORMULA 1)\s*[:|-]?\s*",
                   "", away, flags=re.IGNORECASE)
+    away, home = clean_team_name(away), clean_team_name(home)
     if not away or not home or _norm(away) == _norm(home):
         return []
     return [{"name": away, "role": "away"}, {"name": home, "role": "home"}]
@@ -758,13 +775,13 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     league = league or title_league or category_league
     league, league_sport = normalize_league(league, sport=sport)
     sport = normalize_sport(sport, league=league) or league_sport
-    structured_participants = _participants(data) or _participants(raw)
+    structured_participants = _clean_participants(_participants(data)) or _clean_participants(_participants(raw))
     # A title match is useful deterministic input, but is not authoritative
     # provider metadata.  A valid local-AI interpretation may clarify a
     # provider-prefixed title before the normal resolver sees it.
     participants = structured_participants or _title_participants(title_text)
     if not participants:
-        participants = _associated_provider_team(title_text, league=league)
+        participants = _clean_participants(_associated_provider_team(title_text, league=league))
     prior_event_type = None
     prior_validated_identity = False
     prior_independent_sport = False
@@ -786,9 +803,9 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
             prior_provenance = prior_metadata.get("provenance", {}) if isinstance(prior_metadata, Mapping) else {}
             prior_independent_sport = bool(prior_provenance.get("independent_sport"))
             prior_independent_league = bool(prior_provenance.get("independent_league"))
-            participants = [{"name": row[0], "role": row[1]} for row in conn.execute(
+            participants = _clean_participants({"name": row[0], "role": row[1]} for row in conn.execute(
                 "SELECT display_name,role FROM canonical_event_participants WHERE event_id=?", (prior[0],)
-            ).fetchall()]
+            ).fetchall())
             prior_validated_identity = True
     start_value = data.get("start_utc") or data.get("start_ms") or data.get("start_time") or raw.get("start_utc")
     start = utc_instant(start_value, source_timezone=data.get("source_timezone"))
@@ -893,7 +910,7 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
                 event_type = data.get("program_type") or data.get("event_type") or raw.get("program_type") or raw.get("event_type") or raw.get("eventType") or interpretation.get("program_type") or interpretation.get("event_type") or event_type
                 competition = competition or interpretation.get("competition")
                 if not structured_participants and interpretation.get("participants"):
-                    participants = interpretation["participants"]
+                    participants = _clean_participants(interpretation["participants"])
         except Exception as exc:
             # This boundary is deliberately fail-open: the optional parser may
             # not delay or remove a legacy event.  Do not log raw provider text.
@@ -906,7 +923,8 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     from sports_catalog import canonicalize_participants
     participants = [{**participant, "name": _canonical_builtin_participant(participant.get("name"), league=league)}
                     for participant in participants if _canonical_builtin_participant(participant.get("name"), league=league)]
-    participants = canonicalize_participants(conn, participants, sport_id=sport_id, league_id=league_id)
+    participants = _clean_participants(canonicalize_participants(
+        conn, participants, sport_id=sport_id, league_id=league_id))
     # Structured provider competitors are explicit event evidence.  A title
     # must still have a two-sided fixture plus league/sport context; a single
     # associated team is useful catalog data but never schedule authority.
