@@ -25,12 +25,19 @@ class SportsMetadataTests(unittest.TestCase):
 
     def test_team_name_gate_cleans_rank_and_rejects_provider_title_fragments(self):
         self.assertEqual("TEX", clean_team_name("#1 TEX"))
+        self.assertEqual("Brewers", clean_team_name("02 Brewers"))
         self.assertEqual("Miami (OH)", clean_team_name("Miami (OH)"))
+        self.assertEqual("1. FC Saarbrücken", clean_team_name("1. FC Saarbrücken"))
         for title in (
             "#1 Wisconsin (2026-10-01 19:50:00)",
             "#12 UConn Oct 03 3:00PM ET",
             "#10 Pitt (Virginia Tech vs. #10 Pitt) (2026-10-09 19:04:50)",
             "#14 MIZ - DART vs. YALE (T&M vs. #14 MIZ ) (2026-10-10 12:02:10)",
+            "01 : Dodgers",
+            "ACCNX: GA Southern",
+            "NHL Frozen Frenzy • BOS",
+            "Blue Jackets (from 10/12/13)",
+            "French Language Broadcast Nashville",
         ):
             self.assertIsNone(clean_team_name(title), title)
 

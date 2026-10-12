@@ -3,6 +3,7 @@ import json
 import sqlite3
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -25,7 +26,7 @@ class SportsGetSafetyTests(unittest.TestCase):
             ensure_schema(conn)
             self.event = resolve_source_event(conn, source="apple", source_event_id="apple-caps", data={
                 "title": "Washington Capitals at Philadelphia Flyers", "sport_name": "Ice hockey",
-                "league_name": "NHL", "start_utc": "2026-10-11T17:00:00Z",
+                "league_name": "NHL", "start_utc": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
                 "competitors": [{"name": "Washington Capitals", "homeAway": "away"},
                                 {"name": "Philadelphia Flyers", "homeAway": "home"}],
             })
