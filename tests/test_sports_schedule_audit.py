@@ -2,8 +2,6 @@ import json
 import sqlite3
 import sys
 import unittest
-from dataclasses import replace
-from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 from sports_metadata import ensure_schema, resolve_source_event
 from sports_schedule_audit import (DEFAULT_ENABLED_KEYS, LEAGUE_BY_KEY, ensure_schema as ensure_audit_schema,
-                                   enabled_keys, parse_espn_events, parse_serpapi_events, refresh,
+                                   enabled_keys, parse_espn_events, refresh,
                                    save_enabled_keys, snapshot)
 
 
@@ -44,18 +42,6 @@ class SportsScheduleAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported league"):
             save_enabled_keys(self.conn, ["made-up-league"])
 
-    def test_structured_serpapi_parser_requires_absolute_time(self):
-        payload = {"league_results": {"game_groups": [{"title": "Week 4", "games": [
-            {"kgmid": "/g/nfl-game", "start_time": "2026-10-04T17:00:00Z", "status": "scheduled",
-             "teams": [{"name": "Washington Commanders"}, {"name": "Philadelphia Eagles"}],
-             "league": {"name": "NFL"}},
-            {"kgmid": "/g/no-time", "teams": [{"name": "Unsafe"}]},
-        ]}]}}
-        events = parse_serpapi_events(LEAGUE_BY_KEY["nfl"], payload)
-        self.assertEqual(1, len(events))
-        self.assertEqual("2026-10-04T17:00:00Z", events[0]["start_utc"])
-        self.assertEqual(["Washington Commanders", "Philadelphia Eagles"], events[0]["participants"])
-
     def test_espn_parser_supports_racing_without_creating_participants(self):
         payload = {"events": [{"id": "race-1", "date": "2026-10-04T19:00Z",
                                "name": "NASCAR Cup Series at Talladega",
@@ -64,7 +50,7 @@ class SportsScheduleAuditTests(unittest.TestCase):
         self.assertEqual("race-1", events[0]["id"])
         self.assertEqual([], events[0]["participants"])
 
-    def test_refresh_uses_free_feed_without_serpapi_key_and_tracks_no_search(self):
+    def test_refresh_uses_public_feed_for_selected_leagues(self):
         save_enabled_keys(self.conn, ["formula-1", "ufl"])
         calls = []
 
@@ -73,44 +59,44 @@ class SportsScheduleAuditTests(unittest.TestCase):
             return Response({"events": [{"id": "one", "date": "2026-10-04T19:00Z",
                                          "name": "Expected event", "competitions": []}]})
 
-        result = refresh(self.conn, api_key=None, force=True, now=NOW, getter=getter)
+        result = refresh(self.conn, force=True, now=NOW, getter=getter)
         self.assertEqual("complete", result["status"])
-        self.assertEqual((2, 0, 2), (result["checked_leagues"], result["successful_searches"], result["event_count"]))
+        self.assertEqual((2, 2), (result["checked_leagues"], result["event_count"]))
         self.assertTrue(all("espn.com" in call[0] for call in calls))
         self.assertEqual(2, self.conn.execute("SELECT COUNT(*) FROM sports_schedule_reference_events").fetchone()[0])
 
-    def test_serpapi_key_never_enters_materialized_reference_rows(self):
+    def test_legacy_source_is_replaced_even_before_next_due_time(self):
         save_enabled_keys(self.conn, ["nfl"])
-        secret = "private-test-key"
-
-        def getter(_url, **kwargs):
-            self.assertEqual(secret, kwargs["params"]["api_key"])
-            return Response({"league_results": {"game_groups": [{"games": [{
-                "kgmid": "/g/game", "start_time": "2026-10-04T17:00:00Z",
-                "teams": [{"name": "Washington Commanders"}, {"name": "Philadelphia Eagles"}],
-            }]}]}})
-
-        with patch.dict(LEAGUE_BY_KEY, nfl=replace(LEAGUE_BY_KEY["nfl"], source="serpapi")):
-            result = refresh(self.conn, api_key=secret, force=True, now=NOW, getter=getter)
-        self.assertEqual(1, result["successful_searches"])
-        dump = "\n".join(str(value) for row in self.conn.iterdump() for value in [row])
-        self.assertNotIn(secret, dump)
-
-    def test_free_plan_reserve_stops_searches_before_250(self):
-        save_enabled_keys(self.conn, ["nfl"])
+        self.conn.execute("ALTER TABLE sports_schedule_audit_runs ADD COLUMN successful_searches INTEGER NOT NULL DEFAULT 0")
         self.conn.execute(
-            "INSERT INTO sports_schedule_api_usage(period,successful_searches,updated_utc) VALUES('2026-09',225,?)",
-            ("2026-09-30T00:00:00Z",),
+            "INSERT INTO sports_schedule_league_state(league_key,source,status,last_attempt_utc) VALUES('nfl','serpapi','key_required',?)",
+            ("2026-09-30T11:00:00Z",),
         )
+        self.conn.execute(
+            "INSERT INTO sports_schedule_audit_runs(started_utc,finished_utc,status) VALUES(?,?,?)",
+            ("2026-09-30T11:00:00Z", "2026-09-30T11:00:00Z", "unavailable"),
+        )
+        self.conn.execute("""
+            INSERT INTO sports_schedule_reference_events(
+                source,league_key,source_event_id,title,start_utc,first_seen_utc,last_seen_utc
+            ) VALUES('serpapi','nfl','old-game','Old game','2026-10-04T17:00:00Z',?,?)
+        """, ("2026-09-30T11:00:00Z", "2026-09-30T11:00:00Z"))
         self.conn.commit()
-
-        def unexpected_request(*_args, **_kwargs):
-            raise AssertionError("budget guard contacted SerpApi")
-
-        with patch.dict(LEAGUE_BY_KEY, nfl=replace(LEAGUE_BY_KEY["nfl"], source="serpapi")):
-            result = refresh(self.conn, api_key="configured", force=True, now=NOW, getter=unexpected_request)
-        self.assertEqual("budget_reserved", result["details"]["nfl"])
-        self.assertEqual(0, result["successful_searches"])
+        calls = []
+        def getter(url, **kwargs):
+            calls.append(url)
+            self.assertNotIn("api_key", kwargs["params"])
+            return Response({"events": [{"id": "espn-game", "date": "2026-10-04T17:00:00Z",
+                                         "name": "Commanders at Eagles"}]})
+        result = refresh(self.conn, now=NOW, getter=getter)
+        self.assertEqual("complete", result["status"])
+        self.assertTrue(calls)
+        self.assertTrue(all("espn.com" in url for url in calls))
+        state = self.conn.execute("SELECT source,status FROM sports_schedule_league_state WHERE league_key='nfl'").fetchone()
+        self.assertEqual(("espn", "ok"), tuple(state))
+        active_sources = [row[0] for row in self.conn.execute(
+            "SELECT source FROM sports_schedule_reference_events WHERE league_key='nfl' AND active=1")]
+        self.assertEqual(["espn"], active_sources)
 
     def test_default_team_feeds_need_no_key_and_fetch_whole_months(self):
         save_enabled_keys(self.conn, ['nhl','nba'])
@@ -122,9 +108,8 @@ class SportsScheduleAuditTests(unittest.TestCase):
             return Response({'events':[{'id':'game','date':'2026-10-04T19:00Z','name':'Matchup',
                 'competitions':[{'competitors':[{'team':{'displayName':'Washington Capitals'}},
                                                {'team':{'displayName':'Pittsburgh Penguins'}}]}]}]})
-        result=refresh(self.conn,api_key=None,force=True,now=NOW,getter=getter)
+        result=refresh(self.conn,force=True,now=NOW,getter=getter)
         self.assertEqual(result['status'],'complete')
-        self.assertEqual(result['successful_searches'],0)
         self.assertEqual(result['event_count'],2)
         self.assertEqual([p['dates'] for _,p in calls],['202609','202610','202609','202610'])
         self.assertTrue(all('espn.com' in url for url,_ in calls))

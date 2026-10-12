@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -20,13 +19,10 @@ from typing import Any, Callable, Iterable, Mapping
 import requests
 
 
-SERPAPI_URL = "https://serpapi.com/search.json"
 ESPN_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/scoreboard"
 PREFERENCE_KEY = "sports_schedule_audit_leagues"
 DEFAULT_DUE_HOURS = 72
 DEFAULT_DAYS = 14
-DEFAULT_MONTHLY_BUDGET = 250
-DEFAULT_BUDGET_RESERVE = 25
 
 
 @dataclass(frozen=True)
@@ -35,30 +31,27 @@ class LeagueSpec:
     name: str
     sport: str
     source: str
-    sport_code: str | None = None
-    kgmid: str | None = None
     espn_sport: str | None = None
     espn_league: str | None = None
     aliases: tuple[str, ...] = ()
 
 
 # This is an operator-editable priority registry, not scheduling authority.
-# Public ESPN feeds require no key. KGMIDs remain available for optional
-# SerpApi adapters; the default registry never spends paid search credits.
+# Public ESPN feeds require no API key.
 LEAGUES: tuple[LeagueSpec, ...] = (
-    LeagueSpec("nfl", "NFL", "American football", "espn", "af", "/m/059yj", espn_sport="football", espn_league="nfl",
+    LeagueSpec("nfl", "NFL", "American football", "espn", espn_sport="football", espn_league="nfl",
                aliases=("National Football League",)),
-    LeagueSpec("nhl", "NHL", "Ice hockey", "espn", "ih", "/m/05gwr", espn_sport="hockey", espn_league="nhl",
+    LeagueSpec("nhl", "NHL", "Ice hockey", "espn", espn_sport="hockey", espn_league="nhl",
                aliases=("National Hockey League",)),
-    LeagueSpec("mlb", "MLB", "Baseball", "espn", "bb", "/m/09p14", espn_sport="baseball", espn_league="mlb",
+    LeagueSpec("mlb", "MLB", "Baseball", "espn", espn_sport="baseball", espn_league="mlb",
                aliases=("Major League Baseball",)),
-    LeagueSpec("nba", "NBA", "Basketball", "espn", "bs", "/m/05jvx", espn_sport="basketball", espn_league="nba",
+    LeagueSpec("nba", "NBA", "Basketball", "espn", espn_sport="basketball", espn_league="nba",
                aliases=("National Basketball Association",)),
-    LeagueSpec("mls", "MLS", "Soccer", "espn", "ft", "/m/0jfpf", espn_sport="soccer", espn_league="usa.1",
+    LeagueSpec("mls", "MLS", "Soccer", "espn", espn_sport="soccer", espn_league="usa.1",
                aliases=("Major League Soccer",)),
-    LeagueSpec("uefa-champions-league", "UEFA Champions League", "Soccer", "espn", "ft", "/m/0c1q0", espn_sport="soccer", espn_league="uefa.champions",
+    LeagueSpec("uefa-champions-league", "UEFA Champions League", "Soccer", "espn", espn_sport="soccer", espn_league="uefa.champions",
                aliases=("Champions League", "UCL")),
-    LeagueSpec("english-premier-league", "English Premier League", "Soccer", "espn", "ft", "/m/02_tc", espn_sport="soccer", espn_league="eng.1",
+    LeagueSpec("english-premier-league", "English Premier League", "Soccer", "espn", espn_sport="soccer", espn_league="eng.1",
                aliases=("Premier League", "EPL")),
     LeagueSpec("formula-1", "Formula 1", "Motorsport", "espn", espn_sport="racing", espn_league="f1",
                aliases=("F1",)),
@@ -66,7 +59,7 @@ LEAGUES: tuple[LeagueSpec, ...] = (
                aliases=("NASCAR", "NASCAR Cup")),
     LeagueSpec("indycar", "IndyCar Series", "Motorsport", "espn", espn_sport="racing", espn_league="irl",
                aliases=("IndyCar", "IRL")),
-    LeagueSpec("ncaa-fbs", "NCAA FBS", "American football", "espn", "af", "/m/012hfxch", espn_sport="football", espn_league="college-football",
+    LeagueSpec("ncaa-fbs", "NCAA FBS", "American football", "espn", espn_sport="football", espn_league="college-football",
                aliases=("NCAA Division I Football Bowl Subdivision", "College Football", "NCAAF")),
     LeagueSpec("ufl", "UFL", "American football", "espn", espn_sport="football", espn_league="ufl",
                aliases=("United Football League",)),
@@ -150,14 +143,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
       status TEXT NOT NULL,
       requested_leagues INTEGER NOT NULL DEFAULT 0,
       checked_leagues INTEGER NOT NULL DEFAULT 0,
-      successful_searches INTEGER NOT NULL DEFAULT 0,
       event_count INTEGER NOT NULL DEFAULT 0,
       detail_json TEXT NOT NULL DEFAULT '{}'
-    );
-    CREATE TABLE IF NOT EXISTS sports_schedule_api_usage (
-      period TEXT PRIMARY KEY,
-      successful_searches INTEGER NOT NULL DEFAULT 0,
-      updated_utc TEXT NOT NULL
     );
     """)
     conn.commit()
@@ -216,10 +203,10 @@ def registry(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     result = []
     for spec in LEAGUES:
         item = asdict(spec)
-        item.pop("kgmid", None)
         item["aliases"] = list(spec.aliases)
         item["enabled"] = spec.key in selected
-        item["state"] = dict(states.get(spec.key) or {"status": "never_checked", "event_count": 0})
+        state = states.get(spec.key)
+        item["state"] = dict(state) if state and state["source"] == spec.source else {"status": "never_checked", "event_count": 0}
         result.append(item)
     return result
 
@@ -230,33 +217,6 @@ def _stable_event_id(league_key: str, event: Mapping[str, Any]) -> str:
         return str(explicit)
     material = "|".join((league_key, str(event.get("start_utc") or ""), str(event.get("title") or "")))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
-
-
-def parse_serpapi_events(spec: LeagueSpec, payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    events: list[dict[str, Any]] = []
-    groups = ((payload.get("league_results") or {}).get("game_groups") or [])
-    for group in groups:
-        for game in group.get("games") or []:
-            start = _parse_utc(game.get("start_time"))
-            if not start:
-                continue
-            teams = [str(team.get("name") or team.get("short_name") or "").strip()
-                     for team in game.get("teams") or []]
-            teams = [team for team in teams if team]
-            title = str(game.get("name") or "").strip() or " at ".join(reversed(teams)) or spec.name
-            end = _parse_utc(game.get("end_time"))
-            row = {
-                "id": game.get("kgmid") or game.get("id"),
-                "title": title,
-                "start_utc": utc_now(start),
-                "end_utc": utc_now(end) if end else None,
-                "participants": teams,
-                "status": game.get("status") or game.get("status_original"),
-                "metadata": {"group": group.get("title"), "league": (game.get("league") or {}).get("name")},
-            }
-            row["id"] = _stable_event_id(spec.key, row)
-            events.append(row)
-    return events
 
 
 def parse_espn_events(spec: LeagueSpec, payload: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -322,24 +282,6 @@ def _set_league_state(conn: sqlite3.Connection, spec: LeagueSpec, *, status: str
     """, (spec.key, spec.source, status, event_count, now_text, now_text if success else None, error))
 
 
-def _usage_period(now: datetime) -> str:
-    return now.astimezone(timezone.utc).strftime("%Y-%m")
-
-
-def _usage(conn: sqlite3.Connection, now: datetime) -> int:
-    row = conn.execute("SELECT successful_searches FROM sports_schedule_api_usage WHERE period=?",
-                       (_usage_period(now),)).fetchone()
-    return int(row[0]) if row else 0
-
-
-def _increment_usage(conn: sqlite3.Connection, now: datetime) -> None:
-    period = _usage_period(now)
-    conn.execute("""
-      INSERT INTO sports_schedule_api_usage(period,successful_searches,updated_utc) VALUES(?,1,?)
-      ON CONFLICT(period) DO UPDATE SET successful_searches=successful_searches+1,updated_utc=excluded.updated_utc
-    """, (period, utc_now(now)))
-
-
 def _get_json(getter: Callable[..., Any], url: str, *, params: Mapping[str, Any], timeout: float,
               user_agent: str = "FruitDeepLinks-schedule-audit/1.0") -> tuple[int, Mapping[str, Any]]:
     response = getter(url, params=dict(params), timeout=timeout,
@@ -356,9 +298,8 @@ def _last_finished(conn: sqlite3.Connection) -> datetime | None:
     return _parse_utc(row[0]) if row else None
 
 
-def refresh(conn: sqlite3.Connection, *, api_key: str | None = None, days: int = DEFAULT_DAYS,
+def refresh(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS,
             due_hours: int = DEFAULT_DUE_HOURS, force: bool = False,
-            monthly_budget: int = DEFAULT_MONTHLY_BUDGET, budget_reserve: int = DEFAULT_BUDGET_RESERVE,
             now: datetime | None = None, getter: Callable[..., Any] = requests.get,
             timeout: float = 20.0) -> dict[str, Any]:
     """Refresh materialized audit references without touching canonical events."""
@@ -367,12 +308,15 @@ def refresh(conn: sqlite3.Connection, *, api_key: str | None = None, days: int =
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     current = current.astimezone(timezone.utc)
-    last = _last_finished(conn)
-    if not force and last and current - last < timedelta(hours=max(1, due_hours)):
-        return {"status": "not_due", "last_finished_utc": utc_now(last), "checked_leagues": 0,
-                "successful_searches": 0, "event_count": 0}
-
     keys = enabled_keys(conn)
+    sources = {str(row["league_key"]): str(row["source"]) for row in conn.execute(
+        "SELECT league_key,source FROM sports_schedule_league_state")}
+    source_changed = any(key in sources and sources[key] != LEAGUE_BY_KEY[key].source for key in keys)
+    last = _last_finished(conn)
+    if not force and not source_changed and last and current - last < timedelta(hours=max(1, due_hours)):
+        return {"status": "not_due", "last_finished_utc": utc_now(last), "checked_leagues": 0,
+                "event_count": 0}
+
     specs = [LEAGUE_BY_KEY[key] for key in keys]
     started = utc_now(current)
     cursor = conn.execute(
@@ -381,81 +325,53 @@ def refresh(conn: sqlite3.Connection, *, api_key: str | None = None, days: int =
     )
     run_id = int(cursor.lastrowid)
     conn.commit()
-    checked = searches = event_count = 0
+    checked = event_count = 0
     details: dict[str, Any] = {}
     window_start = current - timedelta(days=1)
     window_end = current + timedelta(days=max(1, min(int(days), 31)))
-    usable_budget = max(0, int(monthly_budget) - max(0, int(budget_reserve)))
 
     for spec in specs:
         now_text = utc_now(current)
         try:
-            if spec.source == "serpapi":
-                if not api_key:
-                    _set_league_state(conn, spec, status="key_required", now_text=now_text,
-                                      error="SERPAPI_API_KEY is not configured")
-                    details[spec.key] = "key_required"
-                    continue
-                if _usage(conn, current) >= usable_budget:
-                    _set_league_state(conn, spec, status="budget_reserved", now_text=now_text,
-                                      error="Monthly safety reserve reached")
-                    details[spec.key] = "budget_reserved"
-                    continue
-                params = {
-                    "engine": "google_sports", "kgmid": spec.kgmid, "sp": spec.sport_code,
-                    "type": "league", "tab": "gm", "gl": "us", "hl": "en",
-                    "moa": utc_now(window_start.replace(microsecond=0)),
-                    "mob": utc_now(window_end.replace(microsecond=0)), "api_key": api_key,
-                }
-                status_code, payload = _get_json(getter, SERPAPI_URL, params=params, timeout=timeout)
-                if status_code >= 400 or payload.get("error"):
-                    error = f"http_{status_code}" if status_code >= 400 else "provider_error"
-                    _set_league_state(conn, spec, status="failed", now_text=now_text, error=error)
-                    details[spec.key] = error
-                    continue
-                _increment_usage(conn, current)
-                searches += 1
-                events = parse_serpapi_events(spec, payload)
+            url = ESPN_SCOREBOARD_URL.format(sport=spec.espn_sport, league=spec.espn_league)
+            # Team feeds support YYYYMM. Year-wide NHL/NBA responses can
+            # hit the 1000-event cap before reaching today's games, while
+            # date-range requests currently return 400. Fetch each month
+            # in our bounded window and merge only after every request succeeds.
+            if spec.key in {"formula-1", "nascar-cup", "indycar", "ufl"}:
+                dates = [str(year) for year in range(window_start.year, window_end.year + 1)]
             else:
-                url = ESPN_SCOREBOARD_URL.format(sport=spec.espn_sport, league=spec.espn_league)
-                # Team feeds support YYYYMM. Year-wide NHL/NBA responses can
-                # hit the 1000-event cap before reaching today's games, while
-                # date-range requests currently return 400. Fetch each month
-                # in our bounded window and merge only after every request succeeds.
-                if spec.key in {"formula-1", "nascar-cup", "indycar", "ufl"}:
-                    dates = [str(year) for year in range(window_start.year, window_end.year + 1)]
-                else:
-                    month = window_start.replace(day=1)
-                    dates = []
-                    while (month.year, month.month) <= (window_end.year, window_end.month):
-                        dates.append(month.strftime("%Y%m"))
-                        month = month.replace(year=month.year + 1, month=1) if month.month == 12 else month.replace(month=month.month + 1)
-                collected = {}
-                error = None
-                for date in dates:
-                    params = {"dates": date, "limit": 1000}
-                    if spec.key == "ncaa-fbs":
-                        params["groups"] = 80
-                    status_code, payload = _get_json(getter, url, params=params, timeout=timeout,
-                                                    user_agent="curl/8.7.1")
-                    rows = payload.get("events")
-                    if status_code >= 400:
-                        error = f"http_{status_code}"
-                    elif not isinstance(rows, list):
-                        error = "invalid_response"
-                    elif len(rows) >= (25 if spec.key == "ncaa-fbs" else 1000):
-                        # NCAA's public scoreboard currently caps at 25 even
-                        # when asked for 1000. Do not claim a complete schedule.
-                        error = "response_limit_reached"
-                    if error:
-                        break
-                    for event in parse_espn_events(spec, payload):
-                        collected[event["id"]] = event
+                month = window_start.replace(day=1)
+                dates = []
+                while (month.year, month.month) <= (window_end.year, window_end.month):
+                    dates.append(month.strftime("%Y%m"))
+                    month = month.replace(year=month.year + 1, month=1) if month.month == 12 else month.replace(month=month.month + 1)
+            collected = {}
+            error = None
+            for date in dates:
+                params = {"dates": date, "limit": 1000}
+                if spec.key == "ncaa-fbs":
+                    params["groups"] = 80
+                status_code, payload = _get_json(getter, url, params=params, timeout=timeout,
+                                                user_agent="curl/8.7.1")
+                rows = payload.get("events")
+                if status_code >= 400:
+                    error = f"http_{status_code}"
+                elif not isinstance(rows, list):
+                    error = "invalid_response"
+                elif len(rows) >= (25 if spec.key == "ncaa-fbs" else 1000):
+                    # NCAA's public scoreboard currently caps at 25 even
+                    # when asked for 1000. Do not claim a complete schedule.
+                    error = "response_limit_reached"
                 if error:
-                    _set_league_state(conn, spec, status="failed", now_text=now_text, error=error)
-                    details[spec.key] = error
-                    continue
-                events = list(collected.values())
+                    break
+                for event in parse_espn_events(spec, payload):
+                    collected[event["id"]] = event
+            if error:
+                _set_league_state(conn, spec, status="failed", now_text=now_text, error=error)
+                details[spec.key] = error
+                continue
+            events = list(collected.values())
             count = _upsert_events(conn, spec, events, now_text)
             _set_league_state(conn, spec, status="ok", now_text=now_text, event_count=count, success=True)
             details[spec.key] = {"status": "ok", "events": count}
@@ -473,12 +389,12 @@ def refresh(conn: sqlite3.Connection, *, api_key: str | None = None, days: int =
     finished = utc_now(current)
     status = "complete" if checked == len(specs) else ("partial" if checked else "unavailable")
     conn.execute("""
-      UPDATE sports_schedule_audit_runs SET finished_utc=?,status=?,checked_leagues=?,successful_searches=?,
+      UPDATE sports_schedule_audit_runs SET finished_utc=?,status=?,checked_leagues=?,
         event_count=?,detail_json=? WHERE id=?
-    """, (finished, status, checked, searches, event_count, json.dumps(details, sort_keys=True), run_id))
+    """, (finished, status, checked, event_count, json.dumps(details, sort_keys=True), run_id))
     conn.commit()
     return {"status": status, "run_id": run_id, "requested_leagues": len(specs),
-            "checked_leagues": checked, "successful_searches": searches, "event_count": event_count,
+            "checked_leagues": checked, "event_count": event_count,
             "details": details, "finished_utc": finished}
 
 
@@ -506,18 +422,14 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
     current = current.astimezone(timezone.utc)
     tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     leagues = registry(conn)
-    usage = 0
     last_run = None
-    if "sports_schedule_api_usage" in tables:
-        usage = _usage(conn, current)
     if "sports_schedule_audit_runs" in tables:
         row = conn.execute("SELECT * FROM sports_schedule_audit_runs ORDER BY id DESC LIMIT 1").fetchone()
         last_run = dict(row) if row else None
     if "sports_schedule_reference_events" not in tables:
         return {"leagues": leagues, "events": [], "summary": {"expected": 0, "scheduled": 0,
                 "playable_found": 0, "no_playable": 0, "missing_from_ingestion": 0},
-                "usage": {"period": _usage_period(current), "successful_searches": usage,
-                          "monthly_budget": DEFAULT_MONTHLY_BUDGET}, "last_run": last_run}
+                "last_run": last_run}
 
     end = current + timedelta(days=max(1, min(int(days), 90)))
     references = [dict(row) for row in conn.execute("""
@@ -606,9 +518,7 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
                "no_playable": 0, "missing_from_ingestion": 0}
     for item in items:
         summary[item["coverage_state"]] += 1
-    return {"leagues": leagues, "events": items, "summary": summary,
-            "usage": {"period": _usage_period(current), "successful_searches": usage,
-                      "monthly_budget": DEFAULT_MONTHLY_BUDGET}, "last_run": last_run}
+    return {"leagues": leagues, "events": items, "summary": summary, "last_run": last_run}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -619,7 +529,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
     with connect(args.db) as conn:
-        result = refresh(conn, api_key=os.getenv("SERPAPI_API_KEY"), days=args.days,
+        result = refresh(conn, days=args.days,
                          due_hours=args.due_hours, force=args.force)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

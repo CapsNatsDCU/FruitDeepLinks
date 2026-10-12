@@ -68,8 +68,6 @@ services:
       - XTREAM_CATEGORY_IDS=${XTREAM_CATEGORY_IDS:-}
       - XTREAM_TIMEZONE=${XTREAM_TIMEZONE:-UTC}
       - XTREAM_DEFAULT_DURATION_MINUTES=${XTREAM_DEFAULT_DURATION_MINUTES:-180}
-      # Advisory outside-schedule checks; keep the key in deployment secrets.
-      - SERPAPI_API_KEY=${SERPAPI_API_KEY:-}
       # Auto-refresh
       - AUTO_REFRESH_ENABLED=${AUTO_REFRESH_ENABLED:-true}
       - AUTO_REFRESH_TIME=${AUTO_REFRESH_TIME:-02:30}

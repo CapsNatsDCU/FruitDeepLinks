@@ -496,7 +496,7 @@ def external_schedule_audit():
         conn.row_factory = sqlite3.Row
         result = schedule_audit_snapshot(conn, days=days)
         display_timezone = get_setting(conn, "timezone") or os.getenv("FRUIT_TIMEZONE") or os.getenv("TZ") or "UTC"
-    return jsonify({"ok": True, "days": days, "serpapi_configured": bool(os.getenv("SERPAPI_API_KEY")),
+    return jsonify({"ok": True, "days": days,
                     "display_timezone": display_timezone, "timestamp_contract": "absolute_utc", **result})
 
 
@@ -530,8 +530,7 @@ def refresh_external_schedule_audit():
             return jsonify({"ok": False, "error": "days must be an integer"}), 400
         with get_conn() as conn:
             conn.row_factory = sqlite3.Row
-            result = refresh_schedule_audit(conn, api_key=os.getenv("SERPAPI_API_KEY"),
-                                            days=days, force=True)
+            result = refresh_schedule_audit(conn, days=days, force=True)
         return jsonify({"ok": True, **result})
     finally:
         _schedule_audit_lock.release()

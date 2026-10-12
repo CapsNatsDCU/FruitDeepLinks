@@ -44,8 +44,8 @@ instead of treating a partial response as a complete team schedule.
 Formula 1, NASCAR Cup, IndyCar and UFL retain their season/year feeds.
 
 The scheduled refresh runs at most every 72 hours; **Outside Schedule Coverage → Check now** in
-My Sports refreshes it explicitly. The optional SerpApi adapter still supports
-configured keys and search-budget guards, but the default registry never uses it.
+My Sports refreshes it explicitly. A source change also triggers a scheduled
+refresh even when the prior run is still within that interval.
 
 External events live only in `sports_schedule_reference_events`.  They can
 report `missing_from_ingestion`, `no_playable`, `playable_found`, or
