@@ -10,6 +10,7 @@ from sports_catalog import (apply_catalog_records, canonicalize_participants,
                             preview_catalog_records, recurring_event_aliases, resolve_team_alias)
 from sports_metadata import ensure_schema, resolve_source_event
 from update_sports_catalog import openligadb_records, thesportsdb_records, wikidata_records
+from catalog_workbench import add_alias, merge_entities
 
 
 START = "2026-10-11T17:00:00Z"
@@ -58,10 +59,32 @@ class SportsCatalogTests(unittest.TestCase):
         self.assertEqual("source_identity_conflict", attention[0])
         self.assertTrue(attention[1])
 
+    def test_bootstrap_reuses_leagues_moved_by_sport_merge(self):
+        records = [
+            {"entity_type": "sport", "name": "Motorsport", "source": "fruit_bootstrap"},
+            {"entity_type": "league", "name": "Formula 1", "sport": "Motorsport", "source": "fruit_bootstrap"},
+        ]
+        self.apply(*records)
+        self.apply({"entity_type": "sport", "name": "motor_sports", "source": "provider"})
+        source_id = self.conn.execute("SELECT id FROM sports WHERE name='Motorsport'").fetchone()[0]
+        survivor_id = self.conn.execute("SELECT id FROM sports WHERE name='motor_sports'").fetchone()[0]
+        league_id = self.conn.execute("SELECT id FROM leagues WHERE name='Formula 1'").fetchone()[0]
+        merge_entities(self.conn, entity_type="sport", survivor_id=survivor_id, source_id=source_id)
+
+        result = apply_catalog_records(self.conn, records, dry_run=False)
+
+        self.assertFalse(result["conflicts"])
+        self.assertFalse(result["invalid"])
+        self.assertEqual(1, self.conn.execute("SELECT COUNT(*) FROM leagues WHERE name='Formula 1'").fetchone()[0])
+        self.assertEqual(survivor_id, self.conn.execute("SELECT sport_id FROM leagues WHERE id=?", (league_id,)).fetchone()[0])
+
     def test_catalog_alias_is_scoped_and_generic_mascot_is_not_imported(self):
         self.apply(self.capitals_record())
         sport_id = self.conn.execute("SELECT id FROM sports WHERE name='Ice hockey'").fetchone()[0]
         league_id = self.conn.execute("SELECT id FROM leagues WHERE name='NHL'").fetchone()[0]
+        self.assertIsNone(resolve_team_alias(self.conn, "Washington Caps", sport_id=sport_id, league_id=league_id))
+        team_id = self.conn.execute("SELECT id FROM teams WHERE name='Washington Capitals'").fetchone()[0]
+        add_alias(self.conn, entity_type="team", fruit_id=team_id, alias="Washington Caps")
         self.assertEqual("Washington Capitals", resolve_team_alias(self.conn, "Washington Caps", sport_id=sport_id, league_id=league_id)["name"])
         self.assertIsNone(resolve_team_alias(self.conn, "Capitals", sport_id=sport_id, league_id=league_id))
         self.assertIsNone(resolve_team_alias(self.conn, "Washington Caps", sport_id=None, league_id=None))
@@ -72,6 +95,13 @@ class SportsCatalogTests(unittest.TestCase):
             "sport_name": "Ice hockey", "league_name": "NHL", "start_utc": START,
             "competitors": [{"name": "Washington Capitals", "homeAway": "away"}, {"name": "New York Rangers", "homeAway": "home"}],
         })
+        unconfirmed = resolve_source_event(self.conn, source="xtream", source_event_id="xtream-unconfirmed-caps", data={
+            "sport_name": "Ice hockey", "league_name": "NHL", "start_utc": START,
+            "competitors": [{"name": "Washington Caps", "homeAway": "away"}, {"name": "New York Rangers", "homeAway": "home"}],
+        })
+        self.assertNotEqual(apple["canonical_event_id"], unconfirmed["canonical_event_id"])
+        team_id = self.conn.execute("SELECT id FROM teams WHERE name='Washington Capitals'").fetchone()[0]
+        add_alias(self.conn, entity_type="team", fruit_id=team_id, alias="Washington Caps")
         xtream = resolve_source_event(self.conn, source="xtream", source_event_id="xtream-caps", data={
             "sport_name": "Ice hockey", "league_name": "NHL", "start_utc": START,
             "competitors": [{"name": "Washington Caps", "homeAway": "away"}, {"name": "New York Rangers", "homeAway": "home"}],
@@ -79,6 +109,12 @@ class SportsCatalogTests(unittest.TestCase):
         self.assertEqual(apple["canonical_event_id"], xtream["canonical_event_id"])
         participant = self.conn.execute("SELECT display_name FROM canonical_event_participants WHERE event_id=? AND role='away'", (xtream["canonical_event_id"],)).fetchone()[0]
         self.assertEqual("Washington Capitals", participant)
+        self.conn.execute("UPDATE catalog_aliases SET operator_confirmed=0 WHERE entity_type='team' AND fruit_id=? AND source='manual'", (team_id,))
+        reconsidered = resolve_source_event(self.conn, source="xtream", source_event_id="xtream-caps", data={
+            "sport_name": "Ice hockey", "league_name": "NHL", "start_utc": START,
+            "competitors": [{"name": "Washington Caps", "homeAway": "away"}, {"name": "New York Rangers", "homeAway": "home"}],
+        })
+        self.assertEqual(unconfirmed["canonical_event_id"], reconsidered["canonical_event_id"])
 
     def test_ambiguous_or_minor_league_mascots_cannot_force_a_catalog_match(self):
         self.apply(self.capitals_record(), {

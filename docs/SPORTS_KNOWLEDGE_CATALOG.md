@@ -61,10 +61,45 @@ An incoming external ID that already points to another Fruit entity is reported
 as a conflict and no changes are applied.  The updater has no delete or
 automatic-merge operation.
 
+Provider participant IDs observed during event refresh remain on the event's
+participant observation. They no longer create confidence-1 team mappings.
+Only an operator-confirmed source mapping can bind one to a Fruit team; a
+conflicting later observation goes to Catalog Needs attention without changing
+that mapping. Historical automatic mappings remain visible as unconfirmed data
+and do not qualify a catalog merge rehearsal.
+Opaque values supplied in sport or league name fields, such as numeric IDs or
+Q-IDs, likewise cannot establish event scope unless an operator maps the label
+to an existing Fruit sport or league.
+
+Xtream category names and IDs are discovery context. An unmapped category can
+be shown to the local parser as a hint, but cannot supply independent sport or
+league evidence or make a fixture schedulable. To review a category without
+provider traffic, run `python3 bin/audit_provider_categories.py --db-copy
+/path/to/fruit-copy.db --compare-db-copy /path/to/later-fruit-copy.db --output
+/path/to/category-audit.json`. The report summarizes title and EPG context,
+conflicts, and category drift; it never approves a mapping. After inspecting
+the observations against an independent schedule or roster, an operator can
+save a classification mapping with source `xtream:category` and label
+`category ID | exact category name`. A changed ID or name stops that mapping
+from applying. Title or structured metadata that conflicts with the mapped
+category takes precedence.
+Participants without independently established league scope remain event
+names for review; they do not create new Fruit team identities.
+The next canonical refresh re-evaluates earlier inferred matches under this
+policy. If a source moves to a different canonical event, its unreferenced old
+event is retained as superseded history and omitted from coverage and counts.
+
+The offline team merge rehearsal requires operator-confirmed sport and league
+parent provenance plus an operator-confirmed target team mapping before it
+calls a name-pattern pair a shadow proposal. Matching Fruit scope IDs alone
+are insufficient. Shadow proposals still never authorize a merge.
+
 At runtime an alias is accepted only when it exactly and uniquely identifies a
-team within the current sport and league.  Generic unconfirmed one-word source
-aliases are not imported as resolver aliases.  This deliberately keeps records
-such as `Capitals` or `Nationals` unresolved instead of risking a false merge.
+team within the current sport and league and an operator has confirmed the
+alias. Imported aliases remain visible for review, but cannot resolve a team
+until confirmed. Generic unconfirmed one-word source aliases are not imported
+as resolver aliases. This deliberately keeps records such as `Capitals` or
+`Nationals` unresolved instead of risking a false merge.
 
 ## Sources
 

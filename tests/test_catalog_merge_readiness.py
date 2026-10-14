@@ -17,8 +17,12 @@ def team(identifier, name, *, league="nba", sport="basketball", merged_into=None
             "state": {"archived": bool(merged_into), "merged_into_id": merged_into}}
 
 
-def enriched(row, *, mapping_sources=(), alias_count=0, rule_count=0, operator_fields_present=False):
-    return {**row, "mapping_sources": list(mapping_sources), "manual_mapping_count": 0,
+def enriched(row, *, mapping_sources=(), confirmed_mapping_sources=(), parent_scope_confirmed=False,
+             alias_count=0, rule_count=0, operator_fields_present=False,
+             manual_mapping_count=0):
+    return {**row, "mapping_sources": list(mapping_sources),
+            "confirmed_mapping_sources": list(confirmed_mapping_sources),
+            "parent_scope_confirmed": parent_scope_confirmed, "manual_mapping_count": manual_mapping_count,
             "alias_count": alias_count, "rule_count": rule_count,
             "operator_fields_present": operator_fields_present}
 
@@ -67,8 +71,10 @@ class CatalogMergeReadinessTests(unittest.TestCase):
         ]
         rows = []
         for index, (plain, numbered) in enumerate(observed):
-            rows.extend((enriched(team(f"base-{index}", plain), mapping_sources=("apple",)),
-                         enriched(team(f"variant-{index}", numbered))))
+            rows.extend((enriched(team(f"base-{index}", plain), mapping_sources=("apple",),
+                                  confirmed_mapping_sources=("apple",), parent_scope_confirmed=True,
+                                  manual_mapping_count=1),
+                         enriched(team(f"variant-{index}", numbered), parent_scope_confirmed=True)))
         result = audit_catalog({"teams": rows, "merges": [], "aliases": [], "provenance": []})
         self.assertEqual(8, result["summary"]["shadow_merge_proposals"])
         self.assertEqual(0, result["summary"]["automatic_merges_authorized"])
@@ -76,16 +82,25 @@ class CatalogMergeReadinessTests(unittest.TestCase):
                          {row["variant_name"] for row in result["unmerged_pattern_candidates"]
                           if row["decision"] == "shadow_merge_proposal"})
 
+    def test_matching_fruit_scope_without_confirmation_is_held(self):
+        catalog = {"teams": [
+            enriched(team("base", "Brooklyn Nets"), mapping_sources=("apple",)),
+            enriched(team("variant", "03 : Brooklyn Nets")),
+        ], "merges": [], "aliases": [], "provenance": []}
+        result = audit_catalog(catalog)
+        self.assertEqual(0, result["summary"]["shadow_merge_proposals"])
+        self.assertEqual("parent_scope_unconfirmed", result["unmerged_pattern_candidates"][0]["hold_reason"])
+
     def test_shadow_rule_holds_one_word_names_parentheses_and_owned_variants(self):
         catalog = {"teams": [
-            enriched(team("cubs", "Cubs", league="mlb", sport="baseball"), mapping_sources=("apple",)),
-            enriched(team("numbered-cubs", "02 : Cubs", league="mlb", sport="baseball")),
-            enriched(team("yankees", "Yankees", league="mlb", sport="baseball"), mapping_sources=("apple",)),
-            enriched(team("numbered-yankees", "02 Yankees", league="mlb", sport="baseball")),
-            enriched(team("hawks", "Atlanta Hawks"), mapping_sources=("apple",)),
-            enriched(team("french-hawks", "Atlanta Hawks (French)")),
-            enriched(team("heat", "Miami Heat"), mapping_sources=("apple",)),
-            enriched(team("owned-heat", "03 : Miami Heat"), operator_fields_present=True),
+            enriched(team("cubs", "Cubs", league="mlb", sport="baseball"), mapping_sources=("apple",), confirmed_mapping_sources=("apple",), parent_scope_confirmed=True),
+            enriched(team("numbered-cubs", "02 : Cubs", league="mlb", sport="baseball"), parent_scope_confirmed=True),
+            enriched(team("yankees", "Yankees", league="mlb", sport="baseball"), mapping_sources=("apple",), confirmed_mapping_sources=("apple",), parent_scope_confirmed=True),
+            enriched(team("numbered-yankees", "02 Yankees", league="mlb", sport="baseball"), parent_scope_confirmed=True),
+            enriched(team("hawks", "Atlanta Hawks"), mapping_sources=("apple",), confirmed_mapping_sources=("apple",), parent_scope_confirmed=True),
+            enriched(team("french-hawks", "Atlanta Hawks (French)"), parent_scope_confirmed=True),
+            enriched(team("heat", "Miami Heat"), mapping_sources=("apple",), confirmed_mapping_sources=("apple",), parent_scope_confirmed=True),
+            enriched(team("owned-heat", "03 : Miami Heat"), operator_fields_present=True, parent_scope_confirmed=True),
         ], "merges": [], "aliases": [], "provenance": []}
         result = audit_catalog(catalog)
         self.assertEqual(0, result["summary"]["shadow_merge_proposals"])
@@ -97,16 +112,16 @@ class CatalogMergeReadinessTests(unittest.TestCase):
 
     def test_shadow_rule_holds_mapped_or_competing_variants(self):
         catalog = {"teams": [
-            enriched(team("nets", "Brooklyn Nets"), mapping_sources=("apple",)),
-            enriched(team("mapped", "03 : Brooklyn Nets"), mapping_sources=("xtream",)),
-            enriched(team("bulls", "Chicago Bulls"), mapping_sources=("apple",)),
-            enriched(team("bulls-one", "01 : Chicago Bulls")),
-            enriched(team("bulls-two", "02 : Chicago Bulls")),
+            enriched(team("nets", "Brooklyn Nets"), mapping_sources=("apple",), confirmed_mapping_sources=("apple",), parent_scope_confirmed=True),
+            enriched(team("mapped", "03 : Brooklyn Nets"), mapping_sources=("xtream",), parent_scope_confirmed=True),
+            enriched(team("bulls", "Chicago Bulls"), mapping_sources=("apple",), confirmed_mapping_sources=("apple",), parent_scope_confirmed=True),
+            enriched(team("bulls-one", "01 : Chicago Bulls"), parent_scope_confirmed=True),
+            enriched(team("bulls-two", "02 : Chicago Bulls"), parent_scope_confirmed=True),
         ], "merges": [], "aliases": [], "provenance": []}
         result = audit_catalog(catalog)
         self.assertEqual(0, result["summary"]["shadow_merge_proposals"])
         reasons = {row["variant_name"]: row["hold_reason"] for row in result["unmerged_pattern_candidates"]}
-        self.assertEqual("target_not_source_backed_or_variant_has_mapping", reasons["03 : Brooklyn Nets"])
+        self.assertEqual("target_not_confirmed_or_variant_has_mapping", reasons["03 : Brooklyn Nets"])
         self.assertEqual("ambiguous_target_or_multiple_variants", reasons["01 : Chicago Bulls"])
         self.assertEqual("ambiguous_target_or_multiple_variants", reasons["02 : Chicago Bulls"])
 
@@ -164,14 +179,16 @@ class CatalogMergeReadinessTests(unittest.TestCase):
                                     "evidence_json": "private-marker"}]}
         result = make_snapshot(raw, {"ok": True, "rules": []})
         self.assertEqual(["apple"], result["teams"][0]["mapping_sources"])
+        self.assertEqual([], result["teams"][0]["confirmed_mapping_sources"])
+        self.assertFalse(result["teams"][0]["parent_scope_confirmed"])
         self.assertNotIn("private-marker", json.dumps(result))
 
     def test_db_copy_gate_holds_a_variant_with_historical_participants(self):
         rows = [
-            enriched(team("nets", "Brooklyn Nets"), mapping_sources=("apple",)),
-            enriched(team("nets-numbered", "03 : Brooklyn Nets")),
-            enriched(team("bulls", "Chicago Bulls"), mapping_sources=("apple",)),
-            enriched(team("bulls-numbered", "02 : Chicago Bulls")),
+            enriched(team("nets", "Brooklyn Nets"), mapping_sources=("apple",), confirmed_mapping_sources=("apple",), parent_scope_confirmed=True),
+            enriched(team("nets-numbered", "03 : Brooklyn Nets"), parent_scope_confirmed=True),
+            enriched(team("bulls", "Chicago Bulls"), mapping_sources=("apple",), confirmed_mapping_sources=("apple",), parent_scope_confirmed=True),
+            enriched(team("bulls-numbered", "02 : Chicago Bulls"), parent_scope_confirmed=True),
         ]
         report = audit_catalog({"teams": rows, "merges": [], "aliases": [], "provenance": []})
         with tempfile.TemporaryDirectory() as directory:
@@ -181,15 +198,17 @@ class CatalogMergeReadinessTests(unittest.TestCase):
                 CREATE TABLE teams(id TEXT, name TEXT, sport_id TEXT, league_id TEXT, aliases_json TEXT);
                 CREATE TABLE catalog_entity_state(entity_type TEXT, fruit_id TEXT, archived INTEGER, merged_into_id TEXT, operator_fields_json TEXT);
                 CREATE TABLE canonical_event_participants(event_id TEXT, team_id TEXT);
-                CREATE TABLE catalog_entity_provenance(entity_type TEXT, fruit_id TEXT);
+                CREATE TABLE catalog_entity_provenance(entity_type TEXT, fruit_id TEXT, operator_confirmed INTEGER);
                 CREATE TABLE catalog_aliases(entity_type TEXT, fruit_id TEXT);
                 CREATE TABLE source_entity_mappings(entity_type TEXT, canonical_id TEXT, source TEXT, manual INTEGER);
                 CREATE TABLE sports_rules(target_type TEXT, target_id TEXT, enabled INTEGER);
             """)
             conn.executemany("INSERT INTO teams VALUES(?,?,?,?,?)",
                              [(row["id"], row["name"], row["sport_id"], row["league_id"], "[]") for row in rows])
-            conn.executemany("INSERT INTO source_entity_mappings VALUES('team',?,'apple',0)",
+            conn.executemany("INSERT INTO source_entity_mappings VALUES('team',?,'apple',1)",
                              [("nets",), ("bulls",)])
+            conn.executemany("INSERT INTO catalog_entity_provenance VALUES(?,?,1)",
+                             [("sport", "basketball"), ("league", "nba")])
             conn.execute("INSERT INTO canonical_event_participants VALUES('old-event','nets-numbered')")
             conn.commit()
             conn.close()

@@ -442,7 +442,8 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
         canonical = [dict(row) for row in conn.execute("""
           SELECT ce.id,ce.title,ce.start_utc,ce.league_id,l.name AS league_name
           FROM canonical_events ce LEFT JOIN leagues l ON l.id=ce.league_id
-          WHERE datetime(ce.start_utc) BETWEEN datetime(?) AND datetime(?)
+          WHERE COALESCE(ce.status,'')!='superseded'
+            AND datetime(ce.start_utc) BETWEEN datetime(?) AND datetime(?)
         """, (utc_now(current - timedelta(days=1)), utc_now(end)))]
     participants: dict[str, list[str]] = {}
     if canonical and "canonical_event_participants" in tables:

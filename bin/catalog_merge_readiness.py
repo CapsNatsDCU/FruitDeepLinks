@@ -105,22 +105,24 @@ def _shadow_numbered_merge_reason(plain: dict[str, Any], variant: dict[str, Any]
     A structured Apple mapping corroborates the clean target, not the prefixed
     record. Eligibility is therefore a test proposal, never merge authority.
     """
-    required = ("operator_fields_present", "alias_count", "mapping_sources",
+    required = ("operator_fields_present", "alias_count", "mapping_sources", "confirmed_mapping_sources",
                 "manual_mapping_count", "rule_count")
     if any(key not in row for row in (plain, variant) for key in required):
         return "snapshot_lacks_safety_fields"
     match = _CHANNEL_NUMBER.fullmatch(variant["name"].strip())
     if not match or " ".join(match.group(1).split()).casefold() != " ".join(plain["name"].split()).casefold():
         return "not_exact_channel_number_format"
+    if not plain.get("parent_scope_confirmed") or not variant.get("parent_scope_confirmed"):
+        return "parent_scope_unconfirmed"
     if len(normalize(plain["name"]).split()) < 2:
         return "short_or_ambiguous_base_name"
     if target_count != 1 or variant_count != 1:
         return "ambiguous_target_or_multiple_variants"
     if _scope(plain) != _scope(variant) or not all(_scope(plain)):
         return "scope_mismatch_or_incomplete"
-    if "apple" not in plain["mapping_sources"] or variant["mapping_sources"]:
-        return "target_not_source_backed_or_variant_has_mapping"
-    if plain["manual_mapping_count"] or variant["manual_mapping_count"]:
+    if not plain["confirmed_mapping_sources"] or variant["mapping_sources"]:
+        return "target_not_confirmed_or_variant_has_mapping"
+    if variant["manual_mapping_count"]:
         return "operator_mapping_present"
     if plain["operator_fields_present"] or variant["operator_fields_present"]:
         return "operator_edit_present"
@@ -315,11 +317,18 @@ def check_db_relationships(report: dict[str, Any], db_copy: Path) -> None:
                     source[3] not in (None, "", "[]")):
                 candidate["db_relationship_decision"] = "hold_snapshot_drift"
                 continue
-            target_apple_mappings = conn.execute(
-                "SELECT COUNT(*) FROM source_entity_mappings WHERE entity_type='team' AND canonical_id=? AND source='apple' AND manual=0",
+            confirmed_scope = all(conn.execute(
+                "SELECT 1 FROM catalog_entity_provenance WHERE entity_type=? AND fruit_id=? AND operator_confirmed=1 LIMIT 1",
+                (kind, identifier),
+            ).fetchone() for kind, identifier in (("sport", source[1]), ("league", source[2])))
+            if not confirmed_scope:
+                candidate["db_relationship_decision"] = "hold_parent_scope_unconfirmed"
+                continue
+            target_confirmed_mappings = conn.execute(
+                "SELECT COUNT(*) FROM source_entity_mappings WHERE entity_type='team' AND canonical_id=? AND manual=1",
                 (keep_id,),
             ).fetchone()[0]
-            if not target_apple_mappings:
+            if not target_confirmed_mappings:
                 candidate["db_relationship_decision"] = "hold_snapshot_drift"
                 continue
             checks = {

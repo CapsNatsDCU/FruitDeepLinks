@@ -931,8 +931,8 @@ def normalize_motorsport_session(value: Any) -> Optional[str]:
 
 
 def identify_motorsport_series(category_name: Any, stream_name: Any) -> Optional[dict[str, str]]:
-    """Identify only series supported by observed provider metadata."""
-    text = f"{category_name or ''} {stream_name or ''}"
+    """Identify a series from the stream title, never category membership alone."""
+    text = str(stream_name or "")
     if re.search(r"(?<![A-Z0-9])F\s*1(?![A-Z0-9])", text, re.IGNORECASE) or re.search(
         r"\bFORMULA\s+(?:1|ONE)\b", text, re.IGNORECASE
     ):

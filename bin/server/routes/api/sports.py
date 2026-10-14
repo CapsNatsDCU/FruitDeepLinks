@@ -101,13 +101,13 @@ def _catalog_identity_rows(conn):
     league_names = {str(row[0]): str(row[1]) for row in conn.execute("SELECT id,name FROM leagues")}
     now_sql = "datetime('now')"
     upcoming = {("sport", str(row[0])): int(row[1]) for row in conn.execute(
-        f"SELECT sport_id,COUNT(*) FROM canonical_events WHERE sport_id IS NOT NULL AND datetime(start_utc)>= {now_sql} GROUP BY sport_id")}
+        f"SELECT sport_id,COUNT(*) FROM canonical_events WHERE COALESCE(status,'')!='superseded' AND sport_id IS NOT NULL AND datetime(start_utc)>= {now_sql} GROUP BY sport_id")}
     upcoming.update({("league", str(row[0])): int(row[1]) for row in conn.execute(
-        f"SELECT league_id,COUNT(*) FROM canonical_events WHERE league_id IS NOT NULL AND datetime(start_utc)>= {now_sql} GROUP BY league_id")})
+        f"SELECT league_id,COUNT(*) FROM canonical_events WHERE COALESCE(status,'')!='superseded' AND league_id IS NOT NULL AND datetime(start_utc)>= {now_sql} GROUP BY league_id")})
     upcoming.update({("racing_event", str(row[0])): int(row[1]) for row in conn.execute(
-        f"SELECT recurring_event_id,COUNT(*) FROM canonical_events WHERE recurring_event_id IS NOT NULL AND datetime(start_utc)>= {now_sql} GROUP BY recurring_event_id")})
+        f"SELECT recurring_event_id,COUNT(*) FROM canonical_events WHERE COALESCE(status,'')!='superseded' AND recurring_event_id IS NOT NULL AND datetime(start_utc)>= {now_sql} GROUP BY recurring_event_id")})
     upcoming.update({("team", str(row[0])): int(row[1]) for row in conn.execute(
-        f"SELECT cep.team_id,COUNT(DISTINCT cep.event_id) FROM canonical_event_participants cep JOIN canonical_events ce ON ce.id=cep.event_id WHERE cep.team_id IS NOT NULL AND datetime(ce.start_utc)>= {now_sql} GROUP BY cep.team_id")})
+        f"SELECT cep.team_id,COUNT(DISTINCT cep.event_id) FROM canonical_event_participants cep JOIN canonical_events ce ON ce.id=cep.event_id WHERE COALESCE(ce.status,'')!='superseded' AND cep.team_id IS NOT NULL AND datetime(ce.start_utc)>= {now_sql} GROUP BY cep.team_id")})
     result = []
     for entity_type, table in tables:
         for row in conn.execute(f"SELECT * FROM {table} ORDER BY name"):
@@ -684,7 +684,7 @@ def health():
         conn.row_factory = sqlite3.Row
         counts = {name: conn.execute(sql).fetchone()[0] for name, sql in {
             "sports": "SELECT COUNT(*) FROM sports", "leagues": "SELECT COUNT(*) FROM leagues", "teams": "SELECT COUNT(*) FROM teams",
-            "upcoming_events": "SELECT COUNT(*) FROM canonical_events WHERE datetime(start_utc)>=datetime('now')",
+            "upcoming_events": "SELECT COUNT(*) FROM canonical_events WHERE COALESCE(status,'')!='superseded' AND datetime(start_utc)>=datetime('now')",
             "unresolved_source_records": "SELECT COUNT(*) FROM source_event_records WHERE confidence < .85",
             "invalid_or_naive_timestamps": "SELECT COUNT(*) FROM canonical_events WHERE start_utc NOT LIKE '%Z'",
         }.items()}

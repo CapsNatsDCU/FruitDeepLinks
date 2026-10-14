@@ -20,12 +20,13 @@ UTC = timezone.utc
 
 class CanonicalRowContractTests(unittest.TestCase):
     def _canonical_event(self, conn, source_id="source-event"):
+        start = (datetime.now(UTC) + timedelta(hours=1)).replace(microsecond=0)
         return resolve_source_event(conn, source="xtream", source_event_id=source_id, data={
             "title": "Washington Capitals at New York Rangers",
             "sport_name": "Hockey",
             "league_name": "NHL",
             "event_type": "regular",
-            "start_utc": "2026-10-11T17:00:00Z",
+            "start_utc": start.isoformat().replace("+00:00", "Z"),
             "competitors": [
                 {"name": "Washington Capitals", "homeAway": "away"},
                 {"name": "New York Rangers", "homeAway": "home"},

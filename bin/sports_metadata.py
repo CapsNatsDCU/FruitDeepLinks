@@ -167,6 +167,16 @@ _PROGRAM_TYPES = frozenset({"live_game", "live_race", "practice", "qualifying", 
                             "replay", "highlights", "sports_talk", "studio_show", "documentary",
                             "sports_other", "non_sports", "no_event", "unknown"})
 _NON_EVENT_MARKERS = ("no event", "no events", "form ula", "#####", "separator")
+RESOLUTION_POLICY_VERSION = 2
+_OPAQUE_CLASSIFICATION_ID = re.compile(
+    r"(?:\d+|q\d+|(?:sport|league)[_:#-]?\d+|[0-9a-f]{8}-[0-9a-f-]{27,})",
+    re.IGNORECASE,
+)
+
+
+def _unverified_classification_id(value: Any) -> bool:
+    """Reject opaque provider values unless a reviewed label mapping exists."""
+    return bool(_OPAQUE_CLASSIFICATION_ID.fullmatch(str(value or "").strip()))
 
 
 def normalize_sport(value: Any, *, league: Any = None) -> str | None:
@@ -555,7 +565,7 @@ def _upsert_named(conn: sqlite3.Connection, table: str, name: str, *, sport_id: 
     else:
         row = conn.execute("SELECT id FROM teams WHERE league_id IS ? AND normalized_name=?", (league_id, normalized)).fetchone()
         if not row:
-            row = conn.execute("SELECT t.id FROM catalog_aliases a JOIN teams t ON t.id=a.fruit_id WHERE a.entity_type='team' AND a.normalized_alias=? AND t.league_id IS ?", (normalized, league_id)).fetchone()
+            row = conn.execute("SELECT t.id FROM catalog_aliases a JOIN teams t ON t.id=a.fruit_id WHERE a.entity_type='team' AND a.operator_confirmed=1 AND a.normalized_alias=? AND t.league_id IS ?", (normalized, league_id)).fetchone()
         identifier = row[0] if row else _key("team", league_id, normalized)
         target = merged_target("team", identifier)
         if target != identifier:
@@ -717,7 +727,7 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
                          ai_requester=None, ai_budget: list[int] | None = None,
                          ai_mode: str = "bounded",
                          commit_before_ai_retry: bool = False,
-                         recheck_inferred_mapping: bool = True) -> dict[str, Any]:
+                         resolution_context_fingerprint: str | None = None) -> dict[str, Any]:
     """Resolve one structured source record to Fruit-owned canonical identity."""
     if not schema_ready:
         ensure_schema(conn)
@@ -732,10 +742,12 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
         raw = {}
     source_fingerprint = _source_input_fingerprint(data, raw)
     prior_evidence = _json(prior[2]) if prior else {}
-    prior_is_current = bool(prior and (not recheck_inferred_mapping or prior[1] == "manual_override"
-                                       or prior_evidence.get("source_input_fingerprint") == source_fingerprint))
+    context_fingerprint = resolution_context_fingerprint or _resolution_context_fingerprint(conn, "direct")
+    prior_is_current = bool(prior and (prior[1] == "manual_override" or (
+        prior_evidence.get("resolution_policy_version") == RESOLUTION_POLICY_VERSION and
+        prior_evidence.get("resolution_context_fingerprint") == context_fingerprint and
+        prior_evidence.get("source_input_fingerprint") == source_fingerprint)))
     title_text, description_text, category_text = _metadata_text(data, raw)
-    # Explicit EPG fields win.  When absent, title/description evidence outranks
     # A provider's field name is not authoritative: several providers put a
     # league such as NFL or MLB in ``sport``.  Operator-managed Catalog Workbench
     # mappings get the first say over those raw labels, before the built-in
@@ -745,12 +757,13 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     sport, league = raw_sport, raw_league
     try:
         from catalog_workbench import classification_mapping_for_label
+        classification_lookup = classification_mapping_for_label
         league_mapping = classification_mapping_for_label(conn, source=source, label=raw_league)
         sport_mapping = classification_mapping_for_label(conn, source=source, label=raw_sport)
     except Exception:
         # A pre-migration database should remain compatible until its normal
         # refresh/write boundary installs the Settings mapping table.
-        league_mapping = sport_mapping = None
+        league_mapping = sport_mapping = classification_lookup = None
     applied_classification_mappings = []
     if league_mapping:
         if league_mapping["target_type"] == "league":
@@ -769,10 +782,62 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
         else:
             sport = sport_mapping.get("sport") or sport
         applied_classification_mappings.append(sport_mapping)
+    if (_unverified_classification_id(raw_sport) and
+            not any(mapping and mapping.get("sport") for mapping in (sport_mapping, league_mapping))):
+        sport = None
+    if (_unverified_classification_id(raw_league) and
+            not any(mapping and mapping.get("league") for mapping in (league_mapping, sport_mapping))):
+        league = None
     title_sport, title_league = _context_from_text(f"{title_text} {description_text}")
     category_sport, category_league = _context_from_text(category_text)
-    sport = sport or title_sport or category_sport
-    league = league or title_league or category_league
+    # A category is a discovery hint until an operator has checked and mapped
+    # this exact provider label. A global label override is too broad here:
+    # different providers can use the same category name for mixed content.
+    category_mapping_source = f"{source}:category"
+    category_id = str(raw.get("category_id") or "").strip()
+    category_mapping_label = f"{category_id} | {category_text}" if category_id and category_text else None
+    category_mapping = (classification_lookup(conn, source=category_mapping_source, label=category_mapping_label)
+                        if classification_lookup and category_mapping_label else None)
+    if category_mapping and (category_mapping["source"] != category_mapping_source or
+                             category_mapping["label"] != category_mapping_label):
+        category_mapping = None
+    mapped_category_sport = category_mapping.get("sport") if category_mapping else None
+    mapped_category_league = category_mapping.get("league") if category_mapping else None
+    category_conflicts = bool(
+        (mapped_category_sport and (sport or title_sport) and
+         normalize_sport(mapped_category_sport) != normalize_sport(sport or title_sport)) or
+        (mapped_category_league and (league or title_league) and
+         normalize_league(mapped_category_league)[0] != normalize_league(league or title_league)[0])
+    )
+    if category_conflicts:
+        category_mapping = None
+        mapped_category_sport = mapped_category_league = None
+    prior_context_invalidated = False
+    if prior and prior[1] != "manual_override":
+        old_row = conn.execute(
+            "SELECT ce.metadata_json,s.name,l.name FROM canonical_events ce "
+            "LEFT JOIN sports s ON s.id=ce.sport_id LEFT JOIN leagues l ON l.id=ce.league_id WHERE ce.id=?",
+            (prior[0],),
+        ).fetchone()
+        old_metadata = _json(old_row[0]) if old_row else {}
+        old_provenance = old_metadata.get("provenance", {}) if isinstance(old_metadata, Mapping) else {}
+        category_sourced = any(old_provenance.get(key) in {"category", "verified_category_mapping"}
+                                for key in ("sport_source", "league_source"))
+        mapping_changed = bool(old_row and category_mapping and (
+            (mapped_category_sport and normalize_sport(old_row[1]) != normalize_sport(mapped_category_sport)) or
+            (mapped_category_league and _norm(old_row[2]) != _norm(mapped_category_league))
+        ))
+        old_opaque_scope = bool(old_row and (
+            (_unverified_classification_id(old_row[1]) and
+             not any(mapping and mapping.get("sport") for mapping in (sport_mapping, league_mapping))) or
+            (_unverified_classification_id(old_row[2]) and
+             not any(mapping and mapping.get("league") for mapping in (league_mapping, sport_mapping)))
+        ))
+        prior_context_invalidated = (category_sourced and (not category_mapping or mapping_changed)) or old_opaque_scope
+        if prior_context_invalidated:
+            prior_is_current = False
+    sport = sport or title_sport or mapped_category_sport
+    league = league or title_league or mapped_category_league
     league, league_sport = normalize_league(league, sport=sport)
     sport = normalize_sport(sport, league=league) or league_sport
     structured_participants = _clean_participants(_participants(data)) or _clean_participants(_participants(raw))
@@ -786,7 +851,7 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     prior_validated_identity = False
     prior_independent_sport = False
     prior_independent_league = False
-    ai_sport_hint, ai_league_hint = sport, league
+    ai_sport_hint, ai_league_hint = sport or category_sport, league or category_league
     # A legacy lane row is often deliberately sparse after its richer
     # provider observation has already materialized a validated event.  Do
     # not let that lossy mirror erase trusted canonical identity on the next
@@ -819,10 +884,13 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     # is merged.  AI may clarify this record, but it cannot supply the same
     # sport, league, or participant evidence that later authorizes it.
     independent_participants = [dict(participant) for participant in participants]
-    independent_sport = bool(data.get("sport") or data.get("sport_name") or raw.get("sport") or raw.get("sport_name")
-                             or title_sport or category_sport or prior_independent_sport)
-    independent_league = bool(data.get("league") or data.get("league_name") or raw.get("league") or raw.get("league_name")
-                              or title_league or category_league or prior_independent_league)
+    independent_sport = bool((raw_sport and not _unverified_classification_id(raw_sport)) or sport_mapping or
+                             (league_mapping and league_mapping.get("sport")) or title_sport or
+                             mapped_category_sport or prior_independent_sport)
+    independent_league = bool((raw_league and not _unverified_classification_id(raw_league)) or
+                              (league_mapping and league_mapping.get("league")) or
+                              (sport_mapping and sport_mapping.get("league")) or title_league or
+                              mapped_category_league or prior_independent_league)
     independent_context = independent_sport or independent_league
     deterministic_validation = validate_interpretation(
         title=title_text, description=description_text, category=category_text,
@@ -901,12 +969,14 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
                 # candidate, which still must pass _event_candidates below.
                 ai_sport = interpretation.get("sport")
                 ai_league = interpretation.get("league")
-                # AI may fill gaps, but it never overrides explicit provider
-                # title/description/category context and is normalized below.
-                sport = sport or normalize_sport(ai_sport, league=ai_league)
+                # AI may describe a weak observation, but cannot materialize
+                # scope from an unverified category or its own inference.
+                if independent_context:
+                    sport = sport or normalize_sport(ai_sport, league=ai_league)
                 ai_league, ai_league_sport = normalize_league(ai_league, sport=ai_sport)
-                league = league or ai_league
-                sport = sport or ai_league_sport
+                if independent_context:
+                    league = league or ai_league
+                    sport = sport or ai_league_sport
                 event_type = data.get("program_type") or data.get("event_type") or raw.get("program_type") or raw.get("event_type") or raw.get("eventType") or interpretation.get("program_type") or interpretation.get("event_type") or event_type
                 competition = competition or interpretation.get("competition")
                 if not structured_participants and interpretation.get("participants"):
@@ -949,13 +1019,26 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
             competition = competition or recurring_event["name"]
     team_rows = []
     for participant in participants:
-        team_id = _upsert_named(conn, "teams", participant["name"], sport_id=sport_id, league_id=league_id,
-                                aliases=participant.get("aliases") or [])
+        # A guessed or missing parent scope cannot create a stable team ID.
+        # Keep the participant name on the event for later review instead.
+        team_id = (_upsert_named(conn, "teams", participant["name"], sport_id=sport_id, league_id=league_id,
+                                 aliases=participant.get("aliases") or [])
+                   if sport_id and league_id and independent_league else None)
         team_rows.append((participant, team_id))
         if participant.get("source_id") and team_id:
-            conn.execute("INSERT INTO source_entity_mappings(source,entity_type,source_id,canonical_id,confidence,manual,evidence_json,last_seen_utc) VALUES(?,?,?,?,?,?,?,?) "
-                         "ON CONFLICT(source,entity_type,source_id) DO UPDATE SET canonical_id=excluded.canonical_id,confidence=excluded.confidence,last_seen_utc=excluded.last_seen_utc",
-                         (source, "team", str(participant["source_id"]), team_id, 1.0, 0, '{"kind":"structured_id"}', utc_now()))
+            # Keep the observed ID on canonical_event_participants below. It
+            # is not a verified identity mapping, even when structured.
+            mapped = conn.execute(
+                "SELECT canonical_id FROM source_entity_mappings WHERE source=? AND entity_type='team' AND source_id=?",
+                (source, str(participant["source_id"])),
+            ).fetchone()
+            if mapped and mapped[0] != team_id:
+                from catalog_workbench import record_attention
+                record_attention(conn, entity_type="team", fruit_id=team_id,
+                                 kind="provider_team_id_conflict",
+                                 evidence={"source": source,
+                                           "source_id_hash": hashlib.sha256(str(participant["source_id"]).encode()).hexdigest()[:16],
+                                           "mapped_team_id": mapped[0], "observed_team_id": team_id})
     if prior_is_current:
         canonical_id, confidence = prior[0], 1.0
         if prior[1] == "manual_override":
@@ -976,16 +1059,26 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
             known = conn.execute("SELECT id FROM canonical_events WHERE fingerprint=?", (fingerprint,)).fetchone()
             canonical_id = known[0] if known else _key("ce", fingerprint)
             confidence = 1.0 if known else .9
+    mapped_sport = any(mapping and mapping.get("sport") for mapping in (sport_mapping, league_mapping))
+    mapped_league = any(mapping and mapping.get("league") for mapping in (league_mapping, sport_mapping))
+    sport_source = ("operator_mapping" if mapped_sport else
+                    "provider_metadata" if raw_sport and not _unverified_classification_id(raw_sport) else
+                    "epg_title" if title_sport else
+                    "verified_category_mapping" if mapped_category_sport else "unverified")
+    league_source = ("operator_mapping" if mapped_league else
+                     "provider_metadata" if raw_league and not _unverified_classification_id(raw_league) else
+                     "epg_title" if title_league else
+                     "verified_category_mapping" if mapped_category_league else "unverified")
     metadata = {"title": data.get("title"), "source": source, "raw_start": start_value,
                 "canonical_start_utc": start_text, "time_contract": "absolute_utc",
-                "provenance": {"sport_source": "provider_metadata" if data.get("sport") or data.get("sport_name") or raw.get("sport_name") else ("epg_title" if title_sport else ("category" if category_sport else "ai")),
-                               "league_source": "provider_metadata" if data.get("league") or data.get("league_name") or raw.get("league_name") else ("epg_title" if title_league else ("category" if category_league else "ai")),
+                "provenance": {"sport_source": sport_source, "league_source": league_source,
                                "participant_source": "provider_metadata" if structured_participants else ("stream_name" if _title_participants(title_text) else "ai"),
                                "program_type_source": validation["program_type_source"],
                                "independent_context": independent_context,
                                "independent_sport": independent_sport,
                                "independent_league": independent_league,
-                               "classification_mappings": applied_classification_mappings,
+                               "classification_mappings": applied_classification_mappings + ([category_mapping] if category_mapping else []),
+                               "category_mapping_conflict": category_conflicts,
                                "independent_participant_count": len({_norm(item.get("name")) for item in independent_participants if _norm(item.get("name"))})},
                 "validation": validation["validation"], "validation_reason": validation["validation_reason"],
                 "scheduling_eligible": validation["scheduling_eligible"]}
@@ -1002,11 +1095,26 @@ def resolve_source_event(conn: sqlite3.Connection, *, source: str, source_event_
     for participant, team_id in team_rows:
         conn.execute("INSERT INTO canonical_event_participants(event_id,team_id,display_name,role,source_identifier) VALUES(?,?,?,?,?)",
                      (canonical_id, team_id, participant["name"], participant["role"], str(participant.get("source_id") or "") or None))
-    evidence = {**evidence, "source_input_fingerprint": source_fingerprint, "validation": validation["validation"],
+    evidence = {**evidence, "source_input_fingerprint": source_fingerprint,
+                "resolution_policy_version": RESOLUTION_POLICY_VERSION,
+                "resolution_context_fingerprint": context_fingerprint,
+                "validation": validation["validation"],
                 "validation_reason": validation["validation_reason"], "scheduling_eligible": validation["scheduling_eligible"]}
     conn.execute("INSERT INTO source_event_records(source,source_event_id,canonical_event_id,confidence,resolution_kind,evidence_json,raw_json,last_seen_utc) VALUES(?,?,?,?,?,?,?,?) "
                  "ON CONFLICT(source,source_event_id) DO UPDATE SET canonical_event_id=excluded.canonical_event_id,confidence=excluded.confidence,resolution_kind=excluded.resolution_kind,evidence_json=excluded.evidence_json,raw_json=excluded.raw_json,last_seen_utc=excluded.last_seen_utc",
                  (source, str(source_event_id), canonical_id, confidence, kind, json.dumps(evidence), json.dumps(raw), utc_now()))
+    if prior and prior[0] != canonical_id and not conn.execute(
+            "SELECT 1 FROM source_event_records WHERE canonical_event_id=? LIMIT 1", (prior[0],)).fetchone():
+        # Retain the old row for audit/history, but remove eligibility based
+        # on an inferred mapping that no longer has an active source.
+        previous = conn.execute("SELECT metadata_json FROM canonical_events WHERE id=?", (prior[0],)).fetchone()
+        prior_metadata = _json(previous[0]) if previous else {}
+        if isinstance(prior_metadata, Mapping):
+            prior_metadata = dict(prior_metadata)
+            prior_metadata.update(scheduling_eligible=False, validation="rejected",
+                                  validation_reason="source event remapped after verification")
+            conn.execute("UPDATE canonical_events SET status='superseded',metadata_json=?,updated_utc=? WHERE id=?",
+                         (json.dumps(prior_metadata), utc_now(), prior[0]))
     if commit:
         conn.commit()
     return {"resolved": True, "canonical_event_id": canonical_id, "confidence": confidence, "resolution_kind": kind, "start_utc": start_text,
@@ -1022,7 +1130,7 @@ def _resolution_context_fingerprint(conn: sqlite3.Connection, ai_state: str) -> 
     Observation timestamps are excluded: importer sightings and resolver writes
     must not invalidate unchanged source records on the next refresh.
     """
-    digest = hashlib.sha256(f"event-resolution-v1|{ai_state}".encode("utf-8"))
+    digest = hashlib.sha256(f"event-resolution-v2|{ai_state}".encode("utf-8"))
     tables = {
         "catalog_entity_state": "entity_type,fruit_id,archived,merged_into_id,operator_fields_json,visibility_override",
         "catalog_classification_mappings": "source,normalized_label,target_type,canonical_id",
@@ -1225,7 +1333,7 @@ def sync_legacy_events(conn: sqlite3.Connection, *, ai_mode: str = "bounded",
         result = resolve_source_event(conn, source=source, source_event_id=source_event_id, data=data, commit=False, schema_ready=True,
                                       ai_budget=ai_budget, ai_mode=ai_mode,
                                       commit_before_ai_retry=commit_each,
-                                      recheck_inferred_mapping=False)
+                                      resolution_context_fingerprint=context_fingerprint)
         was_resolved = bool(result.get("resolved"))
         resolved += int(was_resolved); skipped += int(not was_resolved)
         status = result.get("local_ai", {}).get("status")
@@ -1323,7 +1431,7 @@ def coverage(conn: sqlite3.Connection, *, days: int = 14) -> list[dict[str, Any]
     """Starts with wanted canonical events, then reports source/lane coverage."""
     # Coverage is used by GET endpoints.  Its tables are materialized by the
     # refresh/migration path, so this function must remain strictly read-only.
-    events = query_dicts(conn, "SELECT ce.* FROM canonical_events ce WHERE datetime(ce.start_utc) BETWEEN datetime('now','-1 day') AND datetime('now', ?)", (f"+{max(1, min(days, 90))} days",))
+    events = query_dicts(conn, "SELECT ce.* FROM canonical_events ce WHERE COALESCE(ce.status,'')!='superseded' AND datetime(ce.start_utc) BETWEEN datetime('now','-1 day') AND datetime('now', ?)", (f"+{max(1, min(days, 90))} days",))
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if not events:
         return []

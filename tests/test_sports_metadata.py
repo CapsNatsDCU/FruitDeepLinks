@@ -12,6 +12,7 @@ from fruit_export_lanes import build_lanes_xmltv
 from sports_metadata import (applicable_rule, coverage, ensure_schema, resolve_source_event,
                              save_rule, sync_legacy_events, utc_instant, utc_text)
 from team_identity import clean_team_name
+from catalog_workbench import save_source_mapping
 
 
 class SportsMetadataTests(unittest.TestCase):
@@ -74,6 +75,22 @@ class SportsMetadataTests(unittest.TestCase):
         dc_a = self.event("apple", "dc-a", team_a="D.C. United", team_b="FC Cincinnati", league="MLS", sport="Soccer")
         dc_b = self.event("espn", "dc-b", team_a="DC United", team_b="FC Cincinnati", league="MLS", sport="Soccer", start="2026-09-13T20:30:00Z")
         self.assertEqual(dc_a["canonical_event_id"], dc_b["canonical_event_id"])
+
+    def test_provider_team_ids_remain_observations_and_manual_mapping_is_preserved(self):
+        first = self.event("apple", "observed-team-id")
+        team_id = self.conn.execute(
+            "SELECT team_id FROM canonical_event_participants WHERE event_id=? AND source_identifier='away'",
+            (first["canonical_event_id"],),
+        ).fetchone()[0]
+        self.assertEqual(0, self.conn.execute("SELECT COUNT(*) FROM source_entity_mappings").fetchone()[0])
+        save_source_mapping(self.conn, entity_type="team", source="apple", source_id="away", canonical_id=team_id)
+        self.event("apple", "conflicting-team-id", team_a="Virden Oil Capitals")
+        self.assertEqual(team_id, self.conn.execute(
+            "SELECT canonical_id FROM source_entity_mappings WHERE source='apple' AND source_id='away'"
+        ).fetchone()[0])
+        self.assertEqual(1, self.conn.execute(
+            "SELECT COUNT(*) FROM catalog_identity_attention WHERE kind='provider_team_id_conflict' AND status='open'"
+        ).fetchone()[0])
 
     def test_formula_one_has_no_forced_home_away(self):
         result = resolve_source_event(self.conn, source="apple", source_event_id="f1-race", data={

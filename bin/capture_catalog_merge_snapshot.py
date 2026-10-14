@@ -26,6 +26,8 @@ def make_snapshot(catalog: dict, rules_payload: dict) -> dict:
         if row.get("entity_type") == "team":
             mappings[str(row["canonical_id"])].append(row)
     aliases = Counter(str(row["fruit_id"]) for row in catalog["aliases"] if row.get("entity_type") == "team")
+    confirmed_scope = {(str(row.get("entity_type")), str(row.get("fruit_id")))
+                       for row in catalog["provenance"] if row.get("operator_confirmed")}
     team_rules = Counter(str(row["target_id"]) for row in rules_payload["rules"] if row.get("target_type") == "team")
     teams = []
     for row in catalog["teams"]:
@@ -38,11 +40,15 @@ def make_snapshot(catalog: dict, rules_payload: dict) -> dict:
             legacy_alias_count = 1
         teams.append({"id": fruit_id, "name": row["name"],
                       "sport_id": row.get("sport_id"), "league_id": row.get("league_id"),
+                      "parent_scope_confirmed": all((kind, str(identifier)) in confirmed_scope for kind, identifier in
+                                            (("league", row.get("league_id")), ("sport", row.get("sport_id")))),
                       "state": {"archived": bool(state.get("archived")),
                                 "merged_into_id": state.get("merged_into_id")},
                       "operator_fields_present": bool(state.get("operator_fields")),
                       "alias_count": aliases[fruit_id] + legacy_alias_count,
                       "mapping_sources": sorted({str(item["source"]) for item in mappings[fruit_id]}),
+                      "confirmed_mapping_sources": sorted({str(item["source"]) for item in mappings[fruit_id]
+                                                           if item.get("manual")}),
                       "manual_mapping_count": sum(bool(item.get("manual")) for item in mappings[fruit_id]),
                       "rule_count": team_rules[fruit_id]})
     return {"captured_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),

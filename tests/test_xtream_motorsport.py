@@ -179,6 +179,12 @@ class XtreamMotorsportParsingTest(unittest.TestCase):
             name, "US| FLO RACING PPV", now=REFERENCE_NOW, event_window_days=120
         ))
 
+    def test_f1_category_alone_cannot_identify_a_series(self):
+        name = "NEXT | ITALY: RACE | Sun 06 Sep 07:50 EDT (US) | 8K EXCLUSIVE"
+        self.assertIsNone(parse_motorsport_stream(
+            name, "US| F1 PPV", now=REFERENCE_NOW, event_window_days=120
+        ))
+
 
 class FixedLaneDateTime(datetime):
     @classmethod

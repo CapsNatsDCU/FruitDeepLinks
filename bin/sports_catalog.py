@@ -125,7 +125,24 @@ def _lookup_id(conn: sqlite3.Connection, entity_type: str, name: str, *, sport_i
         row = conn.execute("SELECT id FROM teams WHERE league_id IS ? AND normalized_name=?", (league_id, normalized)).fetchone()
     else:
         row = conn.execute("SELECT id FROM catalog_recurring_events WHERE league_id IS ? AND normalized_name=?", (league_id, normalized)).fetchone()
-    return str(row[0]) if row else None
+    if not row:
+        return None
+    identifier = str(row[0])
+    # An operator merge keeps the source row for undo, while its descendants
+    # move to the survivor's scope. Reusing the archived parent ID during a
+    # later import would make the child lookup miss those moved rows and try
+    # to insert their still-existing stable IDs again.
+    seen = set()
+    while identifier not in seen:
+        seen.add(identifier)
+        merged = conn.execute(
+            "SELECT merged_into_id FROM catalog_entity_state WHERE entity_type=? AND fruit_id=?",
+            (entity_type, identifier),
+        ).fetchone()
+        if not merged or not merged[0]:
+            return identifier
+        identifier = str(merged[0])
+    raise ValueError(f"catalog {entity_type} merge cycle")
 
 
 def _stable_id(entity_type: str, name: str, *, sport_id: str | None = None, league_id: str | None = None) -> str:
@@ -300,13 +317,14 @@ def apply_catalog_records(conn: sqlite3.Connection, records: Iterable[Mapping[st
 
 def resolve_team_alias(conn: sqlite3.Connection, name: Any, *, sport_id: str | None = None,
                        league_id: str | None = None) -> dict[str, str] | None:
-    """Return a team only for an unambiguous exact catalog alias in its scope."""
+    """Return a team only for a confirmed, unambiguous alias in its scope."""
     normalized = normalize(name)
     if not normalized:
         return None
     rows = conn.execute("SELECT DISTINCT t.id,t.name FROM catalog_aliases a JOIN teams t ON t.id=a.fruit_id "
                         "LEFT JOIN catalog_entity_state s ON s.entity_type='team' AND s.fruit_id=t.id "
-                        "WHERE a.entity_type='team' AND a.normalized_alias=? AND t.sport_id IS ? AND t.league_id IS ? "
+                        "WHERE a.entity_type='team' AND a.operator_confirmed=1 AND a.normalized_alias=? "
+                        "AND t.sport_id IS ? AND t.league_id IS ? "
                         "AND COALESCE(s.archived,0)=0 "
                         "ORDER BY t.id", (normalized, sport_id, league_id)).fetchall()
     if len(rows) != 1:
