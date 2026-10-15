@@ -74,6 +74,27 @@ def api_xtream_pool_check(account_id=None):
         return _safe_error(exc)
 
 
+@bp.route("/api/xtream/lanes/<int:lane_number>/diagnose", methods=["POST"])
+def api_xtream_lane_diagnose(lane_number):
+    """Manually inspect the selected lane's incoming transport and duration."""
+    from xtream_pool import XtreamPool
+    from xtream_activity import normal_activity
+    from server.services.xtream_stream_diagnostic import diagnose_lane_stream
+    if not db_exists():
+        return _read_database_error()
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"status": "error", "message": "Invalid test request"}), 400
+    try:
+        with normal_activity(resolve_db_path()):
+            result = diagnose_lane_stream(
+                XtreamPool(resolve_db_path()), lane_number, payload.get("account_id") or None
+            )
+        return jsonify(result)
+    except Exception as exc:
+        return _safe_error(exc)
+
+
 @bp.route("/api/xtream/pool/accounts/<account_id>", methods=["PATCH"])
 def api_xtream_pool_update(account_id):
     from xtream_pool import XtreamPool

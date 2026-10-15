@@ -120,6 +120,17 @@ details.advanced-section .setting-group h3 { font-size: 11px; font-weight: 600; 
   <div id="xtream-pool-error" class="favorite-alert" role="alert"></div>
   <p id="xtream-pool-summary" aria-live="polite">Loading account pool…</p>
   <div id="xtream-pool-accounts" class="persistent-list"></div>
+  <div class="persistent-browser" aria-labelledby="xtream-lane-test-title">
+    <h3 id="xtream-lane-test-title">Test a Fruit lane stream</h3>
+    <p class="persistent-intro">Manually check the selected lane's incoming format, first video, and whether it keeps delivering media. This opens three short provider connections on one available account and does not change the lane or its guide.</p>
+    <div class="persistent-toolbar">
+      <label>Fruit lane number <input id="xtream-lane-test-number" type="number" min="1" step="1" placeholder="e.g. 2" required style="max-width:110px"></label>
+      <label>Account <select id="xtream-lane-test-account"><option value="">First available</option></select></label>
+      <button class="btn btn-secondary" id="xtream-lane-test-button" type="button" onclick="testXtreamLaneStream()">Test Lane Stream</button>
+    </div>
+    <p id="xtream-lane-test-status" class="xtream-test-feedback" role="status" aria-live="polite" hidden></p>
+    <div id="xtream-lane-test-results" aria-live="polite"></div>
+  </div>
   <h3 style="font-size:14px;margin-top:16px">Active Streams</h3>
   <div id="xtream-pool-leases" aria-live="polite"></div>
   <details style="margin-top:12px"><summary>Recent stream outcomes and guide status</summary><div id="xtream-pool-history"></div><div id="xtream-epg-status"></div></details>
@@ -173,6 +184,7 @@ function poolError(message = '') {
 }
 
 let _xtreamPoolTest = null;
+let _xtreamLaneTestRunning = false;
 
 function xtreamAvailabilityText(account) {
   const reasons = {
@@ -196,7 +208,7 @@ function xtreamPlaybackResultText(result) {
 
 function renderXtreamPoolTestStatus() {
   const test = _xtreamPoolTest;
-  const busy = test?.state === 'testing';
+  const busy = test?.state === 'testing' || _xtreamLaneTestRunning;
   document.querySelectorAll('[data-pool-test]').forEach(button => {
     const isTarget = test && (test.accountId === null ? button.dataset.poolTest === 'all' : button.form?.dataset.accountId === test.accountId);
     button.disabled = busy;
@@ -229,6 +241,11 @@ async function loadXtreamPool() {
   try {
     const data = await persistentRequest('/api/xtream/pool');
     document.getElementById('xtream-pool-summary').textContent = `${data.enabled ? 'Enabled' : 'Disabled'} · Total capacity: ${data.capacity} · Active: ${data.active} · Fruit available: ${data.available}`;
+    const accountSelect = document.getElementById('xtream-lane-test-account');
+    const selectedAccount = accountSelect.value;
+    accountSelect.replaceChildren(new Option('First available', ''));
+    data.accounts.forEach(account => accountSelect.add(new Option(`${account.label} (${account.available} available)`, account.id)));
+    if ([...accountSelect.options].some(option => option.value === selectedAccount)) accountSelect.value = selectedAccount;
     document.getElementById('xtream-pool-accounts').innerHTML = data.accounts.length ? data.accounts.map(account => `
       <form class="persistent-browser" style="margin:8px 0" data-account-id="${escHtml(account.id)}" data-initial-enabled="${account.enabled}" data-initial-reserved="${account.reserved_for_fruit}" onsubmit="event.preventDefault();saveXtreamAccount(this)">
         <div class="persistent-toolbar">
@@ -258,7 +275,7 @@ async function loadXtreamPool() {
 }
 
 async function checkXtreamPool(button, accountId = null) {
-  if (_xtreamPoolTest?.state === 'testing') return;
+  if (_xtreamPoolTest?.state === 'testing' || _xtreamLaneTestRunning) return;
   _xtreamPoolTest = {accountId, state:'testing', message:accountId ? 'Testing a fresh playback sample…' : 'Testing playback on each enabled account…'};
   poolError();
   renderXtreamPoolTestStatus();
@@ -282,6 +299,65 @@ async function checkXtreamPool(button, accountId = null) {
   } catch (err) {
     _xtreamPoolTest = {accountId, state:'error', message:`Playback test failed · ${err.message}`};
     renderXtreamPoolTestStatus();
+  }
+}
+
+async function testXtreamLaneStream() {
+  if (_xtreamLaneTestRunning || _xtreamPoolTest?.state === 'testing') return;
+  const numberInput = document.getElementById('xtream-lane-test-number');
+  if (!numberInput.reportValidity()) return;
+  const lane = Number(numberInput.value);
+  if (!Number.isSafeInteger(lane) || lane < 1) return;
+  const accountId = document.getElementById('xtream-lane-test-account').value;
+  const button = document.getElementById('xtream-lane-test-button');
+  const status = document.getElementById('xtream-lane-test-status');
+  const results = document.getElementById('xtream-lane-test-results');
+  _xtreamLaneTestRunning = true;
+  button.disabled = true;
+  button.textContent = 'Testing…';
+  button.setAttribute('aria-busy', 'true');
+  status.className = 'xtream-test-feedback testing';
+  status.textContent = `Testing lane ${lane} on ${accountId || 'the first available account'}…`;
+  status.hidden = false;
+  results.replaceChildren();
+  renderXtreamPoolTestStatus();
+  try {
+    const data = await persistentRequest(`/api/xtream/lanes/${lane}/diagnose`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({account_id: accountId || null})
+    });
+    if (data.status === 'skipped') {
+      status.className = 'xtream-test-feedback warning';
+      status.textContent = data.reason === 'no_available_account' ? 'No Fruit account is available for a stream test.' : 'Selected account is disabled or in use; no provider test was run.';
+    } else {
+      const findings = {
+        media_continued: 'Video continued through the short test window',
+        short_media_then_eof: 'Video started, then the provider stream ended early',
+        alternate_method_continued: 'An alternate method continued; Fruit’s first TS attempt did not verify continued playback',
+        video_detected_duration_unverified: 'Video was detected, but continued playback was not verified',
+        no_decodable_video: 'No decodable video was found'
+      };
+      status.className = `xtream-test-feedback ${data.finding === 'media_continued' ? 'success' : 'warning'}`;
+      status.textContent = `Lane ${lane} · ${findings[data.finding] || 'Test finished'} · Channels format: MPEG-TS`;
+      const format = document.createElement('p');
+      format.textContent = `Incoming TS request: ${String(data.source_first_bytes_format || 'undetermined').replaceAll('_', ' ')} · account host: ${data.selected_host || 'configured'}. Fruit sends MPEG-TS to Channels. ${data.note || ''}`;
+      results.append(format);
+      const names = {python_ts: 'TS via Python', curl_ts: 'TS via curl', ffmpeg_hls: 'HLS path via FFmpeg'};
+      for (const row of data.results || []) {
+        const item = document.createElement('p');
+        item.textContent = `${names[row.method] || row.method}: ${row.video ? `${row.video.width}×${row.video.height} ${row.video.codec || 'video'}` : 'no decoded video'} · ${row.first_bytes_format || 'no first bytes'}${row.http_status ? ' · HTTP ' + row.http_status : ''}${row.content_type ? ' · ' + row.content_type : ''} · first media ${row.first_media_seconds == null ? 'not received' : row.first_media_seconds + 's'} · media span ${row.media_span_seconds == null ? 'unknown' : row.media_span_seconds + 's'} · ${String(row.delivery || row.error || 'unknown').replaceAll('_', ' ')}${row.error ? ' · ' + row.error.replaceAll('_', ' ') : ''}`;
+        results.append(item);
+      }
+    }
+  } catch (err) {
+    status.className = 'xtream-test-feedback error';
+    status.textContent = `Lane test failed · ${err.message}`;
+  } finally {
+    _xtreamLaneTestRunning = false;
+    button.disabled = false;
+    button.textContent = 'Test Lane Stream';
+    button.setAttribute('aria-busy', 'false');
+    renderXtreamPoolTestStatus();
+    await loadXtreamPool();
   }
 }
 

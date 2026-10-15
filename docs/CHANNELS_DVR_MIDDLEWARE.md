@@ -27,6 +27,14 @@ Xtream accounts A / B / C → FruitDeepLinks → Channels DVR
 Choose **MPEG-TS** in Channels, including for the historical `.m3u8` lane URL.
 Xtream-backed responses now proxy media rather than redirecting. The URL suffix
 is retained for compatibility; the response content type is `video/mp2t`.
+For a failing lane, open Fruit **Settings → Xtream Account Pool → Test a Fruit
+lane stream**. Enter its lane number and run the manual test. It resolves the
+currently selected Xtream stream, tries the root TS path with Python and curl
+and the HLS path with FFmpeg, and reports the first bytes, decoded video,
+startup time, and whether media continued or ended early. The three bounded
+requests use one account at a time; a busy account is skipped. The result
+does not prove the provider is showing the expected game or that a full event
+will remain playable. The test does not change the lane or guide.
 Existing non-Xtream direct sources retain their behavior and consume no Xtream
 leases. App-only sources still require their existing capture/ADB integration;
 the pool does not turn app deeplinks into video. Existing Chrome, CH4C, PrismCast,

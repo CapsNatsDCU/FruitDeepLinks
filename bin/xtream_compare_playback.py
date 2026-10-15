@@ -23,6 +23,18 @@ METHODS = ('python_ts', 'curl_ts', 'ffmpeg_hls')
 MAX_BYTES = 4 * 1024 * 1024
 
 
+def _first_bytes_format(first):
+    if not first:
+        return 'empty'
+    if first.lstrip().startswith(b'#EXTM3U'):
+        return 'hls_playlist'
+    if len(first) >= 188 and first[0] == 0x47 and (len(first) == 188 or first[188] == 0x47):
+        return 'mpeg_ts'
+    if first.lstrip().lower().startswith((b'<html', b'<!doctype html')):
+        return 'html'
+    return 'unknown'
+
+
 def capture(method, url, gate_fd, seconds, *, before_probe=lambda: None):
     import requests
     from xtream_curl import CurlStream
@@ -32,17 +44,22 @@ def capture(method, url, gate_fd, seconds, *, before_probe=lambda: None):
 
     started = time.monotonic()
     result = {'method': method, 'status': 'failed', 'http_status': None,
-              'redirects': None, 'first_media_seconds': None, 'sample_bytes': 0}
+              'redirects': None, 'first_media_seconds': None, 'sample_bytes': 0,
+              'received_bytes': 0, 'first_bytes_format': None,
+              'delivery': 'not_started', 'media_span_seconds': None}
     session = upstream = None
     sample = bytearray()
     try:
         if method == 'python_ts':
             session = configure_session(requests.Session())
-            upstream = session.get(url, stream=True, timeout=(min(5, seconds), min(3, seconds)),
+            upstream = session.get(url, stream=True, timeout=(min(5, seconds), min(2, seconds)),
                                    headers={'Accept-Encoding': 'identity'}, allow_redirects=True)
             result['http_status'] = upstream.status_code
             result['redirects'] = len(upstream.history)
             result['headers_seconds'] = round(time.monotonic() - started, 3)
+            content_type = upstream.headers.get('Content-Type', '').split(';', 1)[0].strip().lower()
+            if re.fullmatch(r'[a-z0-9.+_-]+/[a-z0-9.+_-]+', content_type):
+                result['content_type'] = content_type
             upstream.raise_for_status()
             chunks = iter(media_chunks(upstream))
         elif method == 'curl_ts':
@@ -52,19 +69,32 @@ def capture(method, url, gate_fd, seconds, *, before_probe=lambda: None):
             upstream = HLSStream(url, min(3, seconds), gate_fd)
             chunks = iter(upstream.chunks())
         first = next(chunks, b'')
-        if not first or first[0] != 0x47:
+        result['first_bytes_format'] = _first_bytes_format(first)
+        if result['first_bytes_format'] != 'mpeg_ts':
             result['error'] = 'not_mpeg_ts'
         else:
-            result['first_media_seconds'] = round(time.monotonic() - started, 3)
+            first_at = time.monotonic()
+            last_at = first_at
+            result['first_media_seconds'] = round(first_at - started, 3)
             sample.extend(first[:MAX_BYTES])
-            until = min(started + seconds, time.monotonic() + 2)
-            while len(sample) < MAX_BYTES and time.monotonic() < until:
+            result['received_bytes'] += len(first)
+            # Continue reading after the ffprobe byte cap. A decodable initial
+            # frame is not evidence that a live feed survives its first seconds.
+            until = started + max(2, seconds - 3.5)
+            result['delivery'] = 'window_complete'
+            while time.monotonic() < until:
                 chunk = next(chunks, b'')
                 if not chunk:
+                    result['delivery'] = 'upstream_eof'
                     break
-                sample.extend(chunk[:MAX_BYTES - len(sample)])
+                last_at = time.monotonic()
+                result['received_bytes'] += len(chunk)
+                if len(sample) < MAX_BYTES:
+                    sample.extend(chunk[:MAX_BYTES - len(sample)])
+            result['media_span_seconds'] = round(last_at - first_at, 3)
     except (requests.Timeout, TimeoutError):
         result['error'] = 'timeout'
+        result['delivery'] = 'read_timeout'
     except requests.HTTPError:
         result['error'] = 'http_error'
     except requests.ConnectionError:
@@ -76,13 +106,13 @@ def capture(method, url, gate_fd, seconds, *, before_probe=lambda: None):
             if resource is not None:
                 resource.close()
     result['sample_bytes'] = len(sample)
-    if sample and 'error' not in result:
+    if sample:
         try:
             before_probe()
             result['video'] = _probe_bytes(bytes(sample))
-            result['status'] = 'passed'
+            result['status'] = 'passed' if 'error' not in result else 'partial'
         except Exception:
-            result['error'] = 'video_not_detected'
+            result.setdefault('error', 'video_not_detected')
     result['elapsed_seconds'] = round(time.monotonic() - started, 3)
     return result
 
@@ -151,6 +181,7 @@ def run_probe(method, config, gate_fd, seconds):
 def compare(pool, account_id, stream_id, *, host='configured', path_style='root', seconds=8):
     from xtream_accounts import safe_value
     from xtream_gate import AccountBusy, AccountDisabled
+    from xtream_hosts import host_configs
     account = next((account for account in pool.accounts if account.id == account_id), None)
     if account is None:
         raise ValueError('Configured account ID not found; use --list')
@@ -162,19 +193,24 @@ def compare(pool, account_id, stream_id, *, host='configured', path_style='root'
         if not config.fallback_server_url:
             raise ValueError('This account has no configured alternate host')
         config = replace(config, server_url=config.fallback_server_url, fallback_server_url=None)
-    if path_style == 'live':
-        config = replace(config, server_url=config.server_url.rstrip('/') + '/live')
     try:
         # Acquire the original credential gate even when testing its alternate
         # host. Hold it across all three tests, just like a provider operation.
         with pool.gate.hold(account.config, wait_seconds=0) as fd:
+            selected_host = 'alternate' if host == 'alternate' else 'primary'
+            if host == 'fruit_preferred':
+                index, config = host_configs(account.config, fd)[0]
+                selected_host = 'alternate' if index == 1 else 'primary'
+            if path_style == 'live':
+                config = replace(config, server_url=config.server_url.rstrip('/') + '/live')
             results = [run_probe(method, (config, stream_id), fd, seconds) for method in METHODS]
     except AccountDisabled:
         return {'status': 'skipped', 'reason': 'account_disabled', 'account_id': account_id}
     except AccountBusy:
         return {'status': 'skipped', 'reason': 'account_in_use', 'account_id': account_id}
     return safe_value({'status': 'complete', 'account_id': account_id, 'stream_id': stream_id,
-                       'host': host, 'path_style': path_style, 'results': results}, pool.accounts)
+                       'host': host, 'selected_host': selected_host,
+                       'path_style': path_style, 'results': results}, pool.accounts)
 
 
 def main(argv=None):
@@ -186,7 +222,7 @@ def main(argv=None):
     channel = parser.add_mutually_exclusive_group()
     channel.add_argument('--stream-id', help='Provider stream ID, matching the working channel in the other app')
     channel.add_argument('--channel-id', type=int, help='Fruit saved persistent channel ID, resolved locally')
-    parser.add_argument('--host', choices=('configured', 'alternate'), default='configured')
+    parser.add_argument('--host', choices=('configured', 'alternate', 'fruit_preferred'), default='configured')
     parser.add_argument('--path-style', choices=('root', 'live'), default='root',
                         help='Default: Fruit root-path URLs; select live only to compare an observed /live/ URL')
     parser.add_argument('--seconds', type=int, choices=range(5, 31), default=8,

@@ -204,6 +204,20 @@ class XtreamLanePipelineTest(unittest.TestCase):
         )
         self.assertEqual(response.headers["Cache-Control"], "no-store")
 
+    def test_manual_lane_diagnostic_route_uses_selected_lane_without_provider_request(self):
+        env = dict(self.tune_env)
+        env["FRUIT_DB_PATH"] = str(self.db_path)
+        with (patch.dict(os.environ, env, clear=False),
+              patch("server.services.xtream_stream_diagnostic.diagnose_lane_stream",
+                    return_value={"status": "complete", "finding": "short_media_then_eof",
+                                  "fruit_output_format": "mpeg_ts", "results": []}) as diagnose):
+            response = create_app().test_client().post(
+                "/api/xtream/lanes/1/diagnose", json={"account_id": None}
+            )
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("short_media_then_eof", response.get_json()["finding"])
+        self.assertEqual(1, diagnose.call_args.args[1])
+
     def test_live_shaped_name_flows_through_complete_lane_pipeline(self):
         event = self.conn.execute(
             "SELECT title, start_utc FROM events WHERE title=?", (self.provider_name,)

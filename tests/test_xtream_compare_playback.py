@@ -14,12 +14,19 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bin'))
 from tests import test_xtream_endpoint_contract as endpoint_fixture
 from tests.test_xtream_pool import pool_environment
-from xtream_compare_playback import METHODS, compare, run_probe
+from xtream_compare_playback import METHODS, _first_bytes_format, compare, run_probe
+from xtream_hosts import record_host_success
 from xtream_pool import XtreamPool
 from server.services.xtream_persistent import create_channel
 
 
 class ComparisonTests(unittest.TestCase):
+    def test_first_bytes_distinguish_playlist_transport_and_html_error(self):
+        self.assertEqual('hls_playlist', _first_bytes_format(b'\n#EXTM3U\n#EXT-X-VERSION:3'))
+        self.assertEqual('html', _first_bytes_format(b'<html>unavailable</html>'))
+        self.assertEqual('mpeg_ts', _first_bytes_format(b'\x47' + b'\x00' * 187))
+        self.assertEqual('unknown', _first_bytes_format(b'\x47'))
+
     def setUp(self):
         self.provider = endpoint_fixture.EndpointContractTests()
         self.provider.setUp()
@@ -50,6 +57,9 @@ class ComparisonTests(unittest.TestCase):
         self.assertTrue(all((row['video']['width'], row['video']['height']) == (160, 90) for row in result['results']))
         self.assertEqual(200, result['results'][0]['http_status'])
         self.assertEqual(1, result['results'][0]['redirects'])
+        self.assertEqual('mpeg_ts', result['results'][0]['first_bytes_format'])
+        self.assertEqual('upstream_eof', result['results'][0]['delivery'])
+        self.assertLess(result['results'][0]['media_span_seconds'], 4)
         self.assertFalse(self.pool.status()['accounts'][0]['busy'])
         self.assertEqual(0, self.pool.status()['active'])
         self.assertNotIn(self.provider.username, json.dumps(result))
@@ -81,6 +91,17 @@ class ComparisonTests(unittest.TestCase):
         self.assertTrue(all(call[2] == self.rows[0]['username'] and call[3] == '100' for call in calls))
         self.assertEqual(1, len({call[4] for call in calls}))
         self.assertFalse(self.pool.status()['accounts'][0]['busy'])
+
+    def test_fruit_preferred_host_uses_current_fallback_without_exposing_url(self):
+        with self.pool.gate.hold(self.pool.accounts[0].config) as fd:
+            record_host_success(fd, 1)
+        with patch('xtream_compare_playback.run_probe', return_value={'status': 'failed'}) as probe:
+            result = compare(self.pool, 'account_2', '100', host='fruit_preferred')
+        self.assertEqual('alternate', result['selected_host'])
+        self.assertEqual(3, probe.call_count)
+        self.assertTrue(all(call.args[1][0].server_url == self.rows[0]['fallback_server_url']
+                            for call in probe.call_args_list))
+        self.assertNotIn(self.rows[0]['fallback_server_url'], json.dumps(result))
 
     def test_downloaded_script_lists_ids_using_container_pythonpath_without_network(self):
         copied = self.root / 'downloaded-script.py'
@@ -131,3 +152,42 @@ class ComparisonTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 7)
         self.assertEqual('network_deadline', result['error'])
         self.assertFalse(pool.status()['accounts'][0]['busy'])
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'media tools required')
+    def test_continuing_ts_is_distinguished_from_a_short_decodable_clip(self):
+        path = self.root / 'live.ts'
+        subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+                        '-i', 'color=c=blue:s=160x90:r=10', '-t', '2', '-c:v', 'mpeg2video',
+                        '-f', 'mpegts', str(path)], check=True, capture_output=True)
+        media = path.read_bytes()
+
+        class LiveProvider(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Type', 'video/mp2t')
+                self.end_headers()
+                try:
+                    for _ in range(27):
+                        self.wfile.write(media)
+                        self.wfile.flush()
+                        time.sleep(0.3)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), LiveProvider)
+        server.daemon_threads = True
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.rows[0]['server_url'] = f'http://127.0.0.1:{server.server_port}'
+        pool = XtreamPool(self.pool.db_path, pool_environment(self.rows))
+        with pool.gate.hold(pool.accounts[0].config) as fd:
+            result = run_probe('python_ts', (pool.accounts[0].config, '100'), fd, 10)
+        self.assertEqual('passed', result['status'], result)
+        self.assertEqual('mpeg_ts', result['first_bytes_format'])
+        self.assertEqual('window_complete', result['delivery'])
+        self.assertGreaterEqual(result['media_span_seconds'], 4)
+        self.assertEqual('video/mp2t', result['content_type'])
