@@ -52,6 +52,7 @@ def ensure_schema(conn):
         CREATE TABLE IF NOT EXISTS xtream_vod_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, item_id TEXT NOT NULL,
             series_id TEXT, title TEXT NOT NULL, extension TEXT NOT NULL,
+            folder TEXT NOT NULL DEFAULT 'root',
             state TEXT NOT NULL, bytes_done INTEGER NOT NULL DEFAULT 0,
             bytes_total INTEGER, filename TEXT, error TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -59,6 +60,9 @@ def ensure_schema(conn):
         );
         CREATE INDEX IF NOT EXISTS idx_xtream_vod_jobs_state ON xtream_vod_jobs(state,id);
     """)
+    if "folder" not in {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_jobs)")}:
+        # Jobs queued before folder selection must keep their original root destination.
+        conn.execute("ALTER TABLE xtream_vod_jobs ADD COLUMN folder TEXT NOT NULL DEFAULT 'root'")
 
 
 def _valid_id(value):
@@ -268,6 +272,24 @@ def download_dir():
     return path
 
 
+def folder_dir(folder):
+    if folder == "root":
+        return download_dir()
+    names = {"movies": ("XTREAM_MOVIES_FOLDER", "Movies"),
+             "tv": ("XTREAM_TV_FOLDER", "TV Shows")}
+    if folder not in names:
+        raise ValueError("Choose Movies or TV Shows")
+    setting, default = names[folder]
+    name = os.environ.get(setting, default).strip()
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        raise ValueError(f"{setting} must be one folder name")
+    return download_dir() / name
+
+
+def _job_download_dir(job):
+    return folder_dir(job.get("folder", "root"))
+
+
 def _idle_timeout():
     try:
         value = int(os.environ.get("XTREAM_STREAM_IDLE_TIMEOUT", "60"))
@@ -282,9 +304,13 @@ def list_jobs(conn):
     return [dict(r) for r in conn.execute("SELECT * FROM xtream_vod_jobs ORDER BY id DESC LIMIT 100")]
 
 
-def queue_download(conn, kind, item_id):
-    if kind not in {"movie", "episode"}:
+def queue_download(conn, kind, item_id, folder=None):
+    if not isinstance(kind, str) or kind not in {"movie", "episode"}:
         raise ValueError("Choose a movie or episode")
+    folder = ("movies" if kind == "movie" else "tv") if folder is None else folder
+    if not isinstance(folder, str) or folder not in {"movies", "tv"}:
+        raise ValueError("Choose Movies or TV Shows")
+    folder_dir(folder)
     item_id = _valid_id(item_id)
     ensure_schema(conn)
     if kind == "movie":
@@ -299,11 +325,11 @@ def queue_download(conn, kind, item_id):
         raise ValueError("This title has no supported direct-file format")
     with conn:
         conn.execute("BEGIN IMMEDIATE")
-        existing = conn.execute("SELECT id,state,filename FROM xtream_vod_jobs WHERE kind=? AND item_id=? AND state IN ('pending','running','cancelling','completed') ORDER BY id DESC LIMIT 1", (kind, item_id)).fetchone()
+        existing = conn.execute("SELECT id,state,filename FROM xtream_vod_jobs WHERE kind=? AND item_id=? AND folder=? AND state IN ('pending','running','cancelling','completed') ORDER BY id DESC LIMIT 1", (kind, item_id, folder)).fetchone()
         if existing and (existing["state"] != "completed" or (existing["filename"] and Path(existing["filename"]).is_file())):
             return existing["id"]
-        return conn.execute("INSERT INTO xtream_vod_jobs(kind,item_id,series_id,title,extension,state) VALUES (?,?,?,?,?,'pending')",
-                            (kind, item_id, series_id, row["title"], row["extension"])).lastrowid
+        return conn.execute("INSERT INTO xtream_vod_jobs(kind,item_id,series_id,title,extension,folder,state) VALUES (?,?,?,?,?,?,'pending')",
+                            (kind, item_id, series_id, row["title"], row["extension"], folder)).lastrowid
 
 
 def cancel_job(conn, job_id):
@@ -340,7 +366,7 @@ def _cancelled(db_path, job_id):
 
 
 def _run_job(db_path, job, pool):
-    destination = download_dir()
+    destination = _job_download_dir(job)
     destination.mkdir(parents=True, exist_ok=True)
     name = _filename(job)
     partial = destination / (name + ".part")
@@ -457,7 +483,7 @@ def run_worker(db_path=None, *, stop_event=None):
             ensure_schema(conn)
             abandoned = [dict(row) for row in conn.execute("SELECT * FROM xtream_vod_jobs WHERE state='cancelling'")]
             for job in abandoned:
-                (download_dir() / (_filename(job) + ".part")).unlink(missing_ok=True)
+                (_job_download_dir(job) / (_filename(job) + ".part")).unlink(missing_ok=True)
             conn.execute("UPDATE xtream_vod_jobs SET state='cancelled' WHERE state='cancelling'")
             conn.execute("UPDATE xtream_vod_jobs SET state='pending',bytes_done=0,bytes_total=NULL,error=NULL WHERE state='running'")
         while stop_event is None or not stop_event.is_set():

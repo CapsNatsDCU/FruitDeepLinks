@@ -73,12 +73,14 @@ def downloads():
         if request.method == "GET":
             with get_conn() as conn:
                 return jsonify(status="success", destination=str(vod.download_dir()),
+                               destinations={"movies": str(vod.folder_dir("movies")),
+                                             "tv": str(vod.folder_dir("tv"))},
                                jobs=public_metadata(vod.list_jobs(conn), conn))
         payload = request.get_json(silent=True)
-        if not isinstance(payload, dict) or set(payload) != {"kind", "item_id"}:
+        if not isinstance(payload, dict) or set(payload) not in ({"kind", "item_id"}, {"kind", "item_id", "folder"}):
             raise ValueError("Choose one saved movie or episode")
         with get_conn() as conn:
-            job_id = vod.queue_download(conn, payload["kind"], payload["item_id"])
+            job_id = vod.queue_download(conn, payload["kind"], payload["item_id"], payload.get("folder"))
         vod.ensure_worker()
         return jsonify(status="success", job_id=job_id), 202
     except Exception as exc:

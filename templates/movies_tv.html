@@ -19,6 +19,8 @@
 .vod-status {font-size:13px;color:var(--text-muted);margin-top:8px}
 .vod-status.error {color:var(--danger)}
 .vod-actions {display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.vod-folder-choice {display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted)}
+.vod-folder-choice select {background:var(--bg-inset);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:8px;font:inherit}
 .vod-section {margin-bottom:16px}
 {% endblock %}
 {% block content %}
@@ -43,7 +45,7 @@
 </section>
 <section class="card">
   <h2>NAS downloads</h2>
-  <p class="vod-muted">Downloads are saved to <span id="vod-destination">the configured folder</span>. One download runs at a time and uses an Xtream account slot. A queued download waits while the account is occupied. Cancelling closes the transfer and removes its incomplete file; an idle provider read can delay cleanup.</p>
+  <p class="vod-muted">Choose a folder for each download. Movies: <span id="vod-movie-destination">loading…</span>. TV Shows: <span id="vod-tv-destination">loading…</span>. One download runs at a time and uses an Xtream account slot. A queued download waits while the account is occupied. Cancelling closes the transfer and removes its incomplete file; an idle provider read can delay cleanup.</p>
   <div id="vod-download-status" class="vod-status" role="status" aria-live="polite">Loading downloads…</div>
   <div id="vod-jobs" class="vod-episodes"></div>
 </section>
@@ -87,7 +89,7 @@ async function loadCatalog(offset=vodOffset) {
     vodStatus('vod-catalog-status',`${data.total} titles${refreshed}`);
     document.getElementById('vod-items').innerHTML = data.items.map((item,index) => `<article class="vod-item">
       <strong>${vodEsc(item.title)}</strong><span class="vod-muted">${vodEsc(item.kind === 'movie' ? 'Movie' : 'TV series')} · ${vodEsc(item.category_name)}</span>
-      <button class="btn" type="button" onclick="${item.kind === 'movie' ? `queueDownload('movie', ${index}, this)` : `openSeries(${index})`}">${item.kind === 'movie' ? 'Download movie' : 'View episodes'}</button>
+      ${item.kind === 'movie' ? `<div class="vod-actions"><label class="vod-folder-choice">Save to <select data-folder><option value="movies">Movies</option><option value="tv">TV Shows</option></select></label><button class="btn" type="button" onclick="queueDownload('movie', ${index}, this)">Download movie</button></div>` : `<button class="btn" type="button" onclick="openSeries(${index})">View episodes</button>`}
     </article>`).join('') || '<p class="vod-muted">No titles match this view.</p>';
     document.getElementById('vod-pages').innerHTML = `${offset ? '<button class="btn btn-secondary" type="button" onclick="loadCatalog(Math.max(0,vodOffset-50))">Previous</button>' : ''}${offset+data.items.length < data.total ? '<button class="btn btn-secondary" type="button" onclick="loadCatalog(vodOffset+50)">Next</button>' : ''}`;
   } catch (error) { vodStatus('vod-catalog-status',error.message,true); }
@@ -121,7 +123,7 @@ async function loadEpisodes() {
     vodStatus('vod-episodes-status',`${data.episodes.length} saved episodes${data.episodes.length ? '' : ' · choose Load Episodes to read the provider'}`);
     document.getElementById('vod-episodes').innerHTML = data.episodes.map(row => `<article class="vod-episode">
       <div><strong>S${row.season} E${row.episode} · ${vodEsc(row.title)}</strong><div class="vod-muted">${vodEsc(row.extension || 'Format unavailable')}</div></div>
-      <button class="btn" type="button" ${row.extension ? '' : 'disabled'} data-episode="${vodEsc(row.episode_id)}" onclick="queueDownload('episode', this.dataset.episode, this)">Download episode</button>
+      <div class="vod-actions"><label class="vod-folder-choice">Save to <select data-folder><option value="tv">TV Shows</option><option value="movies">Movies</option></select></label><button class="btn" type="button" ${row.extension ? '' : 'disabled'} data-episode="${vodEsc(row.episode_id)}" onclick="queueDownload('episode', this.dataset.episode, this)">Download episode</button></div>
     </article>`).join('') || '<p class="vod-muted">No episodes saved for this series.</p>';
   } catch (error) { vodStatus('vod-episodes-status',error.message,true); }
 }
@@ -140,10 +142,11 @@ async function queueDownload(kind, item, button) {
   if (button.disabled) return;
   const itemId = kind === 'movie' ? vodItems[item]?.item_id : item;
   if (!itemId) return;
+  const folder = button.closest('.vod-item,.vod-episode').querySelector('[data-folder]').value;
   button.disabled = true; button.textContent = 'Queuing…';
   try {
     await vodRequest('/api/xtream/vod/downloads',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({kind,item_id:itemId})});
+      body:JSON.stringify({kind,item_id:itemId,folder})});
     button.textContent = 'Queued';
     await loadDownloads();
   } catch (error) {vodStatus('vod-download-status',error.message,true);button.disabled = false;button.textContent = kind === 'movie' ? 'Download movie' : 'Download episode';}
@@ -158,13 +161,15 @@ async function loadDownloads() {
   vodLoading = true;
   try {
     const data = await vodRequest('/api/xtream/vod/downloads');
-    document.getElementById('vod-destination').textContent = data.destination;
+    document.getElementById('vod-movie-destination').textContent = data.destinations.movies;
+    document.getElementById('vod-tv-destination').textContent = data.destinations.tv;
     const active = data.jobs.filter(job => ['pending','running','cancelling'].includes(job.state)).length;
     vodStatus('vod-download-status',active ? `${active} active or waiting` : 'No active downloads.');
     document.getElementById('vod-jobs').innerHTML = data.jobs.map(job => {
       const percent = job.bytes_total ? Math.min(100,Math.floor(job.bytes_done*100/job.bytes_total)) : null;
       const amount = `${(job.bytes_done/1048576).toFixed(1)} MiB` + (job.bytes_total ? ` / ${(job.bytes_total/1048576).toFixed(1)} MiB` : '');
-      return `<article class="vod-job"><div><strong>${vodEsc(job.title)}</strong><div class="vod-muted">${vodEsc(job.state)}${job.state === 'running' ? ' · '+amount : ''}${job.error ? ' · '+vodEsc(job.error) : ''}${job.filename ? ' · '+vodEsc(job.filename) : ''}</div>
+      const folder = job.folder === 'movies' ? 'Movies' : job.folder === 'tv' ? 'TV Shows' : 'Original folder';
+      return `<article class="vod-job"><div><strong>${vodEsc(job.title)}</strong><div class="vod-muted">${vodEsc(folder)} · ${vodEsc(job.state)}${job.state === 'running' ? ' · '+amount : ''}${job.error ? ' · '+vodEsc(job.error) : ''}${job.filename ? ' · '+vodEsc(job.filename) : ''}</div>
       ${job.state === 'running' && percent !== null ? `<progress class="vod-progress" max="100" value="${percent}">${percent}%</progress>` : ''}</div>
       ${['pending','running'].includes(job.state) ? `<button class="btn btn-secondary" type="button" onclick="cancelDownload(${job.id},this)">Cancel</button>` : ''}</article>`;
     }).join('') || '<p class="vod-muted">No downloads yet.</p>';

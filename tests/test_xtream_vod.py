@@ -77,6 +77,8 @@ class VodTests(unittest.TestCase):
             self.assertEqual(movie_job, vod.queue_download(conn, "movie", "123"))
             episode_job = vod.queue_download(conn, "episode", "789")
             self.assertNotEqual(movie_job, episode_job)
+            self.assertEqual(conn.execute("SELECT folder FROM xtream_vod_jobs WHERE id=?", (movie_job,)).fetchone()[0], "movies")
+            self.assertEqual(conn.execute("SELECT folder FROM xtream_vod_jobs WHERE id=?", (episode_job,)).fetchone()[0], "tv")
             self.assertTrue(vod.cancel_job(conn, episode_job))
             self.assertEqual(vod.list_jobs(conn)[0]["state"], "cancelled")
         self.assertNotIn("password", self.db.read_bytes().decode("utf-8", errors="ignore"))
@@ -101,6 +103,8 @@ class VodTests(unittest.TestCase):
         with self.conn() as conn:
             job_id = vod.queue_download(conn, "movie", "123")
             job = dict(conn.execute("SELECT * FROM xtream_vod_jobs WHERE id=?", (job_id,)).fetchone())
+            episode_id = vod.queue_download(conn, "episode", "789")
+            episode_job = dict(conn.execute("SELECT * FROM xtream_vod_jobs WHERE id=?", (episode_id,)).fetchone())
         server = ThreadingHTTPServer(("127.0.0.1", 0), MediaHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -121,12 +125,18 @@ class VodTests(unittest.TestCase):
             def acquire(self, *args):
                 return lease
         vod._run_job(self.db, job, Pool())
+        vod._run_job(self.db, episode_job, Pool())
         with self.conn() as conn:
             finished = dict(conn.execute("SELECT * FROM xtream_vod_jobs WHERE id=?", (job_id,)).fetchone())
+            episode_finished = dict(conn.execute("SELECT * FROM xtream_vod_jobs WHERE id=?", (episode_id,)).fetchone())
         self.assertEqual(finished["state"], "completed")
         self.assertEqual(Path(finished["filename"]).read_bytes(), MediaHandler.body)
+        self.assertEqual(Path(finished["filename"]).parent, vod.folder_dir("movies"))
+        self.assertEqual(episode_finished["state"], "completed")
+        self.assertEqual(Path(episode_finished["filename"]).parent, vod.folder_dir("tv"))
+        self.assertEqual(Path(episode_finished["filename"]).read_bytes(), MediaHandler.body)
         self.assertEqual(lease.outcome, "upstream_eof")
-        self.assertFalse(list(vod.download_dir().glob("*.part")))
+        self.assertFalse(list(vod.folder_dir("movies").glob("*.part")))
 
     def test_cached_api_reads_do_not_contact_provider(self):
         self.populate()
@@ -141,6 +151,51 @@ class VodTests(unittest.TestCase):
         self.assertEqual(catalog["total"], 1)
         self.assertEqual(episodes["episodes"][0]["episode_id"], "789")
         self.assertEqual(jobs["jobs"], [])
+        self.assertEqual(jobs["destinations"]["movies"], str(vod.folder_dir("movies")))
+        self.assertEqual(jobs["destinations"]["tv"], str(vod.folder_dir("tv")))
+
+    def test_folder_choice_is_saved_and_restricted(self):
+        self.populate()
+        with patch.dict(os.environ, {"FRUIT_DB_PATH": str(self.db)}), patch.object(vod, "ensure_worker"):
+            client = create_app().test_client()
+            response = client.post("/api/xtream/vod/downloads", json={"kind": "movie", "item_id": "123", "folder": "tv"})
+            self.assertEqual(response.status_code, 202)
+            tv_job = response.get_json()["job_id"]
+            self.assertEqual(client.post("/api/xtream/vod/downloads", json={"kind": "movie", "item_id": "123", "folder": "tv"}).get_json()["job_id"], tv_job)
+            movie_job = client.post("/api/xtream/vod/downloads", json={"kind": "movie", "item_id": "123"}).get_json()["job_id"]
+            self.assertNotEqual(movie_job, tv_job)
+            invalid = client.post("/api/xtream/vod/downloads", json={"kind": "movie", "item_id": "123", "folder": "../elsewhere"})
+            self.assertEqual(invalid.status_code, 400)
+            malformed = client.post("/api/xtream/vod/downloads", json={"kind": "movie", "item_id": "123", "folder": ["tv"]})
+            self.assertEqual(malformed.status_code, 400)
+            jobs = client.get("/api/xtream/vod/downloads").get_json()["jobs"]
+        self.assertEqual({job["folder"] for job in jobs}, {"movies", "tv"})
+        self.assertEqual(vod.folder_dir("tv"), vod.download_dir() / "TV Shows")
+        with patch.dict(os.environ, {"XTREAM_TV_FOLDER": "Shows/Elsewhere"}):
+            with self.assertRaisesRegex(ValueError, "one folder name"):
+                vod.folder_dir("tv")
+
+    def test_existing_jobs_keep_original_root_destination(self):
+        with self.conn() as conn:
+            conn.execute("""CREATE TABLE xtream_vod_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, item_id TEXT NOT NULL,
+                series_id TEXT, title TEXT NOT NULL, extension TEXT NOT NULL,
+                state TEXT NOT NULL, bytes_done INTEGER NOT NULL DEFAULT 0,
+                bytes_total INTEGER, filename TEXT, error TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+            conn.execute("INSERT INTO xtream_vod_jobs(kind,item_id,title,extension,state) VALUES ('movie','123','Old Film','mp4','cancelling')")
+            vod.ensure_schema(conn)
+            job = dict(conn.execute("SELECT * FROM xtream_vod_jobs").fetchone())
+        self.assertEqual(job["folder"], "root")
+        self.assertEqual(vod._job_download_dir(job), vod.download_dir())
+        vod.download_dir().mkdir()
+        partial = vod.download_dir() / (vod._filename(job) + ".part")
+        partial.write_bytes(b"partial")
+        stopped = threading.Event()
+        stopped.set()
+        vod.run_worker(self.db, stop_event=stopped)
+        self.assertFalse(partial.exists())
 
     def test_cancelled_transfer_removes_partial_file(self):
         self.populate()
@@ -175,7 +230,7 @@ class VodTests(unittest.TestCase):
         with self.conn() as conn:
             state = conn.execute("SELECT state FROM xtream_vod_jobs WHERE id=?", (job_id,)).fetchone()[0]
         self.assertEqual(state, "cancelled")
-        self.assertFalse(list(vod.download_dir().iterdir()))
+        self.assertFalse(list(vod.folder_dir("movies").iterdir()))
 
     def test_series_metadata_keeps_credentials_out_of_process_arguments(self):
         calls = []
