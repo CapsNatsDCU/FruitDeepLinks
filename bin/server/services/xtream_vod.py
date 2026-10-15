@@ -23,6 +23,8 @@ from xtream_curl import CurlStream
 
 _ID = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 _EXTENSIONS = {"mp4", "mkv", "avi", "ts", "mov", "m4v"}
+_PLEX_ID_SUFFIX = re.compile(r"\s+\{(?:tmdb-\d+|tvdb-\d+|imdb-tt\d+)\}\Z", re.IGNORECASE)
+_YEAR_SUFFIX = re.compile(r"\s+\((?:18|19|20|21)\d{2}\)\Z")
 _CHUNK = 256 * 1024
 _worker: threading.Thread | None = None
 _worker_guard = threading.Lock()
@@ -41,17 +43,20 @@ def ensure_schema(conn):
         CREATE TABLE IF NOT EXISTS xtream_vod_items (
             kind TEXT NOT NULL, item_id TEXT NOT NULL, category_id TEXT NOT NULL,
             title TEXT NOT NULL, search_title TEXT NOT NULL, extension TEXT,
+            size_bytes INTEGER, resolution TEXT,
             PRIMARY KEY(kind, item_id)
         );
         CREATE INDEX IF NOT EXISTS idx_xtream_vod_search ON xtream_vod_items(kind, search_title);
         CREATE TABLE IF NOT EXISTS xtream_vod_episodes (
             series_id TEXT NOT NULL, episode_id TEXT NOT NULL, season INTEGER NOT NULL,
             episode INTEGER NOT NULL, title TEXT NOT NULL, extension TEXT,
+            size_bytes INTEGER, resolution TEXT,
             PRIMARY KEY(series_id, episode_id)
         );
         CREATE TABLE IF NOT EXISTS xtream_vod_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, item_id TEXT NOT NULL,
             series_id TEXT, title TEXT NOT NULL, extension TEXT NOT NULL,
+            series_title TEXT, season INTEGER, episode INTEGER,
             folder TEXT NOT NULL DEFAULT 'root',
             state TEXT NOT NULL, bytes_done INTEGER NOT NULL DEFAULT 0,
             bytes_total INTEGER, filename TEXT, error TEXT,
@@ -60,9 +65,19 @@ def ensure_schema(conn):
         );
         CREATE INDEX IF NOT EXISTS idx_xtream_vod_jobs_state ON xtream_vod_jobs(state,id);
     """)
-    if "folder" not in {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_jobs)")}:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_jobs)")}
+    if "folder" not in columns:
         # Jobs queued before folder selection must keep their original root destination.
         conn.execute("ALTER TABLE xtream_vod_jobs ADD COLUMN folder TEXT NOT NULL DEFAULT 'root'")
+    for name, kind in (("series_title", "TEXT"), ("season", "INTEGER"), ("episode", "INTEGER")):
+        if name not in columns:
+            # Earlier episode jobs retain their original flat file destination.
+            conn.execute(f"ALTER TABLE xtream_vod_jobs ADD COLUMN {name} {kind}")
+    for table in ("xtream_vod_items", "xtream_vod_episodes"):
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, kind in (("size_bytes", "INTEGER"), ("resolution", "TEXT")):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
 
 
 def _valid_id(value):
@@ -75,6 +90,51 @@ def _valid_id(value):
 def _extension(value):
     value = str(value or "").lower().lstrip(".")
     return value if value in _EXTENSIONS else None
+
+
+def _size_bytes(*sources):
+    """Accept only byte counts; duration and bitrate are not file sizes."""
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in ("size_bytes", "file_size", "filesize", "fileSize", "content_length", "contentLength", "size"):
+            value = source.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, str)):
+                continue
+            value = str(value).strip()
+            if len(value) <= 19 and value.isascii() and value.isdecimal():
+                count = int(value)
+                if 0 < count < 2**63:
+                    return count
+    return None
+
+
+def _resolution(*sources):
+    """Use explicit dimensions or a provider resolution label, never a title hint."""
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        video = source.get("video")
+        for details in (video, source):
+            if not isinstance(details, dict):
+                continue
+            width, height = details.get("width"), details.get("height")
+            if all(isinstance(value, (int, str)) and not isinstance(value, bool)
+                   and str(value).isascii() and str(value).isdecimal() for value in (width, height)):
+                width, height = int(width), int(height)
+                if 128 <= width <= 16384 and 96 <= height <= 8640:
+                    return f"{width}×{height}"
+            label = details.get("resolution")
+            if isinstance(label, str):
+                label = label.strip()
+                dimensions = re.fullmatch(r"(\d{3,5})\s*[x×]\s*(\d{3,4})", label, re.IGNORECASE)
+                if dimensions:
+                    width, height = map(int, dimensions.groups())
+                    if 128 <= width <= 16384 and 96 <= height <= 8640:
+                        return f"{width}×{height}"
+                if re.fullmatch(r"(?:480|576|720|1080|1440|2160|4320)p|[248]K", label, re.IGNORECASE):
+                    return label.upper() if label.lower().endswith("k") else label.lower()
+    return None
 
 
 class VodProvider:
@@ -150,7 +210,9 @@ def _items(rows, kind, categories, accounts):
         if not title:
             continue
         result[item_id] = (kind, item_id, category_id, title, title.casefold(),
-                           _extension(row.get("container_extension")) if kind == "movie" else None)
+                           _extension(row.get("container_extension")) if kind == "movie" else None,
+                           _size_bytes(row, row.get("info")) if kind == "movie" else None,
+                           _resolution(row, row.get("info")) if kind == "movie" else None)
     return result
 
 
@@ -183,7 +245,7 @@ def refresh_catalog(provider=None, db_path=None):
         conn.execute("DELETE FROM xtream_vod_items")
         conn.execute("DELETE FROM xtream_vod_categories")
         conn.executemany("INSERT INTO xtream_vod_categories VALUES (?,?,?)", [*movie_categories.values(), *series_categories.values()])
-        conn.executemany("INSERT INTO xtream_vod_items VALUES (?,?,?,?,?,?)", [*movies.values(), *series.values()])
+        conn.executemany("INSERT INTO xtream_vod_items (kind,item_id,category_id,title,search_title,extension,size_bytes,resolution) VALUES (?,?,?,?,?,?,?,?)", [*movies.values(), *series.values()])
         conn.execute("DELETE FROM xtream_vod_episodes WHERE series_id NOT IN (SELECT item_id FROM xtream_vod_items WHERE kind='series')")
         conn.execute("INSERT INTO xtream_vod_state VALUES (1,datetime('now'),?,?) ON CONFLICT(id) DO UPDATE SET refreshed_at=excluded.refreshed_at,movie_count=excluded.movie_count,series_count=excluded.series_count",
                      (len(movies), len(series)))
@@ -207,8 +269,11 @@ def catalog(conn, *, kind="all", query="", category_id="", limit=50, offset=0):
     escaped_query = query.casefold().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     args = (kind, kind, category_kind, category_kind, category_id, category_id, f"%{escaped_query}%")
     total = conn.execute("SELECT count(*) FROM xtream_vod_items i " + where, args).fetchone()[0]
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_items)")}
+    details = ",".join(f"i.{name}" if name in columns else f"NULL AS {name}"
+                       for name in ("size_bytes", "resolution"))
     items = [dict(r) for r in conn.execute(
-        "SELECT i.kind,i.item_id,i.category_id,i.title,i.extension,c.name AS category_name FROM xtream_vod_items i JOIN xtream_vod_categories c ON c.kind=i.kind AND c.category_id=i.category_id "
+        f"SELECT i.kind,i.item_id,i.category_id,i.title,i.extension,{details},c.name AS category_name FROM xtream_vod_items i JOIN xtream_vod_categories c ON c.kind=i.kind AND c.category_id=i.category_id "
         + where + " ORDER BY i.title,i.item_id LIMIT ? OFFSET ?", (*args, limit, offset))]
     categories = [dict(r) for r in conn.execute("SELECT * FROM xtream_vod_categories ORDER BY kind,name")]
     return {"cache": dict(state) if state else None, "categories": categories, "items": items,
@@ -221,8 +286,11 @@ def episodes(conn, series_id):
         raise KeyError("Series not found in saved catalog")
     if not conn.execute("SELECT 1 FROM xtream_vod_items WHERE kind='series' AND item_id=?", (series_id,)).fetchone():
         raise KeyError("Series not found in saved catalog")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_episodes)")}
+    details = ",".join(name if name in columns else f"NULL AS {name}"
+                       for name in ("size_bytes", "resolution"))
     return [dict(r) for r in conn.execute(
-        "SELECT episode_id,season,episode,title,extension FROM xtream_vod_episodes WHERE series_id=? ORDER BY season,episode,episode_id", (series_id,))]
+        f"SELECT episode_id,season,episode,title,extension,{details} FROM xtream_vod_episodes WHERE series_id=? ORDER BY season,episode,episode_id", (series_id,))]
 
 
 def refresh_episodes(series_id, provider=None, db_path=None):
@@ -255,13 +323,14 @@ def refresh_episodes(series_id, provider=None, db_path=None):
             info = row.get("info") if isinstance(row.get("info"), dict) else {}
             ext = _extension(row.get("container_extension") or info.get("container_extension"))
             title = safe_value(str(row.get("title") or f"Episode {episode}")[:300], accounts)
-            entries[episode_id] = (series_id, episode_id, season, episode, title, ext)
+            entries[episode_id] = (series_id, episode_id, season, episode, title, ext,
+                                   _size_bytes(row, info), _resolution(row, info))
     if not entries:
         raise XtreamError("Provider returned no usable episodes; saved episodes were kept")
     with get_conn(db_path) as conn, conn:
         ensure_schema(conn)
         conn.execute("DELETE FROM xtream_vod_episodes WHERE series_id=?", (series_id,))
-        conn.executemany("INSERT INTO xtream_vod_episodes VALUES (?,?,?,?,?,?)", entries.values())
+        conn.executemany("INSERT INTO xtream_vod_episodes (series_id,episode_id,season,episode,title,extension,size_bytes,resolution) VALUES (?,?,?,?,?,?,?,?)", entries.values())
     return len(entries)
 
 
@@ -286,8 +355,56 @@ def folder_dir(folder):
     return download_dir() / name
 
 
+def _media_component(value, limit=120):
+    # Keep the provider's title while removing path separators and reserved filename characters.
+    clean = re.sub(r'[\x00-\x1f/\\:*?"<>|]', " ", str(value or ""))
+    clean = re.sub(r"\s+", " ", clean).strip(" .")
+    return clean.encode("utf-8")[:limit].decode("utf-8", errors="ignore").rstrip(" .")
+
+
+def _plex_episode(job):
+    return (job.get("kind") == "episode" and job.get("series_title")
+            and isinstance(job.get("season"), int) and job["season"] >= 0
+            and isinstance(job.get("episode"), int) and job["episode"] > 0)
+
+
+def _existing_show_dir(root, show_name):
+    exact = root / show_name
+    if exact.is_symlink():
+        raise OSError("Show folder is a symbolic link")
+    if exact.exists():
+        if not exact.is_dir():
+            raise OSError("Show folder path is not a directory")
+        return exact
+    if not root.is_dir():
+        return exact
+    wanted = _PLEX_ID_SUFFIX.sub("", show_name).casefold()
+    year_pattern = re.compile(re.escape(wanted) + r" \((?:18|19|20|21)\d{2}\)\Z")
+    title_matches = []
+    year_matches = []
+    for entry in root.iterdir():
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        existing = _PLEX_ID_SUFFIX.sub("", entry.name).casefold()
+        if existing == wanted:
+            title_matches.append(entry)
+        elif not _YEAR_SUFFIX.search(_PLEX_ID_SUFFIX.sub("", show_name)) and year_pattern.fullmatch(existing):
+            year_matches.append(entry)
+    matches = title_matches or year_matches
+    if len(matches) > 1:
+        raise OSError("Multiple existing show folders match this title")
+    return matches[0] if matches else exact
+
+
 def _job_download_dir(job):
-    return folder_dir(job.get("folder", "root"))
+    root = folder_dir(job.get("folder", "root"))
+    if not _plex_episode(job):
+        return root
+    show_name = _media_component(job["series_title"])
+    if not show_name:
+        raise ValueError("Series title cannot be used as a folder name")
+    show_dir = _existing_show_dir(root, show_name)
+    return show_dir / f"Season {job['season']:02d}"
 
 
 def _idle_timeout():
@@ -310,15 +427,19 @@ def _saved_download(conn, kind, item_id):
     item_id = _valid_id(item_id)
     ensure_schema(conn)
     if kind == "movie":
-        row = conn.execute("SELECT title,extension FROM xtream_vod_items WHERE kind='movie' AND item_id=?", (item_id,)).fetchone()
+        row = conn.execute("SELECT title,extension,NULL AS series_title,NULL AS season,NULL AS episode FROM xtream_vod_items WHERE kind='movie' AND item_id=?", (item_id,)).fetchone()
         series_id = None
     else:
-        row = conn.execute("SELECT e.title,e.extension,e.series_id FROM xtream_vod_episodes e JOIN xtream_vod_items i ON i.kind='series' AND i.item_id=e.series_id WHERE e.episode_id=?", (item_id,)).fetchone()
+        row = conn.execute("SELECT e.title,e.extension,e.series_id,e.season,e.episode,i.title AS series_title FROM xtream_vod_episodes e JOIN xtream_vod_items i ON i.kind='series' AND i.item_id=e.series_id WHERE e.episode_id=?", (item_id,)).fetchone()
         series_id = row["series_id"] if row else None
     if not row:
         raise KeyError("Title not found in saved catalog")
     if not row["extension"]:
         raise ValueError("This title has no supported direct-file format")
+    if kind == "episode" and (not isinstance(row["season"], int) or row["season"] < 0
+                              or not isinstance(row["episode"], int) or row["episode"] < 1
+                              or not _media_component(row["series_title"])):
+        raise ValueError("Episode needs a valid show title, season, and episode number")
     return item_id, row, series_id
 
 
@@ -330,17 +451,34 @@ def stage_download(conn, kind, item_id):
         existing = conn.execute("SELECT id FROM xtream_vod_jobs WHERE kind=? AND item_id=? AND state IN ('staged','pending','running') ORDER BY CASE WHEN state='staged' THEN 0 ELSE 1 END,id DESC LIMIT 1", (kind, item_id)).fetchone()
         if existing:
             return existing["id"]
-        return conn.execute("INSERT INTO xtream_vod_jobs(kind,item_id,series_id,title,extension,folder,state) VALUES (?,?,?,?,?,?,'staged')",
-                            (kind, item_id, series_id, row["title"], row["extension"], folder)).lastrowid
+        return conn.execute("INSERT INTO xtream_vod_jobs(kind,item_id,series_id,title,extension,series_title,season,episode,folder,state) VALUES (?,?,?,?,?,?,?,?,?,'staged')",
+                            (kind, item_id, series_id, row["title"], row["extension"], row["series_title"], row["season"], row["episode"], folder)).lastrowid
 
 
 def start_staged_download(conn, job_id, folder):
     if not isinstance(folder, str) or folder not in {"movies", "tv"}:
         raise ValueError("Choose Movies or TV Shows")
     folder_dir(folder)
+    ensure_schema(conn)
+    staged = conn.execute("SELECT kind,item_id,series_title,season,episode FROM xtream_vod_jobs WHERE id=? AND state='staged'", (job_id,)).fetchone()
+    if not staged:
+        return False
+    # Staged episodes from an earlier release need the show metadata before Start.
+    if staged["kind"] == "episode" and (not staged["series_title"] or staged["season"] is None or staged["episode"] is None):
+        try:
+            _, episode, _ = _saved_download(conn, "episode", staged["item_id"])
+        except KeyError as exc:
+            raise ValueError("Saved episode metadata is unavailable; remove and add it again") from exc
+        details = (episode["series_title"], episode["season"], episode["episode"])
+    else:
+        details = None
     with conn:
-        result = conn.execute("UPDATE xtream_vod_jobs SET folder=?,state='pending',updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='staged'",
-                              (folder, job_id))
+        if details:
+            result = conn.execute("UPDATE xtream_vod_jobs SET series_title=?,season=?,episode=?,folder=?,state='pending',updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='staged'",
+                                  (*details, folder, job_id))
+        else:
+            result = conn.execute("UPDATE xtream_vod_jobs SET folder=?,state='pending',updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='staged'",
+                                  (folder, job_id))
     return result.rowcount > 0
 
 
@@ -355,8 +493,8 @@ def queue_download(conn, kind, item_id, folder=None):
         existing = conn.execute("SELECT id,state,filename FROM xtream_vod_jobs WHERE kind=? AND item_id=? AND folder=? AND state IN ('pending','running','cancelling','completed') ORDER BY id DESC LIMIT 1", (kind, item_id, folder)).fetchone()
         if existing and (existing["state"] != "completed" or (existing["filename"] and Path(existing["filename"]).is_file())):
             return existing["id"]
-        return conn.execute("INSERT INTO xtream_vod_jobs(kind,item_id,series_id,title,extension,folder,state) VALUES (?,?,?,?,?,?,'pending')",
-                            (kind, item_id, series_id, row["title"], row["extension"], folder)).lastrowid
+        return conn.execute("INSERT INTO xtream_vod_jobs(kind,item_id,series_id,title,extension,series_title,season,episode,folder,state) VALUES (?,?,?,?,?,?,?,?,?,'pending')",
+                            (kind, item_id, series_id, row["title"], row["extension"], row["series_title"], row["season"], row["episode"], folder)).lastrowid
 
 
 def cancel_job(conn, job_id):
@@ -371,6 +509,14 @@ def cancel_job(conn, job_id):
 
 
 def _filename(job):
+    if _plex_episode(job):
+        marker = f" - s{job['season']:02d}e{job['episode']:02d}"
+        tag = f" [xtream-{job['item_id']}-{job['id']}].{job['extension']}"
+        budget = 240 - len((marker + tag).encode("utf-8"))
+        show = _media_component(job["series_title"], min(100, budget // 2))
+        title = _media_component(job["title"], budget - len(show.encode("utf-8")) - 3)
+        suffix = f" - {title}" if title else ""
+        return f"{show}{marker}{suffix}{tag}"
     stem = re.sub(r"[^\w .()-]+", "", job["title"], flags=re.UNICODE).strip(" .")[:100] or "Download"
     return f"{stem} [{job['kind']}-{job['item_id']}-{job['id']}].{job['extension']}"
 
@@ -396,8 +542,12 @@ def _cancelled(db_path, job_id):
 
 
 def _run_job(db_path, job, pool):
-    destination = _job_download_dir(job)
-    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        destination = _job_download_dir(job)
+        destination.mkdir(parents=True, exist_ok=True)
+    except (OSError, ValueError) as exc:
+        _set_job(db_path, job["id"], expected="pending", state="failed", error=f"Destination unavailable: {exc}")
+        return
     name = _filename(job)
     partial = destination / (name + ".part")
     final = destination / name
@@ -513,7 +663,11 @@ def run_worker(db_path=None, *, stop_event=None):
             ensure_schema(conn)
             abandoned = [dict(row) for row in conn.execute("SELECT * FROM xtream_vod_jobs WHERE state='cancelling'")]
             for job in abandoned:
-                (_job_download_dir(job) / (_filename(job) + ".part")).unlink(missing_ok=True)
+                try:
+                    (_job_download_dir(job) / (_filename(job) + ".part")).unlink(missing_ok=True)
+                except (OSError, ValueError):
+                    # Do not guess which ambiguous show directory owns the partial file.
+                    pass
             conn.execute("UPDATE xtream_vod_jobs SET state='cancelled' WHERE state='cancelling'")
             conn.execute("UPDATE xtream_vod_jobs SET state='pending',bytes_done=0,bytes_total=NULL,error=NULL WHERE state='running'")
         while stop_event is None or not stop_event.is_set():

@@ -22,10 +22,12 @@ class FakeProvider:
         values = {
             "get_vod_categories": [{"category_id": "10", "category_name": "Films"}],
             "get_series_categories": [{"category_id": "20", "category_name": "Shows"}],
-            "get_vod_streams": [{"category_id": "10", "stream_id": "123", "name": "A Film", "container_extension": "mp4"}],
+            "get_vod_streams": [{"category_id": "10", "stream_id": "123", "name": "A Film", "container_extension": "mp4",
+                                 "size_bytes": "2147483648", "resolution": "1920x1080"}],
             "get_series": [{"category_id": "20", "series_id": "456", "name": "A Show"}],
             "get_series_info": {"episodes": {"1": [{"id": "789", "episode_num": 2,
-                                                    "title": "Second Episode", "container_extension": "mkv"}]}},
+                                                    "title": "Second Episode", "container_extension": "mkv",
+                                                    "info": {"filesize": "734003200", "video": {"width": 1280, "height": 720}}}]}},
         }
         return values[action]
 
@@ -70,9 +72,13 @@ class VodTests(unittest.TestCase):
             page = vod.catalog(conn, query="film")
             self.assertEqual(page["total"], 1)
             self.assertEqual(page["items"][0]["item_id"], "123")
+            self.assertEqual((page["items"][0]["size_bytes"], page["items"][0]["resolution"]),
+                             (2147483648, "1920×1080"))
             self.assertEqual(vod.catalog(conn, category_id="movie:10")["total"], 1)
             self.assertEqual(vod.catalog(conn, query="%")["total"], 0)
             self.assertEqual(vod.episodes(conn, "456")[0]["episode_id"], "789")
+            self.assertEqual((vod.episodes(conn, "456")[0]["size_bytes"], vod.episodes(conn, "456")[0]["resolution"]),
+                             (734003200, "1280×720"))
             movie_job = vod.queue_download(conn, "movie", "123")
             self.assertEqual(movie_job, vod.queue_download(conn, "movie", "123"))
             episode_job = vod.queue_download(conn, "episode", "789")
@@ -97,6 +103,37 @@ class VodTests(unittest.TestCase):
             vod.refresh_catalog(PartialProvider(), self.db)
         with self.conn() as conn:
             self.assertEqual(vod.catalog(conn)["total"], 2)
+
+    def test_missing_or_untrusted_media_details_stay_unknown(self):
+        self.assertIsNone(vod._size_bytes({"size": "1.5 GB", "duration_secs": 7200}))
+        self.assertIsNone(vod._size_bytes({"size": True}))
+        self.assertIsNone(vod._resolution({"resolution": "FHD"}))
+        self.assertIsNone(vod._resolution({"width": 0, "height": 1080}))
+        with self.conn() as conn:
+            conn.executescript("""
+                CREATE TABLE xtream_vod_items (
+                    kind TEXT, item_id TEXT, category_id TEXT, title TEXT,
+                    search_title TEXT, extension TEXT
+                );
+                CREATE TABLE xtream_vod_categories (
+                    kind TEXT, category_id TEXT, name TEXT
+                );
+                CREATE TABLE xtream_vod_episodes (
+                    series_id TEXT, episode_id TEXT, season INTEGER,
+                    episode INTEGER, title TEXT, extension TEXT
+                );
+                CREATE TABLE xtream_vod_state (
+                    id INTEGER, refreshed_at TEXT, movie_count INTEGER, series_count INTEGER
+                );
+                INSERT INTO xtream_vod_categories VALUES ('series','20','Shows');
+                INSERT INTO xtream_vod_items VALUES ('series','456','20','A Show','a show',NULL);
+                INSERT INTO xtream_vod_episodes VALUES ('456','789',1,2,'Second Episode','mkv');
+            """)
+            self.assertIsNone(vod.catalog(conn)["items"][0]["size_bytes"])
+            self.assertIsNone(vod.episodes(conn, "456")[0]["resolution"])
+            vod.ensure_schema(conn)
+            self.assertIn("size_bytes", {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_items)")})
+            self.assertIn("resolution", {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_episodes)")})
 
     def test_download_writes_complete_file_and_releases_lease(self):
         self.populate()
@@ -133,7 +170,8 @@ class VodTests(unittest.TestCase):
         self.assertEqual(Path(finished["filename"]).read_bytes(), MediaHandler.body)
         self.assertEqual(Path(finished["filename"]).parent, vod.folder_dir("movies"))
         self.assertEqual(episode_finished["state"], "completed")
-        self.assertEqual(Path(episode_finished["filename"]).parent, vod.folder_dir("tv"))
+        self.assertEqual(Path(episode_finished["filename"]).parent, vod.folder_dir("tv") / "A Show" / "Season 01")
+        self.assertIn("A Show - s01e02 - Second Episode", Path(episode_finished["filename"]).name)
         self.assertEqual(Path(episode_finished["filename"]).read_bytes(), MediaHandler.body)
         self.assertEqual(lease.outcome, "upstream_eof")
         self.assertFalse(list(vod.folder_dir("movies").glob("*.part")))
@@ -149,7 +187,11 @@ class VodTests(unittest.TestCase):
             jobs = client.get("/api/xtream/vod/downloads").get_json()
         self.assertEqual(page.status_code, 200)
         self.assertEqual(catalog["total"], 1)
+        self.assertEqual(catalog["items"][0]["size_bytes"], 2147483648)
+        self.assertEqual(catalog["items"][0]["resolution"], "1920×1080")
         self.assertEqual(episodes["episodes"][0]["episode_id"], "789")
+        self.assertEqual(episodes["episodes"][0]["size_bytes"], 734003200)
+        self.assertEqual(episodes["episodes"][0]["resolution"], "1280×720")
         self.assertEqual(jobs["jobs"], [])
         self.assertEqual(jobs["destinations"]["movies"], str(vod.folder_dir("movies")))
         self.assertEqual(jobs["destinations"]["tv"], str(vod.folder_dir("tv")))
@@ -204,6 +246,59 @@ class VodTests(unittest.TestCase):
             jobs = client.get("/api/xtream/vod/downloads").get_json()["jobs"]
         self.assertEqual(len(jobs), 1)
         self.assertEqual((jobs[0]["state"], jobs[0]["folder"]), ("pending", "tv"))
+
+    def test_episode_reuses_a_unique_existing_plex_show_folder(self):
+        self.populate()
+        existing = vod.folder_dir("tv") / "A Show (2020) {tmdb-123}"
+        existing.mkdir(parents=True)
+        with self.conn() as conn:
+            job_id = vod.queue_download(conn, "episode", "789")
+            job = dict(conn.execute("SELECT * FROM xtream_vod_jobs WHERE id=?", (job_id,)).fetchone())
+        self.assertEqual(vod._job_download_dir(job), existing / "Season 01")
+        self.assertFalse((vod.folder_dir("tv") / "A Show").exists())
+        self.assertIn("s01e02", vod._filename(job))
+        special = dict(job, season=0, episode=1)
+        self.assertEqual(vod._job_download_dir(special), existing / "Season 00")
+        self.assertIn("s00e01", vod._filename(special))
+        long_job = dict(job, series_title="É" * 150, title="É" * 150)
+        self.assertLessEqual(len(vod._filename(long_job).encode("utf-8")), 240)
+
+    def test_staged_episode_from_older_schema_gets_plex_metadata_on_start(self):
+        self.populate()
+        with self.conn() as conn:
+            job_id = vod.stage_download(conn, "episode", "789")
+            conn.execute("UPDATE xtream_vod_jobs SET series_title=NULL,season=NULL,episode=NULL WHERE id=?", (job_id,))
+            conn.commit()
+            self.assertTrue(vod.start_staged_download(conn, job_id, "tv"))
+            job = dict(conn.execute("SELECT * FROM xtream_vod_jobs WHERE id=?", (job_id,)).fetchone())
+        self.assertEqual((job["series_title"], job["season"], job["episode"]), ("A Show", 1, 2))
+        self.assertEqual(vod._job_download_dir(job), vod.folder_dir("tv") / "A Show" / "Season 01")
+
+    def test_episode_show_folder_match_does_not_guess_between_years(self):
+        self.populate()
+        root = vod.folder_dir("tv")
+        (root / "A Show (2018)").mkdir(parents=True)
+        (root / "A Show (2020)").mkdir()
+        with self.conn() as conn:
+            job_id = vod.queue_download(conn, "episode", "789")
+            job = dict(conn.execute("SELECT * FROM xtream_vod_jobs WHERE id=?", (job_id,)).fetchone())
+        with self.assertRaisesRegex(OSError, "Multiple existing show folders"):
+            vod._job_download_dir(job)
+        vod._run_job(self.db, job, object())
+        with self.conn() as conn:
+            failed = conn.execute("SELECT state,error FROM xtream_vod_jobs WHERE id=?", (job_id,)).fetchone()
+        self.assertEqual(failed["state"], "failed")
+        self.assertIn("Multiple existing show folders", failed["error"])
+
+    def test_episode_prefers_existing_title_over_a_year_guess(self):
+        self.populate()
+        root = vod.folder_dir("tv")
+        (root / "a show").mkdir(parents=True)
+        (root / "A Show (2020)").mkdir()
+        with self.conn() as conn:
+            job_id = vod.queue_download(conn, "episode", "789")
+            job = dict(conn.execute("SELECT * FROM xtream_vod_jobs WHERE id=?", (job_id,)).fetchone())
+        self.assertTrue(vod._job_download_dir(job).parent.samefile(root / "a show"))
 
     def test_existing_jobs_keep_original_root_destination(self):
         with self.conn() as conn:

@@ -26,7 +26,7 @@
 {% block content %}
 <section class="card vod-section">
   <h2>Catalog</h2>
-  <p class="vod-muted">Searching uses the saved catalog. Refresh Catalog contacts the provider. Opening a series uses saved episodes; Load Episodes contacts the provider for that series.</p>
+  <p class="vod-muted">Searching uses the saved catalog. Refresh Catalog contacts the provider. Opening a series uses saved episodes; Load Episodes contacts the provider for that series. Size and resolution appear when the provider includes them.</p>
   <div class="vod-toolbar">
     <label>Search<input id="vod-search" type="search" maxlength="200" placeholder="Title" onkeydown="if(event.key==='Enter'){event.preventDefault();loadCatalog(0)}"></label>
     <label>Type<select id="vod-kind" onchange="document.getElementById('vod-category').value='';loadCatalog(0)"><option value="all">Movies &amp; series</option><option value="movie">Movies</option><option value="series">TV series</option></select></label>
@@ -60,6 +60,12 @@ let vodLoading = false;
 let vodReload = false;
 const vodStarting = new Set();
 const vodEsc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+function vodSize(bytes) {
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) return 'Size unavailable';
+  if (bytes >= 1073741824) return `${(bytes / 1073741824).toFixed(1)} GiB`;
+  return `${(bytes / 1048576).toFixed(1)} MiB`;
+}
+const vodResolution = value => value || 'Resolution unavailable';
 async function vodRequest(url, options) {
   const response = await fetch(url, options);
   let data;
@@ -91,6 +97,7 @@ async function loadCatalog(offset=vodOffset) {
     vodStatus('vod-catalog-status',`${data.total} titles${refreshed}`);
     document.getElementById('vod-items').innerHTML = data.items.map((item,index) => `<article class="vod-item">
       <strong>${vodEsc(item.title)}</strong><span class="vod-muted">${vodEsc(item.kind === 'movie' ? 'Movie' : 'TV series')} · ${vodEsc(item.category_name)}</span>
+      ${item.kind === 'movie' ? `<span class="vod-muted">${vodEsc(vodSize(item.size_bytes))} · ${vodEsc(vodResolution(item.resolution))}</span>` : ''}
       <button class="btn" type="button" onclick="${item.kind === 'movie' ? `stageDownload('movie', ${index}, this)` : `openSeries(${index})`}">${item.kind === 'movie' ? 'Download movie' : 'View episodes'}</button>
     </article>`).join('') || '<p class="vod-muted">No titles match this view.</p>';
     document.getElementById('vod-pages').innerHTML = `${offset ? '<button class="btn btn-secondary" type="button" onclick="loadCatalog(Math.max(0,vodOffset-50))">Previous</button>' : ''}${offset+data.items.length < data.total ? '<button class="btn btn-secondary" type="button" onclick="loadCatalog(vodOffset+50)">Next</button>' : ''}`;
@@ -124,7 +131,7 @@ async function loadEpisodes() {
     const data = await vodRequest(`/api/xtream/vod/series/${encodeURIComponent(vodSeries.item_id)}/episodes`);
     vodStatus('vod-episodes-status',`${data.episodes.length} saved episodes${data.episodes.length ? '' : ' · choose Load Episodes to read the provider'}`);
     document.getElementById('vod-episodes').innerHTML = data.episodes.map(row => `<article class="vod-episode">
-      <div><strong>S${row.season} E${row.episode} · ${vodEsc(row.title)}</strong><div class="vod-muted">${vodEsc(row.extension || 'Format unavailable')}</div></div>
+      <div><strong>S${row.season} E${row.episode} · ${vodEsc(row.title)}</strong><div class="vod-muted">${vodEsc(row.extension || 'Format unavailable')} · ${vodEsc(vodSize(row.size_bytes))} · ${vodEsc(vodResolution(row.resolution))}</div></div>
       <button class="btn" type="button" ${row.extension ? '' : 'disabled'} data-episode="${vodEsc(row.episode_id)}" onclick="stageDownload('episode', this.dataset.episode, this)">Download episode</button>
     </article>`).join('') || '<p class="vod-muted">No episodes saved for this series.</p>';
   } catch (error) { vodStatus('vod-episodes-status',error.message,true); }
