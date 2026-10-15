@@ -67,6 +67,10 @@ if __name__ == "__main__":
     except Exception as e:
         log(f"Scheduler startup error: {e}", "WARNING")
 
+    # Resume queued NAS downloads after a process restart.
+    from server.services.xtream_vod import ensure_worker
+    ensure_worker()
+
     try:
         app.run(host=host, port=port, debug=False, threaded=True)
     finally:

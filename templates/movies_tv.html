@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% block title %}Movies &amp; TV — FruitDeepLinks{% endblock %}
+{% block page_title %}Movies &amp; TV{% endblock %}
+{% block page_subtitle %}<p class="subtitle">Browse your saved Xtream catalog and download movies or episodes to the NAS.</p>{% endblock %}
+{% block extra_style %}
+.vod-toolbar {display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin:14px 0}
+.vod-toolbar label {display:flex;flex-direction:column;gap:5px;font-size:12px;min-width:130px}
+.vod-toolbar input,.vod-toolbar select {background:var(--bg-inset);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:9px;font:inherit}
+.vod-toolbar input {min-width:min(300px,75vw)}
+.vod-list {display:grid;grid-template-columns:repeat(auto-fill,minmax(245px,1fr));gap:10px;margin-top:15px}
+.vod-item {border:1px solid var(--border);background:var(--bg-inset);border-radius:var(--radius);padding:14px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.vod-item strong {overflow-wrap:anywhere}
+.vod-muted {font-size:12px;color:var(--text-muted);line-height:1.4}
+.vod-item .btn {align-self:flex-start}
+.vod-episodes {display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.vod-episode,.vod-job {border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;background:var(--bg-inset)}
+.vod-episode>div,.vod-job>div {min-width:0;overflow-wrap:anywhere}
+.vod-progress {width:170px;max-width:100%;height:8px;accent-color:var(--accent)}
+.vod-status {font-size:13px;color:var(--text-muted);margin-top:8px}
+.vod-status.error {color:var(--danger)}
+.vod-actions {display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.vod-section {margin-bottom:16px}
+{% endblock %}
+{% block content %}
+<section class="card vod-section">
+  <h2>Catalog</h2>
+  <p class="vod-muted">Searching uses the saved catalog. Refresh Catalog contacts the provider. Opening a series uses saved episodes; Load Episodes contacts the provider for that series.</p>
+  <div class="vod-toolbar">
+    <label>Search<input id="vod-search" type="search" maxlength="200" placeholder="Title" onkeydown="if(event.key==='Enter'){event.preventDefault();loadCatalog(0)}"></label>
+    <label>Type<select id="vod-kind" onchange="document.getElementById('vod-category').value='';loadCatalog(0)"><option value="all">Movies &amp; series</option><option value="movie">Movies</option><option value="series">TV series</option></select></label>
+    <label>Category<select id="vod-category" onchange="loadCatalog(0)"><option value="">All categories</option></select></label>
+    <button class="btn" type="button" onclick="loadCatalog(0)">Search</button>
+    <button class="btn btn-secondary" id="vod-refresh" type="button" onclick="refreshCatalog()">Refresh Catalog</button>
+  </div>
+  <div id="vod-catalog-status" class="vod-status" role="status" aria-live="polite">Loading saved catalog…</div>
+  <div id="vod-items" class="vod-list"></div>
+  <div id="vod-pages" class="vod-toolbar"></div>
+</section>
+<section class="card vod-section" id="vod-series-panel" hidden>
+  <div class="vod-actions"><h2 id="vod-series-title">Episodes</h2><button class="btn btn-secondary" id="vod-episodes-refresh" type="button" onclick="refreshEpisodes()">Load Episodes</button><button class="btn btn-secondary" type="button" onclick="closeSeries()">Close</button></div>
+  <div id="vod-episodes-status" class="vod-status" role="status" aria-live="polite"></div>
+  <div id="vod-episodes" class="vod-episodes"></div>
+</section>
+<section class="card">
+  <h2>NAS downloads</h2>
+  <p class="vod-muted">Downloads are saved to <span id="vod-destination">the configured folder</span>. One download runs at a time and uses an Xtream account slot. A queued download waits while the account is occupied. Cancelling closes the transfer and removes its incomplete file; an idle provider read can delay cleanup.</p>
+  <div id="vod-download-status" class="vod-status" role="status" aria-live="polite">Loading downloads…</div>
+  <div id="vod-jobs" class="vod-episodes"></div>
+</section>
+{% endblock %}
+{% block extra_script %}
+<script>
+let vodItems = [];
+let vodSeries = null;
+let vodOffset = 0;
+let vodTimer = null;
+let vodLoading = false;
+const vodEsc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+async function vodRequest(url, options) {
+  const response = await fetch(url, options);
+  let data;
+  try { data = await response.json(); } catch (_) { throw new Error('Server returned an invalid response'); }
+  if (!response.ok || data.status === 'error') throw new Error(data.message || 'Request failed');
+  return data;
+}
+function vodStatus(id, message, error=false) {
+  const element = document.getElementById(id);
+  element.textContent = message;
+  element.classList.toggle('error', error);
+}
+async function loadCatalog(offset=vodOffset) {
+  const params = new URLSearchParams({kind:document.getElementById('vod-kind').value,
+    category_id:document.getElementById('vod-category').value,q:document.getElementById('vod-search').value,
+    limit:'50',offset:String(offset)});
+  try {
+    vodStatus('vod-catalog-status','Loading saved catalog…');
+    const data = await vodRequest('/api/xtream/vod/catalog?' + params);
+    vodOffset = offset;
+    vodItems = data.items;
+    const category = document.getElementById('vod-category');
+    const selected = category.value;
+    category.innerHTML = '<option value="">All categories</option>' + data.categories
+      .filter(row => document.getElementById('vod-kind').value === 'all' || row.kind === document.getElementById('vod-kind').value)
+      .map(row => `<option value="${vodEsc(row.kind)}:${vodEsc(row.category_id)}">${vodEsc(row.name)} · ${vodEsc(row.kind)}</option>`).join('');
+    category.value = selected;
+    const refreshed = data.cache?.refreshed_at ? ` · refreshed ${data.cache.refreshed_at} UTC` : ' · catalog has not been refreshed';
+    vodStatus('vod-catalog-status',`${data.total} titles${refreshed}`);
+    document.getElementById('vod-items').innerHTML = data.items.map((item,index) => `<article class="vod-item">
+      <strong>${vodEsc(item.title)}</strong><span class="vod-muted">${vodEsc(item.kind === 'movie' ? 'Movie' : 'TV series')} · ${vodEsc(item.category_name)}</span>
+      <button class="btn" type="button" onclick="${item.kind === 'movie' ? `queueDownload('movie', ${index}, this)` : `openSeries(${index})`}">${item.kind === 'movie' ? 'Download movie' : 'View episodes'}</button>
+    </article>`).join('') || '<p class="vod-muted">No titles match this view.</p>';
+    document.getElementById('vod-pages').innerHTML = `${offset ? '<button class="btn btn-secondary" type="button" onclick="loadCatalog(Math.max(0,vodOffset-50))">Previous</button>' : ''}${offset+data.items.length < data.total ? '<button class="btn btn-secondary" type="button" onclick="loadCatalog(vodOffset+50)">Next</button>' : ''}`;
+  } catch (error) { vodStatus('vod-catalog-status',error.message,true); }
+}
+async function refreshCatalog() {
+  const button = document.getElementById('vod-refresh');
+  if (button.disabled) return;
+  button.disabled = true; button.textContent = 'Refreshing…';
+  vodStatus('vod-catalog-status','Reading the provider catalog…');
+  try {
+    const data = await vodRequest('/api/xtream/vod/catalog/refresh',{method:'POST'});
+    await loadCatalog(0);
+    vodStatus('vod-catalog-status',`Saved ${data.movie_count} movies and ${data.series_count} series.`);
+  } catch (error) { vodStatus('vod-catalog-status',error.message,true); }
+  finally { button.disabled = false; button.textContent = 'Refresh Catalog'; }
+}
+function closeSeries() {vodSeries = null; document.getElementById('vod-series-panel').hidden = true;}
+async function openSeries(index) {
+  vodSeries = vodItems[index];
+  if (!vodSeries) return;
+  document.getElementById('vod-series-panel').hidden = false;
+  document.getElementById('vod-series-title').textContent = vodSeries.title;
+  document.getElementById('vod-series-panel').scrollIntoView({behavior:'smooth',block:'start'});
+  await loadEpisodes();
+}
+async function loadEpisodes() {
+  if (!vodSeries) return;
+  vodStatus('vod-episodes-status','Loading saved episodes…');
+  try {
+    const data = await vodRequest(`/api/xtream/vod/series/${encodeURIComponent(vodSeries.item_id)}/episodes`);
+    vodStatus('vod-episodes-status',`${data.episodes.length} saved episodes${data.episodes.length ? '' : ' · choose Load Episodes to read the provider'}`);
+    document.getElementById('vod-episodes').innerHTML = data.episodes.map(row => `<article class="vod-episode">
+      <div><strong>S${row.season} E${row.episode} · ${vodEsc(row.title)}</strong><div class="vod-muted">${vodEsc(row.extension || 'Format unavailable')}</div></div>
+      <button class="btn" type="button" ${row.extension ? '' : 'disabled'} data-episode="${vodEsc(row.episode_id)}" onclick="queueDownload('episode', this.dataset.episode, this)">Download episode</button>
+    </article>`).join('') || '<p class="vod-muted">No episodes saved for this series.</p>';
+  } catch (error) { vodStatus('vod-episodes-status',error.message,true); }
+}
+async function refreshEpisodes() {
+  if (!vodSeries) return;
+  const button = document.getElementById('vod-episodes-refresh');
+  button.disabled = true; button.textContent = 'Loading…';
+  vodStatus('vod-episodes-status','Reading episodes from provider…');
+  try {
+    await vodRequest(`/api/xtream/vod/series/${encodeURIComponent(vodSeries.item_id)}/episodes/refresh`,{method:'POST'});
+    await loadEpisodes();
+  } catch (error) { vodStatus('vod-episodes-status',error.message,true); }
+  finally {button.disabled = false; button.textContent = 'Load Episodes';}
+}
+async function queueDownload(kind, item, button) {
+  if (button.disabled) return;
+  const itemId = kind === 'movie' ? vodItems[item]?.item_id : item;
+  if (!itemId) return;
+  button.disabled = true; button.textContent = 'Queuing…';
+  try {
+    await vodRequest('/api/xtream/vod/downloads',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({kind,item_id:itemId})});
+    button.textContent = 'Queued';
+    await loadDownloads();
+  } catch (error) {vodStatus('vod-download-status',error.message,true);button.disabled = false;button.textContent = kind === 'movie' ? 'Download movie' : 'Download episode';}
+}
+async function cancelDownload(id, button) {
+  button.disabled = true; button.textContent = 'Cancelling…';
+  try {await vodRequest(`/api/xtream/vod/downloads/${id}`,{method:'DELETE'});await loadDownloads();}
+  catch (error) {vodStatus('vod-download-status',error.message,true);button.disabled = false;button.textContent = 'Cancel';}
+}
+async function loadDownloads() {
+  if (vodLoading) return;
+  vodLoading = true;
+  try {
+    const data = await vodRequest('/api/xtream/vod/downloads');
+    document.getElementById('vod-destination').textContent = data.destination;
+    const active = data.jobs.filter(job => ['pending','running','cancelling'].includes(job.state)).length;
+    vodStatus('vod-download-status',active ? `${active} active or waiting` : 'No active downloads.');
+    document.getElementById('vod-jobs').innerHTML = data.jobs.map(job => {
+      const percent = job.bytes_total ? Math.min(100,Math.floor(job.bytes_done*100/job.bytes_total)) : null;
+      const amount = `${(job.bytes_done/1048576).toFixed(1)} MiB` + (job.bytes_total ? ` / ${(job.bytes_total/1048576).toFixed(1)} MiB` : '');
+      return `<article class="vod-job"><div><strong>${vodEsc(job.title)}</strong><div class="vod-muted">${vodEsc(job.state)}${job.state === 'running' ? ' · '+amount : ''}${job.error ? ' · '+vodEsc(job.error) : ''}${job.filename ? ' · '+vodEsc(job.filename) : ''}</div>
+      ${job.state === 'running' && percent !== null ? `<progress class="vod-progress" max="100" value="${percent}">${percent}%</progress>` : ''}</div>
+      ${['pending','running'].includes(job.state) ? `<button class="btn btn-secondary" type="button" onclick="cancelDownload(${job.id},this)">Cancel</button>` : ''}</article>`;
+    }).join('') || '<p class="vod-muted">No downloads yet.</p>';
+  } catch (error) {vodStatus('vod-download-status',error.message,true);}
+  finally {vodLoading = false;}
+}
+loadCatalog(0);
+loadDownloads();
+vodTimer = setInterval(loadDownloads,5000);
+window.addEventListener('pagehide',()=>clearInterval(vodTimer));
+</script>
+{% endblock %}

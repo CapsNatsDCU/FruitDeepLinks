@@ -163,6 +163,7 @@ Visit `/settings` to configure the server without editing environment variables:
 | **Lanes** | Number of virtual lanes |
 | **Favorite Teams & Broadcasters** | Ranking toggle, team cards, match preview, and backup/restore |
 | **Persistent Channels** | Browse configured Xtream categories; add, edit, disable, or delete stable channels |
+| **Movies & TV** | Browse saved Xtream movies and series; queue NAS downloads |
 | **Pipeline** | Days ahead, padding minutes |
 | **Auto Refresh** | Enable/disable, daily refresh time |
 | **Scrapers** | Per-scraper on/off toggles |
@@ -236,6 +237,12 @@ Placeholder slots such as `NO EVENT STREAMING`, `OFFLINE`, or `TBA` are
 counted separately and do not create events or playables. Add the relevant
 category to `XTREAM_CATEGORY_IDS`; FruitDeepLinks never scans the full provider
 catalogue by default.
+
+### Xtream Movies & TV
+
+Movie and TV downloads have their own `/movies-tv` page and NAS queue. See
+[Xtream Movies & TV downloads](docs/XTREAM_VOD_DOWNLOADS.md) for the destination,
+provider refresh controls, and supported file formats.
 
 ### Persistent Xtream channels
 

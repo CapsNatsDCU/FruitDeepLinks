@@ -57,6 +57,11 @@ def persistent_channels_page():
     return _render("persistent_channels.html")
 
 
+@bp.route("/movies-tv")
+def movies_tv_page():
+    return _render("movies_tv.html")
+
+
 @bp.route("/filters")
 def filters_page():
     return _render("filters.html")

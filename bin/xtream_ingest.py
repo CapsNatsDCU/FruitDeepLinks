@@ -465,10 +465,13 @@ class XtreamClient:
     def _curl_payload(self, action: Optional[str],
                        category_id: Optional[str] = None,
                        stream_id: Optional[str] = None,
-                       config: Optional[XtreamConfig] = None) -> Any:
+                       config: Optional[XtreamConfig] = None,
+                       extra_params: Optional[dict[str, str]] = None) -> Any:
         config = config or self.config
-        timeout = (self.catalog_timeout if action == "get_live_categories"
-                   or (action == "get_live_streams" and category_id is None) else self.timeout)
+        timeout = (self.catalog_timeout if action in {
+            "get_live_categories", "get_vod_categories", "get_vod_streams",
+            "get_series_categories", "get_series", "get_series_info",
+        } or (action == "get_live_streams" and category_id is None) else self.timeout)
         command = [
             self.curl_binary,
             "-sS",
@@ -492,6 +495,13 @@ class XtreamClient:
             command.extend(("--data-urlencode", f"category_id={category_id}"))
         if stream_id is not None:
             command.extend(("--data-urlencode", f"stream_id={stream_id}"))
+        if extra_params:
+            if set(extra_params) - {"series_id", "vod_id"}:
+                raise XtreamError("Unsupported Xtream metadata parameter")
+            for key, value in extra_params.items():
+                if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(value)):
+                    raise XtreamError("Invalid Xtream content ID")
+                command.extend(("--data-urlencode", f"{key}={value}"))
         try:
             completed = self.subprocess_runner(
                 command,
