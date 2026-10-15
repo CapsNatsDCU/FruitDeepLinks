@@ -6,6 +6,25 @@ Choose **Download movie** or **Download episode** to queue a direct media file o
 
 The default destination is `/app/out/xtream-downloads`, which is `./out/xtream-downloads` on the Docker host with the standard Compose mount. To use a different NAS directory, set `XTREAM_DOWNLOAD_DIR` to an absolute **container** path and bind mount that path with write access for the app. Do not put downloaded media in the SQLite data directory. The app creates the directory when a job starts.
 
+## newStormy TrueNAS Library
+
+The media dataset you identified is `/mnt/newStormy/library` on the TrueNAS host (lowercase `library`). `/mnt/newStormy/Library` is a different directory. Mount the lowercase dataset at `/Library` **inside the Fruit container** and set `XTREAM_DOWNLOAD_DIR=/Library`. Downloaded movie and episode files currently go directly into the root of `/mnt/newStormy/library`.
+
+For a deployment already managed with this repository's Docker Compose files, include `docker-compose.truenas-library.yml` alongside the active Compose files on the next service update.
+
+For the existing **TrueNAS Custom App**, edit its Compose configuration in TrueNAS instead. Add these entries to its `fruitdeeplinks` service, preserving all existing environment values and mounts:
+
+```yaml
+environment:
+  XTREAM_DOWNLOAD_DIR: /Library
+volumes:
+  - type: bind
+    source: /mnt/newStormy/library
+    target: /Library
+```
+
+If that service already uses list-style environment entries, add `- XTREAM_DOWNLOAD_DIR=/Library` to the list rather than creating a second `environment` key. Likewise, append the bind mount to its existing `volumes` list. The in-app updater preserves the Custom App's configured environment and mounts, but changing repository Compose files alone does not change that running app. After applying the TrueNAS configuration, confirm **Movies & TV** shows `/Library` as the destination and verify container write access before starting a download.
+
 The downloader supports direct `mp4`, `mkv`, `avi`, `ts`, `mov`, and `m4v` files advertised in Xtream metadata. It rejects playlists and error pages rather than saving them as videos. Some providers omit file sizes, in which case progress shows downloaded bytes without a percentage. Downloads may still contend with use of the same subscription in another app; Fruit's pool cannot see or reserve external sessions.
 
 API routes:

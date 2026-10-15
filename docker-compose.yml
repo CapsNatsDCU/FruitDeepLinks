@@ -68,7 +68,7 @@ services:
       - XTREAM_USER_AGENT=${XTREAM_USER_AGENT:-KSPlayer}
       # Inactivity between media reads, never a maximum recording duration.
       - XTREAM_STREAM_IDLE_TIMEOUT=${XTREAM_STREAM_IDLE_TIMEOUT:-60}
-      # NAS download path inside the persisted ./out mount.
+      # Download path inside the container; mount a NAS library separately if used.
       - XTREAM_DOWNLOAD_DIR=${XTREAM_DOWNLOAD_DIR:-/app/out/xtream-downloads}
       - XTREAM_CATEGORY_IDS=${XTREAM_CATEGORY_IDS:-}
       - XTREAM_TIMEZONE=${XTREAM_TIMEZONE:-UTC}

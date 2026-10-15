@@ -1,0 +1,10 @@
+# Apply alongside the main Compose file on the newStormy TrueNAS host.
+# The host dataset is lowercase: /mnt/newStormy/library.
+services:
+  fruitdeeplinks:
+    environment:
+      XTREAM_DOWNLOAD_DIR: /Library
+    volumes:
+      - type: bind
+        source: /mnt/newStormy/library
+        target: /Library
