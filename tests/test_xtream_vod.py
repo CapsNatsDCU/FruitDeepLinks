@@ -245,12 +245,45 @@ class VodTests(unittest.TestCase):
         self.assertEqual(finished["state"], "completed")
         self.assertEqual(Path(finished["filename"]).read_bytes(), MediaHandler.body)
         self.assertEqual(Path(finished["filename"]).parent, vod.folder_dir("movies"))
+        self.assertEqual(Path(finished["filename"]).name, "A Film.mp4")
         self.assertEqual(episode_finished["state"], "completed")
         self.assertEqual(Path(episode_finished["filename"]).parent, vod.folder_dir("tv") / "A Show" / "Season 01")
         self.assertIn("A Show - s01e02 - Second Episode", Path(episode_finished["filename"]).name)
         self.assertEqual(Path(episode_finished["filename"]).read_bytes(), MediaHandler.body)
         self.assertEqual(lease.outcome, "upstream_eof")
         self.assertFalse(list(vod.folder_dir("movies").glob("*.part")))
+
+    def test_movie_filename_uses_plex_title_and_release_year(self):
+        job = {"kind": "movie", "title": "EN - Blade Runner (1982) [1080p]", "extension": "mp4",
+               "item_id": "117814", "id": 13}
+        self.assertEqual(vod._filename(job), "Blade Runner (1982).mp4")
+        self.assertEqual(vod._filename(dict(job, title="NF - Blade: Trinity")), "Blade Trinity.mp4")
+        self.assertEqual(vod._filename(dict(job, title="DE - Queen's Blade (2009) (JP) (Ger Sub)")),
+                         "Queen's Blade (2009).mp4")
+        self.assertEqual(vod._filename(dict(job, title="É" * 150)), "É" * 118 + ".mp4")
+        long_name = vod._filename(dict(job, title="É" * 150 + " (1982)"))
+        self.assertTrue(long_name.endswith(" (1982).mp4"))
+        self.assertLessEqual(len(long_name.encode("utf-8")), 240)
+
+    def test_movie_download_does_not_replace_existing_plex_named_file(self):
+        self.populate()
+        with self.conn() as conn:
+            conn.execute("UPDATE xtream_vod_items SET title='EN - Blade Runner (1982)' WHERE kind='movie' AND item_id='123'")
+            job_id = vod.queue_download(conn, "movie", "123")
+            job = dict(conn.execute("SELECT * FROM xtream_vod_jobs WHERE id=?", (job_id,)).fetchone())
+        destination = vod.folder_dir("movies")
+        destination.mkdir(parents=True)
+        existing = destination / "Blade Runner (1982).mp4"
+        existing.write_bytes(b"existing movie")
+        class NoProviderPool:
+            def status(self):
+                raise AssertionError("An existing file should stop the download before provider traffic")
+        vod._run_job(self.db, job, NoProviderPool())
+        with self.conn() as conn:
+            result = conn.execute("SELECT state,error FROM xtream_vod_jobs WHERE id=?", (job_id,)).fetchone()
+        self.assertEqual(existing.read_bytes(), b"existing movie")
+        self.assertEqual(result["state"], "failed")
+        self.assertIn("already exists", result["error"])
 
     def test_cached_api_reads_do_not_contact_provider(self):
         self.populate()

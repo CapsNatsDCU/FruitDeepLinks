@@ -717,6 +717,20 @@ def _filename(job):
         title = _media_component(job["title"], budget - len(show.encode("utf-8")) - 3)
         suffix = f" - {title}" if title else ""
         return f"{show}{marker}{suffix}{tag}"
+    if job["kind"] == "movie":
+        title = str(job["title"] or "").strip()
+        prefix = re.match(r"^([A-Za-z]{2,3}|Netflix)\s+-\s+", title, re.IGNORECASE)
+        if prefix and (prefix[1].casefold() in _AUDIO_LANGUAGE_NAMES or prefix[1].casefold() in {"nf", "netflix"}):
+            title = title[prefix.end():]
+        # Provider labels after the release year (such as resolution or audio tags)
+        # are not part of Plex's Movie Title (Year) matching name.
+        year = re.search(r"\s+\(((?:18|19|20|21)\d{2})\)", title)
+        extension = f".{job['extension']}"
+        if year:
+            year_suffix = f" ({year[1]})"
+            stem = _media_component(title[:year.start()], 240 - len((year_suffix + extension).encode("utf-8"))) or "Movie"
+            return stem + year_suffix + extension
+        return (_media_component(title, 240 - len(extension)) or "Movie") + extension
     stem = re.sub(r"[^\w .()-]+", "", job["title"], flags=re.UNICODE).strip(" .")[:100] or "Download"
     return f"{stem} [{job['kind']}-{job['item_id']}-{job['id']}].{job['extension']}"
 
@@ -751,6 +765,10 @@ def _run_job(db_path, job, pool):
     name = _filename(job)
     partial = destination / (name + ".part")
     final = destination / name
+    if job["kind"] == "movie" and os.path.lexists(final):
+        _set_job(db_path, job["id"], expected="pending", state="failed",
+                 error="A file with this Plex movie name already exists in the destination")
+        return
     lease = None
     response = None
     session = None
@@ -816,7 +834,12 @@ def _run_job(db_path, job, pool):
                     if not state or state[0] != "running":
                         outcome = "client_closed"
                         return
-                    os.replace(partial, final)
+                    if job["kind"] == "movie":
+                        # Keep a pre-existing movie when another NAS user creates it mid-download.
+                        os.link(partial, final)
+                        partial.unlink()
+                    else:
+                        os.replace(partial, final)
                     conn.execute("UPDATE xtream_vod_jobs SET state='completed',bytes_done=?,filename=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                                  (done, str(final), job["id"]))
                 record_host_success(lease.gate_fd, host_index)
@@ -832,6 +855,9 @@ def _run_job(db_path, job, pool):
     except PoolUnavailable:
         # A live stream or metadata request owns the account; leave the job queued.
         return
+    except FileExistsError:
+        _set_job(db_path, job["id"], expected="running", state="failed",
+                 error="A file with this Plex movie name already exists in the destination")
     except Exception:
         _set_job(db_path, job["id"], expected="running", state="failed", error="Download failed; check provider access, file format, and NAS space")
     finally:
