@@ -50,6 +50,12 @@ _AUDIO_LANGUAGE_NAMES = {
     "vie": "Vietnamese", "vi": "Vietnamese", "vietnamese": "Vietnamese",
     "ukr": "Ukrainian", "uk": "Ukrainian", "ukrainian": "Ukrainian",
 }
+_TITLE_LANGUAGE_QUALIFIERS = {
+    "audio", "dub", "dubbed", "dual", "multi", "language", "languages",
+    "web", "dl", "rip", "hdr", "sdr", "bluray", "brrip", "hdtv",
+    "x264", "x265", "h264", "h265", "hevc", "uhd", "hd", "sd",
+}
+_TITLE_SUBTITLE_MARKERS = {"sub", "subs", "subtitle", "subtitles", "subbed", "vostfr", "vost"}
 _CHUNK = 256 * 1024
 _worker: threading.Thread | None = None
 _worker_guard = threading.Lock()
@@ -204,6 +210,81 @@ def _audio_languages(*sources):
     return ", ".join(found[:8]) or None
 
 
+def _title_listing_languages(title):
+    """Read language tags in delimited title segments; leave prose unclassified."""
+    if not isinstance(title, str):
+        return None
+    found = []
+
+    def accept(segment, *, bracketed=False):
+        tokens = re.findall(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)?|\d{3,4}[pP]|\d+[kK]", segment)
+        if not tokens or len(tokens) > 12:
+            return
+        if any(token.casefold() in _TITLE_SUBTITLE_MARKERS for token in tokens):
+            return
+        names = []
+        for token in tokens:
+            key = token.casefold().split("-", 1)[0]
+            language = _AUDIO_LANGUAGE_NAMES.get(key)
+            if language:
+                if not bracketed and len(key) == 2 and token != token.upper():
+                    return
+                if language not in names:
+                    names.append(language)
+            elif key not in _TITLE_LANGUAGE_QUALIFIERS and not re.fullmatch(r"\d{3,4}p|\d+k", key):
+                return
+        for name in names:
+            if name not in found:
+                found.append(name)
+
+    brackets = re.findall(r"\[([^\[\]]{1,80})\]|\(([^()]{1,80})\)|\{([^{}]{1,80})\}", title)
+    for groups in brackets:
+        accept(next(group for group in groups if group), bracketed=True)
+    segments = re.split(r"\s*(?:\||·)\s*|\s+[-–—]\s+", title)
+    if len(segments) > 1:
+        for segment in segments:
+            accept(segment)
+    return ", ".join(found[:8]) or None
+
+
+def _title_language_hints(title):
+    """Infer likely audio separately from explicitly marked subtitle languages."""
+    listing = _title_listing_languages(title)
+    if not isinstance(title, str):
+        return listing, None
+    bracketed = re.findall(r"\[([^\[\]]{1,80})\]|\(([^()]{1,80})\)|\{([^{}]{1,80})\}", title)
+    groups = [next(group for group in match if group) for match in bracketed]
+    subtitles = []
+    for group in groups:
+        tokens = re.findall(r"[A-Za-z]+", group)
+        if not any(token.casefold() in _TITLE_SUBTITLE_MARKERS for token in tokens):
+            continue
+        for token in tokens:
+            language = _AUDIO_LANGUAGE_NAMES.get(token.casefold())
+            if language and language not in subtitles:
+                subtitles.append(language)
+    original = []
+    if subtitles:
+        for group in groups:
+            code = group.strip().casefold()
+            # JP is an ISO 3166 country code; Japanese is ja (or jpn in ISO 639-2).
+            language = _AUDIO_LANGUAGE_NAMES.get(code)
+            if language and language not in subtitles and language not in original:
+                original.append(language)
+    if original:
+        return ", ".join(original[:8]), ", ".join(subtitles[:8])
+    if listing and subtitles:
+        audio = [name for name in listing.split(", ") if name not in subtitles]
+        listing = ", ".join(audio) or None
+    return listing, ", ".join(subtitles[:8]) or None
+
+
+def _public_vod_row(row):
+    result = dict(row)
+    result["title_audio_languages"], result["title_subtitle_languages"] = _title_language_hints(result["title"])
+    return result
+
+
 class VodProvider:
     """Use the configured account gate and host fallback for deliberate metadata reads."""
 
@@ -349,7 +430,7 @@ def catalog(conn, *, kind="all", query="", category_id="", limit=50, offset=0):
     columns = {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_items)")}
     details = ",".join(f"i.{name}" if name in columns else f"NULL AS {name}"
                        for name in ("size_bytes", "resolution", "audio_languages"))
-    items = [dict(r) for r in conn.execute(
+    items = [_public_vod_row(r) for r in conn.execute(
         f"SELECT i.kind,i.item_id,i.category_id,i.title,i.extension,{details},c.name AS category_name FROM xtream_vod_items i JOIN xtream_vod_categories c ON c.kind=i.kind AND c.category_id=i.category_id "
         + where + " ORDER BY i.title,i.item_id LIMIT ? OFFSET ?", (*args, limit, offset))]
     categories = [dict(r) for r in conn.execute("SELECT * FROM xtream_vod_categories ORDER BY kind,name")]
@@ -366,7 +447,7 @@ def episodes(conn, series_id):
     columns = {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_episodes)")}
     details = ",".join(name if name in columns else f"NULL AS {name}"
                        for name in ("size_bytes", "resolution", "audio_languages"))
-    return [dict(r) for r in conn.execute(
+    return [_public_vod_row(r) for r in conn.execute(
         f"SELECT episode_id,season,episode,title,extension,{details} FROM xtream_vod_episodes WHERE series_id=? ORDER BY season,episode,episode_id", (series_id,))]
 
 

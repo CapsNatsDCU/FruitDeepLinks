@@ -143,6 +143,47 @@ class VodTests(unittest.TestCase):
             self.assertIn("resolution", {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_episodes)")})
             self.assertIn("audio_languages", {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_items)")})
 
+    def test_cached_titles_expose_language_tags_without_provider_requests(self):
+        examples = {
+            "EN - Blade Runner 2049": "English",
+            "DE - Queen's Blade (2009) (JP) (Ger Sub)": "German",
+            "Movie [ENG + SPA] [1080p]": "English, Spanish",
+            "Film | FR": "French",
+            "Movie [English subtitles]": None,
+            "Movie (Ger Sub)": None,
+            "NF - Blade: Trinity": None,
+            "The English Patient": None,
+            "It": None,
+        }
+        for title, expected in examples.items():
+            with self.subTest(title=title):
+                self.assertEqual(vod._title_listing_languages(title), expected)
+        self.assertEqual(vod._title_language_hints("EN - Blade Runner 2049"), ("English", None))
+        self.assertEqual(vod._title_language_hints("DE - Queen's Blade (2009) (JP) (Ger Sub)"),
+                         (None, "German"))
+        self.assertEqual(vod._title_language_hints("DE - Queen's Blade (2009) (JA) (Ger Sub)"),
+                         ("Japanese", "German"))
+        self.assertEqual(vod._title_language_hints("DE - Anime (Ger Sub)"), (None, "German"))
+        self.assertEqual(vod._title_language_hints("NF - Blade: Trinity"), (None, None))
+        self.populate()
+        with self.conn() as conn:
+            conn.execute("UPDATE xtream_vod_items SET title=?,search_title=? WHERE kind='movie' AND item_id='123'",
+                         ("EN - Blade Runner 2049", "en - blade runner 2049"))
+            conn.execute("UPDATE xtream_vod_items SET title=?,search_title=? WHERE kind='series' AND item_id='456'",
+                         ("DE - Queen's Blade (2009) (JP) (Ger Sub)", "de - queen's blade (2009) (jp) (ger sub)"))
+            conn.commit()
+        with patch.dict(os.environ, {"FRUIT_DB_PATH": str(self.db)}), \
+             patch.object(vod.VodProvider, "fetch", side_effect=AssertionError("provider traffic")):
+            client = create_app().test_client()
+            items = client.get("/api/xtream/vod/catalog?q=blade").get_json()["items"]
+            episode = client.get("/api/xtream/vod/series/456/episodes").get_json()["episodes"][0]
+        by_kind = {item["kind"]: item for item in items}
+        self.assertEqual(by_kind["movie"]["title_audio_languages"], "English")
+        self.assertIsNone(by_kind["series"]["title_audio_languages"])
+        self.assertEqual(by_kind["series"]["title_subtitle_languages"], "German")
+        self.assertIsNone(episode["title_audio_languages"])
+        self.assertEqual(episode["audio_languages"], "English")
+
     def test_movie_details_read_is_explicit_and_kept_on_catalog_refresh(self):
         self.populate()
         with self.conn() as conn:
