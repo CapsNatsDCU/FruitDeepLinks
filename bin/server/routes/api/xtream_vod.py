@@ -94,7 +94,40 @@ def cancel_download(job_id):
     try:
         with get_conn() as conn:
             if not vod.cancel_job(conn, job_id):
-                return jsonify(status="error", message="No active download with that ID"), 404
+                return jsonify(status="error", message="No removable download with that ID"), 404
         return jsonify(status="success")
+    except Exception as exc:
+        return _error(exc)
+
+
+@bp.route("/api/xtream/vod/downloads/stage", methods=["POST"])
+def stage_download():
+    if not db_exists():
+        return jsonify(status="error", message="Database not found"), 404
+    try:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {"kind", "item_id"}:
+            raise ValueError("Choose one saved movie or episode")
+        with get_conn() as conn:
+            job_id = vod.stage_download(conn, payload["kind"], payload["item_id"])
+            state = conn.execute("SELECT state FROM xtream_vod_jobs WHERE id=?", (job_id,)).fetchone()[0]
+        return jsonify(status="success", job_id=job_id, state=state), 201
+    except Exception as exc:
+        return _error(exc)
+
+
+@bp.route("/api/xtream/vod/downloads/<int:job_id>/start", methods=["POST"])
+def start_download(job_id):
+    if not db_exists():
+        return jsonify(status="error", message="Database not found"), 404
+    try:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {"folder"}:
+            raise ValueError("Choose Movies or TV Shows")
+        with get_conn() as conn:
+            if not vod.start_staged_download(conn, job_id, payload["folder"]):
+                return jsonify(status="error", message="Download is no longer waiting to start"), 409
+        vod.ensure_worker()
+        return jsonify(status="success", job_id=job_id), 202
     except Exception as exc:
         return _error(exc)

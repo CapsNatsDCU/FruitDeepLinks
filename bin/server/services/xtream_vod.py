@@ -301,16 +301,12 @@ def _idle_timeout():
 def list_jobs(conn):
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='xtream_vod_jobs'").fetchone():
         return []
-    return [dict(r) for r in conn.execute("SELECT * FROM xtream_vod_jobs ORDER BY id DESC LIMIT 100")]
+    return [dict(r) for r in conn.execute("SELECT * FROM xtream_vod_jobs ORDER BY CASE WHEN state='staged' THEN 0 ELSE 1 END,id DESC LIMIT 100")]
 
 
-def queue_download(conn, kind, item_id, folder=None):
+def _saved_download(conn, kind, item_id):
     if not isinstance(kind, str) or kind not in {"movie", "episode"}:
         raise ValueError("Choose a movie or episode")
-    folder = ("movies" if kind == "movie" else "tv") if folder is None else folder
-    if not isinstance(folder, str) or folder not in {"movies", "tv"}:
-        raise ValueError("Choose Movies or TV Shows")
-    folder_dir(folder)
     item_id = _valid_id(item_id)
     ensure_schema(conn)
     if kind == "movie":
@@ -323,6 +319,37 @@ def queue_download(conn, kind, item_id, folder=None):
         raise KeyError("Title not found in saved catalog")
     if not row["extension"]:
         raise ValueError("This title has no supported direct-file format")
+    return item_id, row, series_id
+
+
+def stage_download(conn, kind, item_id):
+    item_id, row, series_id = _saved_download(conn, kind, item_id)
+    folder = "movies" if kind == "movie" else "tv"
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute("SELECT id FROM xtream_vod_jobs WHERE kind=? AND item_id=? AND state IN ('staged','pending','running') ORDER BY CASE WHEN state='staged' THEN 0 ELSE 1 END,id DESC LIMIT 1", (kind, item_id)).fetchone()
+        if existing:
+            return existing["id"]
+        return conn.execute("INSERT INTO xtream_vod_jobs(kind,item_id,series_id,title,extension,folder,state) VALUES (?,?,?,?,?,?,'staged')",
+                            (kind, item_id, series_id, row["title"], row["extension"], folder)).lastrowid
+
+
+def start_staged_download(conn, job_id, folder):
+    if not isinstance(folder, str) or folder not in {"movies", "tv"}:
+        raise ValueError("Choose Movies or TV Shows")
+    folder_dir(folder)
+    with conn:
+        result = conn.execute("UPDATE xtream_vod_jobs SET folder=?,state='pending',updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='staged'",
+                              (folder, job_id))
+    return result.rowcount > 0
+
+
+def queue_download(conn, kind, item_id, folder=None):
+    item_id, row, series_id = _saved_download(conn, kind, item_id)
+    folder = ("movies" if kind == "movie" else "tv") if folder is None else folder
+    if not isinstance(folder, str) or folder not in {"movies", "tv"}:
+        raise ValueError("Choose Movies or TV Shows")
+    folder_dir(folder)
     with conn:
         conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute("SELECT id,state,filename FROM xtream_vod_jobs WHERE kind=? AND item_id=? AND folder=? AND state IN ('pending','running','cancelling','completed') ORDER BY id DESC LIMIT 1", (kind, item_id, folder)).fetchone()
@@ -336,6 +363,9 @@ def cancel_job(conn, job_id):
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='xtream_vod_jobs'").fetchone():
         return False
     with conn:
+        removed = conn.execute("DELETE FROM xtream_vod_jobs WHERE id=? AND state='staged'", (job_id,))
+        if removed.rowcount:
+            return True
         result = conn.execute("UPDATE xtream_vod_jobs SET state=CASE WHEN state='running' THEN 'cancelling' ELSE 'cancelled' END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND state IN ('pending','running')", (job_id,))
     return result.rowcount > 0
 

@@ -175,6 +175,36 @@ class VodTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "one folder name"):
                 vod.folder_dir("tv")
 
+    def test_staged_download_waits_for_start_and_uses_selected_folder(self):
+        self.populate()
+        with patch.dict(os.environ, {"FRUIT_DB_PATH": str(self.db)}), patch.object(vod, "ensure_worker") as worker:
+            client = create_app().test_client()
+            staged = client.post("/api/xtream/vod/downloads/stage", json={"kind": "movie", "item_id": "123"})
+            self.assertEqual(staged.status_code, 201)
+            job_id = staged.get_json()["job_id"]
+            again = client.post("/api/xtream/vod/downloads/stage", json={"kind": "movie", "item_id": "123"})
+            self.assertEqual(again.get_json()["job_id"], job_id)
+            worker.assert_not_called()
+            stopped = threading.Event()
+            stopped.set()
+            vod.run_worker(self.db, stop_event=stopped)
+            with self.conn() as conn:
+                self.assertEqual(conn.execute("SELECT state FROM xtream_vod_jobs WHERE id=?", (job_id,)).fetchone()[0], "staged")
+            invalid = client.post(f"/api/xtream/vod/downloads/{job_id}/start", json={"folder": "../elsewhere"})
+            self.assertEqual(invalid.status_code, 400)
+            started = client.post(f"/api/xtream/vod/downloads/{job_id}/start", json={"folder": "tv"})
+            self.assertEqual(started.status_code, 202)
+            worker.assert_called_once()
+            self.assertEqual(client.post(f"/api/xtream/vod/downloads/{job_id}/start", json={"folder": "movies"}).status_code, 409)
+            already_started = client.post("/api/xtream/vod/downloads/stage", json={"kind": "movie", "item_id": "123"}).get_json()
+            self.assertEqual((already_started["job_id"], already_started["state"]), (job_id, "pending"))
+            episode = client.post("/api/xtream/vod/downloads/stage", json={"kind": "episode", "item_id": "789"})
+            episode_id = episode.get_json()["job_id"]
+            self.assertEqual(client.delete(f"/api/xtream/vod/downloads/{episode_id}").status_code, 200)
+            jobs = client.get("/api/xtream/vod/downloads").get_json()["jobs"]
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual((jobs[0]["state"], jobs[0]["folder"]), ("pending", "tv"))
+
     def test_existing_jobs_keep_original_root_destination(self):
         with self.conn() as conn:
             conn.execute("""CREATE TABLE xtream_vod_jobs (
