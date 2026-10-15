@@ -24,10 +24,13 @@ class FakeProvider:
             "get_series_categories": [{"category_id": "20", "category_name": "Shows"}],
             "get_vod_streams": [{"category_id": "10", "stream_id": "123", "name": "A Film", "container_extension": "mp4",
                                  "size_bytes": "2147483648", "resolution": "1920x1080"}],
+            "get_vod_info": {"movie_data": {"stream_id": 123},
+                             "info": {"audio": [{"language": "eng"}, {"tags": {"language": "spa"}}]}},
             "get_series": [{"category_id": "20", "series_id": "456", "name": "A Show"}],
             "get_series_info": {"episodes": {"1": [{"id": "789", "episode_num": 2,
                                                     "title": "Second Episode", "container_extension": "mkv",
-                                                    "info": {"filesize": "734003200", "video": {"width": 1280, "height": 720}}}]}},
+                                                    "info": {"filesize": "734003200", "video": {"width": 1280, "height": 720},
+                                                             "audio": [{"tags": {"language": "eng"}}]}}]}},
         }
         return values[action]
 
@@ -79,6 +82,7 @@ class VodTests(unittest.TestCase):
             self.assertEqual(vod.episodes(conn, "456")[0]["episode_id"], "789")
             self.assertEqual((vod.episodes(conn, "456")[0]["size_bytes"], vod.episodes(conn, "456")[0]["resolution"]),
                              (734003200, "1280×720"))
+            self.assertEqual(vod.episodes(conn, "456")[0]["audio_languages"], "English")
             movie_job = vod.queue_download(conn, "movie", "123")
             self.assertEqual(movie_job, vod.queue_download(conn, "movie", "123"))
             episode_job = vod.queue_download(conn, "episode", "789")
@@ -109,6 +113,8 @@ class VodTests(unittest.TestCase):
         self.assertIsNone(vod._size_bytes({"size": True}))
         self.assertIsNone(vod._resolution({"resolution": "FHD"}))
         self.assertIsNone(vod._resolution({"width": 0, "height": 1080}))
+        self.assertIsNone(vod._audio_languages({"audio": [{"codec_name": "aac"}], "country": "US"}))
+        self.assertEqual(vod._audio_languages({"audio_languages": "en-US, es-MX, und"}), "English, Spanish")
         with self.conn() as conn:
             conn.executescript("""
                 CREATE TABLE xtream_vod_items (
@@ -131,9 +137,38 @@ class VodTests(unittest.TestCase):
             """)
             self.assertIsNone(vod.catalog(conn)["items"][0]["size_bytes"])
             self.assertIsNone(vod.episodes(conn, "456")[0]["resolution"])
+            self.assertIsNone(vod.catalog(conn)["items"][0]["audio_languages"])
             vod.ensure_schema(conn)
             self.assertIn("size_bytes", {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_items)")})
             self.assertIn("resolution", {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_episodes)")})
+            self.assertIn("audio_languages", {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_items)")})
+
+    def test_movie_details_read_is_explicit_and_kept_on_catalog_refresh(self):
+        self.populate()
+        with self.conn() as conn:
+            self.assertIsNone(vod.catalog(conn, query="film")["items"][0]["audio_languages"])
+        with patch.dict(os.environ, {"FRUIT_DB_PATH": str(self.db)}), \
+             patch.object(vod.VodProvider, "fetch", side_effect=FakeProvider().fetch) as fetch:
+            client = create_app().test_client()
+            details = client.post("/api/xtream/vod/movie/123/details/refresh")
+            self.assertEqual(details.status_code, 200)
+            self.assertEqual(details.get_json()["audio_languages"], "English, Spanish")
+            self.assertEqual(client.get("/api/xtream/vod/catalog?q=film").get_json()["items"][0]["audio_languages"],
+                             "English, Spanish")
+            fetch.assert_called_once_with("get_vod_info", vod_id="123")
+        with patch.object(vod, "load_accounts", return_value=[]):
+            vod.refresh_catalog(FakeProvider(), self.db)
+        with self.conn() as conn:
+            self.assertEqual(vod.catalog(conn, query="film")["items"][0]["audio_languages"], "English, Spanish")
+        class WrongMovie(FakeProvider):
+            def fetch(self, action, **params):
+                if action == "get_vod_info":
+                    return {"movie_data": {"stream_id": 999}, "info": {"audio_language": "French"}}
+                return super().fetch(action, **params)
+        with self.assertRaisesRegex(Exception, "different movie"):
+            vod.refresh_movie_details("123", WrongMovie(), self.db)
+        with self.conn() as conn:
+            self.assertEqual(vod.catalog(conn, query="film")["items"][0]["audio_languages"], "English, Spanish")
 
     def test_download_writes_complete_file_and_releases_lease(self):
         self.populate()
@@ -192,6 +227,7 @@ class VodTests(unittest.TestCase):
         self.assertEqual(episodes["episodes"][0]["episode_id"], "789")
         self.assertEqual(episodes["episodes"][0]["size_bytes"], 734003200)
         self.assertEqual(episodes["episodes"][0]["resolution"], "1280×720")
+        self.assertEqual(episodes["episodes"][0]["audio_languages"], "English")
         self.assertEqual(jobs["jobs"], [])
         self.assertEqual(jobs["destinations"]["movies"], str(vod.folder_dir("movies")))
         self.assertEqual(jobs["destinations"]["tv"], str(vod.folder_dir("tv")))

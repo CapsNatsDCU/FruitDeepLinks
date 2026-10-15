@@ -45,6 +45,17 @@ def refresh_catalog():
         return _error(exc, 502)
 
 
+@bp.route("/api/xtream/vod/movie/<item_id>/details/refresh", methods=["POST"])
+def refresh_movie_details(item_id):
+    if not db_exists():
+        return jsonify(status="error", message="Database not found"), 404
+    try:
+        details = vod.refresh_movie_details(item_id)
+        return jsonify(status="success", **details)
+    except Exception as exc:
+        return _error(exc, 502)
+
+
 @bp.route("/api/xtream/vod/series/<series_id>/episodes")
 def get_episodes(series_id):
     if not db_exists():

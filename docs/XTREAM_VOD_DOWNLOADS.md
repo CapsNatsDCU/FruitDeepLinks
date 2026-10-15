@@ -2,7 +2,7 @@
 
 Open **Movies & TV** at `/movies-tv`. **Refresh Catalog** deliberately reads the provider's movie and series lists and saves a local snapshot. Search, category browsing, episode browsing, and queue status use SQLite without provider traffic. **Load Episodes** reads only the selected series and saves its episode list. A failed catalog or episode refresh keeps the last successful snapshot.
 
-Movie search results and saved episode rows show file size and resolution when those values are present in the provider response. The standard Xtream list may omit both fields, so the UI says **Size unavailable** or **Resolution unavailable** rather than estimating from duration, bitrate, or title text. Refresh Catalog updates movie details; Load Episodes updates the selected show's episode details. Existing saved rows without these fields remain browsable and show the unavailable labels until refreshed.
+Movie search results and saved episode rows show file size, resolution, and audio language when those values are present in provider metadata. The standard Xtream list may omit them, so the UI shows an unavailable label rather than guessing from duration, bitrate, title, or country. **Check details** makes one explicit `get_vod_info` request for a movie and saves any additional fields returned; **Load Episodes** updates the selected show's episode details. Browsing the saved results does not contact the provider. Known details remain cached across catalog refreshes when the item ID, title, and format match. Audio track tags may list more than one language, or no language at all.
 
 Choose **Download movie** or **Download episode** to add a title to **NAS downloads**. This creates a saved, staged job and does not contact the provider or begin a transfer. In NAS downloads, choose **Movies** or **TV Shows** and press **Start**. Movies default to Movies and episodes default to TV Shows; either choice can be changed before starting. **Remove** discards a staged job. The selected folder is saved with the started job and shown in the download list. The server accepts only IDs, formats, and folder choices from its saved catalog and allowed destinations, constructs the provider URL with deployment secrets, and never sends the authenticated URL to the browser. One worker runs one started job at a time. It acquires a normal Xtream pool lease for the entire transfer, so it waits for a free account and appears alongside other media leases. Cancel requests a stop; an idle upstream read may delay cleanup until its timeout. The worker then removes the partial file. Completed files are renamed atomically from `.part`; interrupted jobs return to the queue after a server restart and restart from the beginning.
 
@@ -35,6 +35,7 @@ API routes:
 
 - `GET /api/xtream/vod/catalog` — saved titles, categories, and pagination (`kind`, `q`, `category_id`, `limit`, `offset`).
 - `POST /api/xtream/vod/catalog/refresh` — explicit provider catalog refresh.
+- `POST /api/xtream/vod/movie/<id>/details/refresh` — explicit provider detail read for one saved movie.
 - `GET /api/xtream/vod/series/<id>/episodes` — saved episodes.
 - `POST /api/xtream/vod/series/<id>/episodes/refresh` — explicit provider episode refresh.
 - `GET /api/xtream/vod/downloads` — last 100 jobs, download root, and Movies/TV Shows destinations.

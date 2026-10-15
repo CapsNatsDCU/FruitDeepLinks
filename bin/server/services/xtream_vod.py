@@ -25,6 +25,31 @@ _ID = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 _EXTENSIONS = {"mp4", "mkv", "avi", "ts", "mov", "m4v"}
 _PLEX_ID_SUFFIX = re.compile(r"\s+\{(?:tmdb-\d+|tvdb-\d+|imdb-tt\d+)\}\Z", re.IGNORECASE)
 _YEAR_SUFFIX = re.compile(r"\s+\((?:18|19|20|21)\d{2}\)\Z")
+_AUDIO_LANGUAGE_NAMES = {
+    "eng": "English", "en": "English", "english": "English",
+    "spa": "Spanish", "es": "Spanish", "spanish": "Spanish",
+    "fra": "French", "fre": "French", "fr": "French", "french": "French",
+    "deu": "German", "ger": "German", "de": "German", "german": "German",
+    "ita": "Italian", "it": "Italian", "italian": "Italian",
+    "por": "Portuguese", "pt": "Portuguese", "portuguese": "Portuguese",
+    "jpn": "Japanese", "ja": "Japanese", "japanese": "Japanese",
+    "kor": "Korean", "ko": "Korean", "korean": "Korean",
+    "zho": "Chinese", "chi": "Chinese", "zh": "Chinese", "chinese": "Chinese",
+    "hin": "Hindi", "hi": "Hindi", "hindi": "Hindi",
+    "ara": "Arabic", "ar": "Arabic", "arabic": "Arabic",
+    "rus": "Russian", "ru": "Russian", "russian": "Russian",
+    "nld": "Dutch", "dut": "Dutch", "nl": "Dutch", "dutch": "Dutch",
+    "swe": "Swedish", "sv": "Swedish", "swedish": "Swedish",
+    "dan": "Danish", "da": "Danish", "danish": "Danish",
+    "nor": "Norwegian", "no": "Norwegian", "norwegian": "Norwegian",
+    "fin": "Finnish", "fi": "Finnish", "finnish": "Finnish",
+    "pol": "Polish", "pl": "Polish", "polish": "Polish",
+    "tur": "Turkish", "tr": "Turkish", "turkish": "Turkish",
+    "heb": "Hebrew", "he": "Hebrew", "hebrew": "Hebrew",
+    "tha": "Thai", "th": "Thai", "thai": "Thai",
+    "vie": "Vietnamese", "vi": "Vietnamese", "vietnamese": "Vietnamese",
+    "ukr": "Ukrainian", "uk": "Ukrainian", "ukrainian": "Ukrainian",
+}
 _CHUNK = 256 * 1024
 _worker: threading.Thread | None = None
 _worker_guard = threading.Lock()
@@ -43,14 +68,14 @@ def ensure_schema(conn):
         CREATE TABLE IF NOT EXISTS xtream_vod_items (
             kind TEXT NOT NULL, item_id TEXT NOT NULL, category_id TEXT NOT NULL,
             title TEXT NOT NULL, search_title TEXT NOT NULL, extension TEXT,
-            size_bytes INTEGER, resolution TEXT,
+            size_bytes INTEGER, resolution TEXT, audio_languages TEXT,
             PRIMARY KEY(kind, item_id)
         );
         CREATE INDEX IF NOT EXISTS idx_xtream_vod_search ON xtream_vod_items(kind, search_title);
         CREATE TABLE IF NOT EXISTS xtream_vod_episodes (
             series_id TEXT NOT NULL, episode_id TEXT NOT NULL, season INTEGER NOT NULL,
             episode INTEGER NOT NULL, title TEXT NOT NULL, extension TEXT,
-            size_bytes INTEGER, resolution TEXT,
+            size_bytes INTEGER, resolution TEXT, audio_languages TEXT,
             PRIMARY KEY(series_id, episode_id)
         );
         CREATE TABLE IF NOT EXISTS xtream_vod_jobs (
@@ -75,7 +100,8 @@ def ensure_schema(conn):
             conn.execute(f"ALTER TABLE xtream_vod_jobs ADD COLUMN {name} {kind}")
     for table in ("xtream_vod_items", "xtream_vod_episodes"):
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-        for name, kind in (("size_bytes", "INTEGER"), ("resolution", "TEXT")):
+        for name, kind in (("size_bytes", "INTEGER"), ("resolution", "TEXT"),
+                           ("audio_languages", "TEXT")):
             if name not in columns:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
 
@@ -137,6 +163,47 @@ def _resolution(*sources):
     return None
 
 
+def _audio_languages(*sources):
+    """Read explicit audio track tags, not a title or the content's country."""
+    found = []
+
+    def add(value):
+        if not isinstance(value, str):
+            return
+        for part in re.split(r"[,;/]", value)[:8]:
+            code = part.strip().lower().replace("_", "-").split("-", 1)[0]
+            language = _AUDIO_LANGUAGE_NAMES.get(code)
+            if language and language not in found:
+                found.append(language)
+
+    def tracks(value):
+        if isinstance(value, str):
+            add(value)
+        elif isinstance(value, dict):
+            add(value.get("language"))
+            add(value.get("lang"))
+            tags = value.get("tags")
+            if isinstance(tags, dict):
+                add(tags.get("language"))
+            for key in ("tracks", "streams"):
+                nested = value.get(key)
+                if isinstance(nested, list):
+                    tracks(nested)
+        elif isinstance(value, list):
+            for track in value[:16]:
+                if not isinstance(track, dict) or track.get("codec_type") in (None, "audio"):
+                    tracks(track)
+
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        tracks(source.get("audio_language"))
+        tracks(source.get("audio_languages"))
+        tracks(source.get("audio"))
+        tracks(source.get("audio_tracks"))
+    return ", ".join(found[:8]) or None
+
+
 class VodProvider:
     """Use the configured account gate and host fallback for deliberate metadata reads."""
 
@@ -144,7 +211,7 @@ class VodProvider:
         self.db_path = db_path or resolve_db_path()
 
     def fetch(self, action, **params):
-        if action not in {"get_vod_categories", "get_vod_streams", "get_series_categories", "get_series", "get_series_info"}:
+        if action not in {"get_vod_categories", "get_vod_streams", "get_vod_info", "get_series_categories", "get_series", "get_series_info"}:
             raise ValueError("Unsupported VOD action")
         for value in params.values():
             _valid_id(value)
@@ -162,7 +229,7 @@ class VodProvider:
                                 action, category_id=params.get("category_id"),
                                 extra_params={k: v for k, v in params.items() if k != "category_id"},
                             )
-                            valid = isinstance(payload, dict) if action == "get_series_info" else isinstance(payload, list)
+                            valid = isinstance(payload, dict) if action in {"get_series_info", "get_vod_info"} else isinstance(payload, list)
                             if valid:
                                 record_host_success(gate_fd, host_index)
                                 return payload
@@ -212,7 +279,8 @@ def _items(rows, kind, categories, accounts):
         result[item_id] = (kind, item_id, category_id, title, title.casefold(),
                            _extension(row.get("container_extension")) if kind == "movie" else None,
                            _size_bytes(row, row.get("info")) if kind == "movie" else None,
-                           _resolution(row, row.get("info")) if kind == "movie" else None)
+                           _resolution(row, row.get("info")) if kind == "movie" else None,
+                           _audio_languages(row, row.get("info")) if kind == "movie" else None)
     return result
 
 
@@ -242,10 +310,19 @@ def refresh_catalog(provider=None, db_path=None):
         raise XtreamError("Provider returned an incomplete VOD catalog; saved catalog was kept")
     with get_conn(db_path) as conn, conn:
         ensure_schema(conn)
+        previous = {(row["kind"], row["item_id"]): row for row in conn.execute(
+            "SELECT kind,item_id,title,extension,size_bytes,resolution,audio_languages FROM xtream_vod_items")}
+        updated_items = []
+        for item in [*movies.values(), *series.values()]:
+            old = previous.get((item[0], item[1]))
+            if item[0] == "movie" and old and old["title"] == item[3] and old["extension"] == item[5]:
+                item = (*item[:6], *(item[index] or old[name] for index, name in (
+                    (6, "size_bytes"), (7, "resolution"), (8, "audio_languages"))))
+            updated_items.append(item)
         conn.execute("DELETE FROM xtream_vod_items")
         conn.execute("DELETE FROM xtream_vod_categories")
         conn.executemany("INSERT INTO xtream_vod_categories VALUES (?,?,?)", [*movie_categories.values(), *series_categories.values()])
-        conn.executemany("INSERT INTO xtream_vod_items (kind,item_id,category_id,title,search_title,extension,size_bytes,resolution) VALUES (?,?,?,?,?,?,?,?)", [*movies.values(), *series.values()])
+        conn.executemany("INSERT INTO xtream_vod_items (kind,item_id,category_id,title,search_title,extension,size_bytes,resolution,audio_languages) VALUES (?,?,?,?,?,?,?,?,?)", updated_items)
         conn.execute("DELETE FROM xtream_vod_episodes WHERE series_id NOT IN (SELECT item_id FROM xtream_vod_items WHERE kind='series')")
         conn.execute("INSERT INTO xtream_vod_state VALUES (1,datetime('now'),?,?) ON CONFLICT(id) DO UPDATE SET refreshed_at=excluded.refreshed_at,movie_count=excluded.movie_count,series_count=excluded.series_count",
                      (len(movies), len(series)))
@@ -271,7 +348,7 @@ def catalog(conn, *, kind="all", query="", category_id="", limit=50, offset=0):
     total = conn.execute("SELECT count(*) FROM xtream_vod_items i " + where, args).fetchone()[0]
     columns = {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_items)")}
     details = ",".join(f"i.{name}" if name in columns else f"NULL AS {name}"
-                       for name in ("size_bytes", "resolution"))
+                       for name in ("size_bytes", "resolution", "audio_languages"))
     items = [dict(r) for r in conn.execute(
         f"SELECT i.kind,i.item_id,i.category_id,i.title,i.extension,{details},c.name AS category_name FROM xtream_vod_items i JOIN xtream_vod_categories c ON c.kind=i.kind AND c.category_id=i.category_id "
         + where + " ORDER BY i.title,i.item_id LIMIT ? OFFSET ?", (*args, limit, offset))]
@@ -288,9 +365,40 @@ def episodes(conn, series_id):
         raise KeyError("Series not found in saved catalog")
     columns = {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_episodes)")}
     details = ",".join(name if name in columns else f"NULL AS {name}"
-                       for name in ("size_bytes", "resolution"))
+                       for name in ("size_bytes", "resolution", "audio_languages"))
     return [dict(r) for r in conn.execute(
         f"SELECT episode_id,season,episode,title,extension,{details} FROM xtream_vod_episodes WHERE series_id=? ORDER BY season,episode,episode_id", (series_id,))]
+
+
+def refresh_movie_details(item_id, provider=None, db_path=None):
+    item_id = _valid_id(item_id)
+    db_path = db_path or resolve_db_path()
+    with get_conn(db_path) as conn:
+        if not conn.execute("SELECT 1 FROM xtream_vod_items WHERE kind='movie' AND item_id=?", (item_id,)).fetchone():
+            raise KeyError("Movie not found in saved catalog")
+    payload = (provider or VodProvider(db_path)).fetch("get_vod_info", vod_id=item_id)
+    if not isinstance(payload, dict) or not isinstance(payload.get("info"), dict):
+        raise XtreamError("Provider returned no movie details; saved details were kept")
+    movie_data = payload.get("movie_data") if isinstance(payload.get("movie_data"), dict) else {}
+    if movie_data.get("stream_id") is not None and str(movie_data["stream_id"]) != item_id:
+        raise XtreamError("Provider returned details for a different movie; saved details were kept")
+    info = payload["info"]
+    size = _size_bytes(info, movie_data)
+    resolution = _resolution(info, movie_data)
+    audio_languages = _audio_languages(info, movie_data)
+    with get_conn(db_path) as conn, conn:
+        ensure_schema(conn)
+        changed = conn.execute("""
+            UPDATE xtream_vod_items SET
+                size_bytes=COALESCE(?,size_bytes),
+                resolution=COALESCE(?,resolution),
+                audio_languages=COALESCE(?,audio_languages)
+            WHERE kind='movie' AND item_id=?
+        """, (size, resolution, audio_languages, item_id))
+        if not changed.rowcount:
+            raise KeyError("Movie not found in saved catalog")
+        saved = conn.execute("SELECT size_bytes,resolution,audio_languages FROM xtream_vod_items WHERE kind='movie' AND item_id=?", (item_id,)).fetchone()
+    return {"item_id": item_id, **dict(saved)}
 
 
 def refresh_episodes(series_id, provider=None, db_path=None):
@@ -324,13 +432,24 @@ def refresh_episodes(series_id, provider=None, db_path=None):
             ext = _extension(row.get("container_extension") or info.get("container_extension"))
             title = safe_value(str(row.get("title") or f"Episode {episode}")[:300], accounts)
             entries[episode_id] = (series_id, episode_id, season, episode, title, ext,
-                                   _size_bytes(row, info), _resolution(row, info))
+                                   _size_bytes(row, info), _resolution(row, info),
+                                   _audio_languages(row, info))
     if not entries:
         raise XtreamError("Provider returned no usable episodes; saved episodes were kept")
     with get_conn(db_path) as conn, conn:
         ensure_schema(conn)
+        previous = {row["episode_id"]: row for row in conn.execute(
+            "SELECT episode_id,season,episode,title,extension,size_bytes,resolution,audio_languages FROM xtream_vod_episodes WHERE series_id=?",
+            (series_id,))}
+        updated_entries = []
+        for entry in entries.values():
+            old = previous.get(entry[1])
+            if old and (old["season"], old["episode"], old["title"], old["extension"]) == entry[2:6]:
+                entry = (*entry[:6], *(entry[index] or old[name] for index, name in (
+                    (6, "size_bytes"), (7, "resolution"), (8, "audio_languages"))))
+            updated_entries.append(entry)
         conn.execute("DELETE FROM xtream_vod_episodes WHERE series_id=?", (series_id,))
-        conn.executemany("INSERT INTO xtream_vod_episodes (series_id,episode_id,season,episode,title,extension,size_bytes,resolution) VALUES (?,?,?,?,?,?,?,?)", entries.values())
+        conn.executemany("INSERT INTO xtream_vod_episodes (series_id,episode_id,season,episode,title,extension,size_bytes,resolution,audio_languages) VALUES (?,?,?,?,?,?,?,?,?)", updated_entries)
     return len(entries)
 
 
