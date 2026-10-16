@@ -237,8 +237,12 @@ class VodTests(unittest.TestCase):
             def status(self): return {"accounts": [{"available": 1}]}
             def acquire(self, *args):
                 return lease
-        vod._run_job(self.db, job, Pool())
-        vod._run_job(self.db, episode_job, Pool())
+        original_umask = os.umask(0o022)
+        try:
+            vod._run_job(self.db, job, Pool())
+            vod._run_job(self.db, episode_job, Pool())
+        finally:
+            os.umask(original_umask)
         with self.conn() as conn:
             finished = dict(conn.execute("SELECT * FROM xtream_vod_jobs WHERE id=?", (job_id,)).fetchone())
             episode_finished = dict(conn.execute("SELECT * FROM xtream_vod_jobs WHERE id=?", (episode_id,)).fetchone())
@@ -246,10 +250,12 @@ class VodTests(unittest.TestCase):
         self.assertEqual(Path(finished["filename"]).read_bytes(), MediaHandler.body)
         self.assertEqual(Path(finished["filename"]).parent, vod.folder_dir("movies"))
         self.assertEqual(Path(finished["filename"]).name, "A Film.mp4")
+        self.assertEqual(Path(finished["filename"]).stat().st_mode & 0o777, 0o644)
         self.assertEqual(episode_finished["state"], "completed")
         self.assertEqual(Path(episode_finished["filename"]).parent, vod.folder_dir("tv") / "A Show" / "Season 01")
         self.assertIn("A Show - s01e02 - Second Episode", Path(episode_finished["filename"]).name)
         self.assertEqual(Path(episode_finished["filename"]).read_bytes(), MediaHandler.body)
+        self.assertEqual(Path(episode_finished["filename"]).stat().st_mode & 0o777, 0o644)
         self.assertEqual(lease.outcome, "upstream_eof")
         self.assertFalse(list(vod.folder_dir("movies").glob("*.part")))
 

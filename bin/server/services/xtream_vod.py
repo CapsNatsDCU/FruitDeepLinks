@@ -807,7 +807,6 @@ def _run_job(db_path, job, pool):
                 last_update = time.monotonic()
                 try:
                     with partial.open("xb") as output:
-                        os.chmod(partial, 0o600)
                         for chunk in chunks:
                             if _cancelled(db_path, job["id"]):
                                 outcome = "client_closed"
