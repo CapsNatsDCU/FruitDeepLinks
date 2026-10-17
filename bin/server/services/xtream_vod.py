@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import re
 import sqlite3
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -57,6 +59,7 @@ _TITLE_LANGUAGE_QUALIFIERS = {
 }
 _TITLE_SUBTITLE_MARKERS = {"sub", "subs", "subtitle", "subtitles", "subbed", "vostfr", "vost"}
 _CHUNK = 256 * 1024
+_DETAIL_SAMPLE_BYTES = 4 * 1024 * 1024
 _worker: threading.Thread | None = None
 _worker_guard = threading.Lock()
 
@@ -150,7 +153,14 @@ def _resolution(*sources):
         if not isinstance(source, dict):
             continue
         video = source.get("video")
-        for details in (video, source):
+        if isinstance(video, list):
+            videos = [entry for entry in video if isinstance(entry, dict)
+                      and entry.get("codec_type") in (None, "video")]
+        elif isinstance(video, str):
+            videos = [{"resolution": video}]
+        else:
+            videos = [video]
+        for details in (*videos, source):
             if not isinstance(details, dict):
                 continue
             width, height = details.get("width"), details.get("height")
@@ -170,6 +180,99 @@ def _resolution(*sources):
                 if re.fullmatch(r"(?:480|576|720|1080|1440|2160|4320)p|[248]K", label, re.IGNORECASE):
                     return label.upper() if label.lower().endswith("k") else label.lower()
     return None
+
+
+def _sample_resolution(sample):
+    if not sample:
+        return None
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-probesize", str(_DETAIL_SAMPLE_BYTES),
+             "-analyzeduration", "5000000", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "json", "pipe:0"],
+            input=sample, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=8, check=False,
+        )
+        if result.returncode:
+            return None
+        streams = json.loads(result.stdout).get("streams", [])
+        return _resolution(*(stream for stream in streams if isinstance(stream, dict)))
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+        return None
+
+
+def _response_media_size(response):
+    if response.status_code == 206:
+        header = response.headers.get("Content-Range", "")
+        match = re.fullmatch(r"bytes\s+0-\d+/(\d+)", header.strip(), re.IGNORECASE)
+        return _size_bytes({"size_bytes": match[1]}) if match else None
+    if response.status_code == 200:
+        return _size_bytes({"content_length": response.headers.get("Content-Length")})
+    return None
+
+
+def _probe_movie_stream(item_id, extension, db_path, *, need_size, need_resolution):
+    """Read at most a small media prefix under a pool lease; never expose its URL to ffprobe."""
+    pool = XtreamPool(db_path)
+    try:
+        lease = pool.acquire(item_id, "vod_details_probe")
+    except PoolUnavailable:
+        return None, None, "busy"
+    sample = b""
+    size = None
+    outcome = "client_closed"
+    try:
+        for host_index, config in host_configs(lease.account.config, lease.gate_fd):
+            url = _media_url(config, {"kind": "movie", "item_id": item_id, "extension": extension})
+            try:
+                with configure_session(requests.Session()) as session:
+                    with session.get(url, stream=True, timeout=(5, 6),
+                                     headers={"Range": f"bytes=0-{_DETAIL_SAMPLE_BYTES - 1}",
+                                              "Accept-Encoding": "identity"}) as response:
+                        if response.status_code in {401, 403}:
+                            response.close()
+                            source = CurlStream(url, 6, lease.fd, lease.gate_fd)
+                            try:
+                                chunks = source.chunks()
+                                sample = b"".join(_limited_media_chunks(chunks))
+                            finally:
+                                source.close()
+                        elif response.status_code in {200, 206} and not response.headers.get(
+                                "Content-Type", "").lower().startswith(("text/", "application/json")):
+                            chunks = response.iter_content(chunk_size=64 * 1024)
+                            sample = b"".join(_limited_media_chunks(chunks))
+                            size = _response_media_size(response) if need_size else None
+                        else:
+                            continue
+                    if sample:
+                        record_host_success(lease.gate_fd, host_index)
+                        break
+            except (OSError, requests.RequestException, ValueError):
+                continue
+        else:
+            return None, None, "unavailable"
+    finally:
+        lease.release(outcome)
+    if not sample:
+        return None, None, "unavailable"
+    return size, _sample_resolution(sample) if need_resolution else None, "checked"
+
+
+def _limited_media_chunks(chunks):
+    remaining = _DETAIL_SAMPLE_BYTES
+    deadline = time.monotonic() + 12
+    for chunk in chunks:
+        if time.monotonic() >= deadline:
+            return
+        if not chunk:
+            continue
+        if remaining == _DETAIL_SAMPLE_BYTES and chunk.lstrip().lower().startswith(
+                (b"#extm3u", b"<html", b"<!doctype", b"{", b"[")):
+            return
+        yield chunk[:remaining]
+        remaining -= len(chunk[:remaining])
+        if remaining <= 0:
+            return
 
 
 def _audio_languages(*sources):
@@ -458,7 +561,9 @@ def refresh_movie_details(item_id, provider=None, db_path=None):
     item_id = _valid_id(item_id)
     db_path = db_path or resolve_db_path()
     with get_conn(db_path) as conn:
-        if not conn.execute("SELECT 1 FROM xtream_vod_items WHERE kind='movie' AND item_id=?", (item_id,)).fetchone():
+        existing = conn.execute("SELECT size_bytes,resolution,extension FROM xtream_vod_items "
+                                "WHERE kind='movie' AND item_id=?", (item_id,)).fetchone()
+        if not existing:
             raise KeyError("Movie not found in saved catalog")
     payload = (provider or VodProvider(db_path)).fetch("get_vod_info", vod_id=item_id)
     if not isinstance(payload, dict) or not isinstance(payload.get("info"), dict):
@@ -470,6 +575,15 @@ def refresh_movie_details(item_id, provider=None, db_path=None):
     size = _size_bytes(info, movie_data)
     resolution = _resolution(info, movie_data)
     audio_languages = _audio_languages(info, movie_data)
+    need_size = size is None and existing["size_bytes"] is None
+    need_resolution = resolution is None and existing["resolution"] is None
+    probe_status = "unavailable" if need_size or need_resolution else "not_needed"
+    if (need_size or need_resolution) and existing["extension"]:
+        probed_size, probed_resolution, probe_status = _probe_movie_stream(
+            item_id, existing["extension"], db_path,
+            need_size=need_size, need_resolution=need_resolution)
+        size = size or probed_size
+        resolution = resolution or probed_resolution
     with get_conn(db_path) as conn, conn:
         ensure_schema(conn)
         changed = conn.execute("""
@@ -482,7 +596,7 @@ def refresh_movie_details(item_id, provider=None, db_path=None):
         if not changed.rowcount:
             raise KeyError("Movie not found in saved catalog")
         saved = conn.execute("SELECT size_bytes,resolution,audio_languages FROM xtream_vod_items WHERE kind='movie' AND item_id=?", (item_id,)).fetchone()
-    return {"item_id": item_id, **dict(saved)}
+    return {"item_id": item_id, **dict(saved), "probe_status": probe_status}
 
 
 def refresh_episodes(series_id, provider=None, db_path=None):

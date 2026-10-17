@@ -1,5 +1,7 @@
 import os
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -15,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 from server.services import xtream_vod as vod
 from server.app import create_app
 from xtream_ingest import XtreamClient, XtreamConfig
+from xtream_pool import PoolUnavailable
 
 
 class FakeProvider:
@@ -47,6 +50,20 @@ class MediaHandler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         pass
+
+
+class RangeMediaHandler(MediaHandler):
+    body = b""
+    last_range = None
+
+    def do_GET(self):
+        type(self).last_range = self.headers.get("Range")
+        self.send_response(206)
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Content-Length", str(len(self.body)))
+        self.send_header("Content-Range", f"bytes 0-{len(self.body) - 1}/{len(self.body)}")
+        self.end_headers()
+        self.wfile.write(self.body)
 
 
 class VodTests(unittest.TestCase):
@@ -113,6 +130,9 @@ class VodTests(unittest.TestCase):
         self.assertIsNone(vod._size_bytes({"size": True}))
         self.assertIsNone(vod._resolution({"resolution": "FHD"}))
         self.assertIsNone(vod._resolution({"width": 0, "height": 1080}))
+        self.assertEqual(vod._resolution({"video": [{"codec_type": "audio", "width": 1, "height": 1},
+                                                     {"codec_type": "video", "width": 1920, "height": 1080}]}),
+                         "1920×1080")
         self.assertIsNone(vod._audio_languages({"audio": [{"codec_name": "aac"}], "country": "US"}))
         self.assertEqual(vod._audio_languages({"audio_languages": "en-US, es-MX, und"}), "English, Spanish")
         with self.conn() as conn:
@@ -201,6 +221,72 @@ class VodTests(unittest.TestCase):
             vod.refresh_catalog(FakeProvider(), self.db)
         with self.conn() as conn:
             self.assertEqual(vod.catalog(conn, query="film")["items"][0]["audio_languages"], "English, Spanish")
+
+    def test_check_details_reads_bounded_movie_sample_for_size_and_resolution(self):
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            self.skipTest("ffmpeg and ffprobe are required for media probing")
+        self.populate()
+        with self.conn() as conn:
+            conn.execute("UPDATE xtream_vod_items SET size_bytes=NULL,resolution=NULL "
+                         "WHERE kind='movie' AND item_id='123'")
+            conn.commit()
+        movie = Path(self.tmp.name) / "sample.mp4"
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=320x180:r=1",
+                        "-t", "1", "-c:v", "mpeg4", "-movflags", "+faststart", str(movie)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15)
+        RangeMediaHandler.body = movie.read_bytes()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RangeMediaHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        config = SimpleNamespace(server_url=f"http://127.0.0.1:{server.server_port}", username="u",
+                                 password="p", fallback_server_url=None)
+        class Lease:
+            account = SimpleNamespace(config=config)
+            gate_fd = None
+            fd = -1
+            def release(self, outcome): pass
+        class Pool:
+            def __init__(self, *args): pass
+            def acquire(self, *args): return Lease()
+        with patch.dict(os.environ, {"FRUIT_DB_PATH": str(self.db)}), \
+             patch.object(vod, "XtreamPool", Pool), \
+             patch.object(vod.VodProvider, "fetch", side_effect=FakeProvider().fetch):
+            response = create_app().test_client().post("/api/xtream/vod/movie/123/details/refresh")
+        self.assertEqual(response.status_code, 200)
+        details = response.get_json()
+        self.assertEqual((details["size_bytes"], details["resolution"], details["probe_status"]),
+                         (len(RangeMediaHandler.body), "320×180", "checked"))
+        self.assertEqual(RangeMediaHandler.last_range, f"bytes=0-{vod._DETAIL_SAMPLE_BYTES - 1}")
+        with self.conn() as conn:
+            movie_row = vod.catalog(conn, query="film")["items"][0]
+            self.assertEqual((movie_row["size_bytes"], movie_row["resolution"]),
+                             (len(RangeMediaHandler.body), "320×180"))
+        self.assertEqual(len(b"".join(vod._limited_media_chunks([b"x" * (vod._DETAIL_SAMPLE_BYTES + 1)]))),
+                         vod._DETAIL_SAMPLE_BYTES)
+        fake_response = SimpleNamespace(status_code=206, headers={"Content-Length": "4096"})
+        self.assertIsNone(vod._response_media_size(fake_response))
+
+    def test_check_details_keeps_metadata_when_media_account_is_busy(self):
+        self.populate()
+        with self.conn() as conn:
+            conn.execute("UPDATE xtream_vod_items SET size_bytes=NULL,resolution=NULL "
+                         "WHERE kind='movie' AND item_id='123'")
+            conn.commit()
+        class BusyPool:
+            def __init__(self, *args): pass
+            def acquire(self, *args): raise PoolUnavailable("occupied")
+        with patch.dict(os.environ, {"FRUIT_DB_PATH": str(self.db)}), \
+             patch.object(vod, "XtreamPool", BusyPool), \
+             patch.object(vod.VodProvider, "fetch", side_effect=FakeProvider().fetch):
+            response = create_app().test_client().post("/api/xtream/vod/movie/123/details/refresh")
+        self.assertEqual(response.status_code, 200)
+        details = response.get_json()
+        self.assertEqual(details["probe_status"], "busy")
+        self.assertEqual(details["audio_languages"], "English, Spanish")
+        self.assertIsNone(details["size_bytes"])
+        self.assertIsNone(details["resolution"])
         class WrongMovie(FakeProvider):
             def fetch(self, action, **params):
                 if action == "get_vod_info":

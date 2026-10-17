@@ -28,7 +28,7 @@
 {% block content %}
 <section class="card vod-section">
   <h2>Catalog</h2>
-  <p class="vod-muted">Likely audio language is inferred from saved language tags such as EN or JA. Country tags such as JP do not identify an audio language. Subtitle labels are kept separate. Check details can read audio track metadata for one movie; Load Episodes reads one series.</p>
+  <p class="vod-muted">Likely audio language is inferred from saved language tags such as EN or JA. Country tags such as JP do not identify an audio language. Subtitle labels are kept separate. Check details reads movie metadata and, when size or resolution is missing, samples a small part of the movie if an Xtream account is free. Load Episodes reads one series.</p>
   <div class="vod-toolbar">
     <label>Search<input id="vod-search" type="search" maxlength="200" placeholder="Title" onkeydown="if(event.key==='Enter'){event.preventDefault();loadCatalog(0)}"></label>
     <label>Type<select id="vod-kind" onchange="document.getElementById('vod-category').value='';loadCatalog(0)"><option value="all">Movies &amp; series</option><option value="movie">Movies</option><option value="series">TV series</option></select></label>
@@ -121,8 +121,10 @@ async function refreshMovieDetails(index, button) {
   button.textContent = 'Checking…';
   vodStatus('vod-catalog-status',`Reading details for ${item.title}…`);
   try {
-    await vodRequest(`/api/xtream/vod/movie/${encodeURIComponent(item.item_id)}/details/refresh`,{method:'POST'});
+    const details = await vodRequest(`/api/xtream/vod/movie/${encodeURIComponent(item.item_id)}/details/refresh`,{method:'POST'});
     await loadCatalog(vodOffset);
+    const availability = details.probe_status === 'busy' ? ' · Media check deferred: Xtream account busy' : '';
+    vodStatus('vod-catalog-status',`Checked ${item.title} · ${vodSize(details.size_bytes)} · ${vodResolution(details.resolution)}${availability}`);
   } catch (error) {
     vodStatus('vod-catalog-status',error.message,true);
   } finally {
