@@ -117,10 +117,18 @@ def stage_download():
         return jsonify(status="error", message="Database not found"), 404
     try:
         payload = request.get_json(silent=True)
-        if not isinstance(payload, dict) or set(payload) != {"kind", "item_id"}:
-            raise ValueError("Choose one saved movie or episode")
+        if not isinstance(payload, dict):
+            raise ValueError("Choose saved media")
+        kind = payload.get("kind")
         with get_conn() as conn:
-            job_id = vod.stage_download(conn, payload["kind"], payload["item_id"])
+            if kind == "season" and set(payload) == {"kind", "item_id", "season"}:
+                job_id = vod.stage_batch(conn, payload["item_id"], payload["season"])
+            elif kind == "show" and set(payload) == {"kind", "item_id"}:
+                job_id = vod.stage_batch(conn, payload["item_id"])
+            elif kind in {"movie", "episode"} and set(payload) == {"kind", "item_id"}:
+                job_id = vod.stage_download(conn, kind, payload["item_id"])
+            else:
+                raise ValueError("Choose a saved movie, episode, season, or show")
             state = conn.execute("SELECT state FROM xtream_vod_jobs WHERE id=?", (job_id,)).fetchone()[0]
         return jsonify(status="success", job_id=job_id, state=state), 201
     except Exception as exc:
@@ -138,6 +146,20 @@ def start_download(job_id):
         with get_conn() as conn:
             if not vod.start_staged_download(conn, job_id, payload["folder"]):
                 return jsonify(status="error", message="Download is no longer waiting to start"), 409
+        vod.ensure_worker()
+        return jsonify(status="success", job_id=job_id), 202
+    except Exception as exc:
+        return _error(exc)
+
+
+@bp.route("/api/xtream/vod/downloads/<int:job_id>/retry", methods=["POST"])
+def retry_download(job_id):
+    if not db_exists():
+        return jsonify(status="error", message="Database not found"), 404
+    try:
+        with get_conn() as conn:
+            if not vod.retry_batch(conn, job_id):
+                return jsonify(status="error", message="This group has no failed episodes to retry"), 409
         vod.ensure_worker()
         return jsonify(status="success", job_id=job_id), 202
     except Exception as exc:

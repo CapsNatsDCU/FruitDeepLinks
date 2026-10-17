@@ -363,6 +363,142 @@ class VodTests(unittest.TestCase):
         self.assertEqual(len(jobs), 1)
         self.assertEqual((jobs[0]["state"], jobs[0]["folder"]), ("pending", "tv"))
 
+    def test_full_show_is_one_queue_item_and_reuses_completed_episodes(self):
+        self.populate()
+        with self.conn() as conn:
+            conn.executemany(
+                "INSERT INTO xtream_vod_episodes(series_id,episode_id,season,episode,title,extension) VALUES ('456',?,?,?,?,'mkv')",
+                [("790", 1, 3, "Third Episode"), ("791", 2, 1, "Next Season")])
+            conn.commit()
+        with patch.dict(os.environ, {"FRUIT_DB_PATH": str(self.db)}), \
+             patch.object(vod, "ensure_worker") as worker, \
+             patch.object(vod.VodProvider, "fetch", side_effect=AssertionError("provider traffic")):
+            client = create_app().test_client()
+            page = client.get("/movies-tv")
+            self.assertIn(b"Download full show", page.data)
+            self.assertIn(b"Download season", page.data)
+            staged = client.post("/api/xtream/vod/downloads/stage", json={"kind": "show", "item_id": "456"})
+            self.assertEqual(staged.status_code, 201)
+            parent_id = staged.get_json()["job_id"]
+            self.assertEqual(client.post("/api/xtream/vod/downloads/stage",
+                                         json={"kind": "show", "item_id": "456"}).get_json()["job_id"], parent_id)
+            visible = client.get("/api/xtream/vod/downloads").get_json()["jobs"]
+            self.assertEqual(len(visible), 1)
+            self.assertEqual((visible[0]["kind"], visible[0]["state"], visible[0]["items_total"]),
+                             ("show", "staged", 3))
+            worker.assert_not_called()
+            self.assertEqual(client.post(f"/api/xtream/vod/downloads/{parent_id}/start",
+                                         json={"folder": "movies"}).status_code, 400)
+            self.assertEqual(client.post(f"/api/xtream/vod/downloads/{parent_id}/start",
+                                         json={"folder": "tv"}).status_code, 202)
+            worker.assert_called_once()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), MediaHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        config = SimpleNamespace(server_url=f"http://127.0.0.1:{server.server_port}", username="u",
+                                 password="p", fallback_server_url=None)
+        class Lease:
+            account = SimpleNamespace(config=config)
+            gate_fd = None
+            fd = -1
+            def release(self, outcome): pass
+        class Pool:
+            def status(self): return {"accounts": [{"available": 1}]}
+            def acquire(self, *args): return Lease()
+        with self.conn() as conn:
+            children = [dict(row) for row in conn.execute(
+                "SELECT * FROM xtream_vod_jobs WHERE parent_id=? ORDER BY season,episode", (parent_id,))]
+        original_umask = os.umask(0o022)
+        try:
+            for child in children:
+                vod._run_job(self.db, child, Pool())
+        finally:
+            os.umask(original_umask)
+        with self.conn() as conn:
+            visible = vod.list_jobs(conn)
+            self.assertEqual(len(visible), 1)
+            self.assertEqual((visible[0]["state"], visible[0]["items_completed"]), ("completed", 3))
+            files = [Path(row[0]) for row in conn.execute(
+                "SELECT filename FROM xtream_vod_jobs WHERE parent_id=? ORDER BY season,episode", (parent_id,))]
+            self.assertEqual({path.parent.name for path in files}, {"Season 01", "Season 02"})
+            self.assertTrue(all(path.is_file() for path in files))
+            season_id = vod.stage_batch(conn, "456", 1)
+            self.assertTrue(vod.start_staged_batch(conn, season_id, "tv"))
+            season_children = conn.execute("SELECT state,filename FROM xtream_vod_jobs WHERE parent_id=?", (season_id,)).fetchall()
+            self.assertEqual(len(season_children), 2)
+            self.assertTrue(all(row["state"] == "completed" and Path(row["filename"]).is_file()
+                                for row in season_children))
+            self.assertEqual(vod.list_jobs(conn)[0]["state"], "completed")
+            conn.execute("INSERT INTO xtream_vod_episodes(series_id,episode_id,season,episode,title,extension) "
+                         "VALUES ('456','792',2,2,'New Episode','mkv')")
+            conn.commit()
+            updated_show_id = vod.stage_batch(conn, "456")
+            self.assertNotEqual(updated_show_id, parent_id)
+            self.assertEqual(vod.list_jobs(conn)[0]["items_total"], 4)
+            self.assertTrue(vod.start_staged_batch(conn, updated_show_id, "tv"))
+            self.assertEqual(vod.list_jobs(conn)[0]["items_completed"], 3)
+            self.assertEqual([row[0] for row in conn.execute(
+                "SELECT item_id FROM xtream_vod_jobs WHERE parent_id=? AND state='pending'", (updated_show_id,))],
+                ["792"])
+
+    def test_group_failure_retries_only_failed_episode_and_cancel_keeps_finished_file(self):
+        self.populate()
+        with self.conn() as conn:
+            conn.execute("INSERT INTO xtream_vod_episodes(series_id,episode_id,season,episode,title,extension) "
+                         "VALUES ('456','790',1,3,'Third Episode','mkv')")
+            conn.commit()
+            parent_id = vod.stage_batch(conn, "456", 1)
+            self.assertTrue(vod.start_staged_batch(conn, parent_id, "tv"))
+            children = conn.execute("SELECT id FROM xtream_vod_jobs WHERE parent_id=? ORDER BY episode", (parent_id,)).fetchall()
+        finished, failed = (row[0] for row in children)
+        vod._set_job(self.db, finished, state="completed", bytes_done=10, bytes_total=10)
+        vod._set_job(self.db, failed, state="failed", error="Provider stopped early")
+        with self.conn() as conn:
+            summary = vod.list_jobs(conn)[0]
+            self.assertEqual((summary["state"], summary["items_completed"], summary["items_failed"]),
+                             ("failed", 1, 1))
+            self.assertEqual(summary["failed_episodes"], ["S01E03"])
+        with patch.dict(os.environ, {"FRUIT_DB_PATH": str(self.db)}), patch.object(vod, "ensure_worker") as worker:
+            client = create_app().test_client()
+            self.assertEqual(client.post(f"/api/xtream/vod/downloads/{parent_id}/retry").status_code, 202)
+            worker.assert_called_once()
+            self.assertEqual(client.get("/api/xtream/vod/downloads").get_json()["jobs"][0]["items_completed"], 1)
+            self.assertEqual(client.delete(f"/api/xtream/vod/downloads/{parent_id}").status_code, 200)
+            self.assertEqual(client.post(f"/api/xtream/vod/downloads/{parent_id}/retry").status_code, 409)
+        with self.conn() as conn:
+            states = [row[0] for row in conn.execute(
+                "SELECT state FROM xtream_vod_jobs WHERE parent_id=? ORDER BY episode", (parent_id,))]
+            self.assertEqual(states, ["completed", "cancelled"])
+            self.assertEqual(vod.list_jobs(conn)[0]["state"], "cancelled")
+
+    def test_overlapping_group_start_keeps_its_staged_episodes(self):
+        self.populate()
+        with self.conn() as conn:
+            show_id = vod.stage_batch(conn, "456")
+            season_id = vod.stage_batch(conn, "456", 1)
+            self.assertTrue(vod.start_staged_batch(conn, show_id, "tv"))
+            with self.assertRaisesRegex(ValueError, "already downloading"):
+                vod.start_staged_batch(conn, season_id, "tv")
+            self.assertEqual([row[0] for row in conn.execute(
+                "SELECT state FROM xtream_vod_jobs WHERE id=? OR parent_id=? ORDER BY id",
+                (season_id, season_id))], ["staged", "staged"])
+            self.assertTrue(vod.cancel_job(conn, season_id))
+            self.assertFalse(conn.execute("SELECT 1 FROM xtream_vod_jobs WHERE id=? OR parent_id=?",
+                                          (season_id, season_id)).fetchone())
+            self.assertEqual(vod.list_jobs(conn)[0]["id"], show_id)
+
+    def test_staged_show_updates_when_saved_episodes_change(self):
+        self.populate()
+        with self.conn() as conn:
+            show_id = vod.stage_batch(conn, "456")
+            conn.execute("INSERT INTO xtream_vod_episodes(series_id,episode_id,season,episode,title,extension) "
+                         "VALUES ('456','790',1,3,'Third Episode','mkv')")
+            conn.commit()
+            self.assertEqual(vod.stage_batch(conn, "456"), show_id)
+            self.assertEqual(vod.list_jobs(conn)[0]["items_total"], 2)
+
     def test_episode_reuses_a_unique_existing_plex_show_folder(self):
         self.populate()
         existing = vod.folder_dir("tv") / "A Show (2020) {tmdb-123}"

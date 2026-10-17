@@ -22,6 +22,8 @@
 .vod-folder-choice {display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted)}
 .vod-folder-choice select {background:var(--bg-inset);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:8px;font:inherit}
 .vod-section {margin-bottom:16px}
+.vod-season-heading {display:flex;align-items:center;justify-content:space-between;gap:10px;margin:14px 0 4px;flex-wrap:wrap}
+.vod-season-heading h3 {margin:0;font-size:16px}
 {% endblock %}
 {% block content %}
 <section class="card vod-section">
@@ -39,7 +41,7 @@
   <div id="vod-pages" class="vod-toolbar"></div>
 </section>
 <section class="card vod-section" id="vod-series-panel" hidden>
-  <div class="vod-actions"><h2 id="vod-series-title">Episodes</h2><button class="btn btn-secondary" id="vod-episodes-refresh" type="button" onclick="refreshEpisodes()">Load Episodes</button><button class="btn btn-secondary" type="button" onclick="closeSeries()">Close</button></div>
+  <div class="vod-actions"><h2 id="vod-series-title">Episodes</h2><button class="btn" id="vod-download-show" type="button" onclick="stageBatch('show',null,this)" disabled>Download full show</button><button class="btn btn-secondary" id="vod-episodes-refresh" type="button" onclick="refreshEpisodes()">Load Episodes</button><button class="btn btn-secondary" type="button" onclick="closeSeries()">Close</button></div>
   <div id="vod-episodes-status" class="vod-status" role="status" aria-live="polite"></div>
   <div id="vod-episodes" class="vod-episodes"></div>
 </section>
@@ -144,6 +146,8 @@ function closeSeries() {vodSeries = null; document.getElementById('vod-series-pa
 async function openSeries(index) {
   vodSeries = vodItems[index];
   if (!vodSeries) return;
+  document.getElementById('vod-download-show').disabled = true;
+  document.getElementById('vod-episodes').innerHTML = '';
   document.getElementById('vod-series-panel').hidden = false;
   document.getElementById('vod-series-title').textContent = vodSeries.title;
   document.getElementById('vod-series-panel').scrollIntoView({behavior:'smooth',block:'start'});
@@ -151,15 +155,27 @@ async function openSeries(index) {
 }
 async function loadEpisodes() {
   if (!vodSeries) return;
+  const series = vodSeries;
+  document.getElementById('vod-download-show').disabled = true;
   vodStatus('vod-episodes-status','Loading saved episodes…');
   try {
-    const data = await vodRequest(`/api/xtream/vod/series/${encodeURIComponent(vodSeries.item_id)}/episodes`);
+    const data = await vodRequest(`/api/xtream/vod/series/${encodeURIComponent(series.item_id)}/episodes`);
+    if (vodSeries !== series) return;
     vodStatus('vod-episodes-status',`${data.episodes.length} saved episodes${data.episodes.length ? '' : ' · choose Load Episodes to read the provider'}`);
-    document.getElementById('vod-episodes').innerHTML = data.episodes.map(row => `<article class="vod-episode">
-      <div><strong>S${row.season} E${row.episode} · ${vodEsc(row.title)}</strong><div class="vod-muted">${vodEsc(row.extension || 'Format unavailable')} · ${vodEsc(vodSize(row.size_bytes))} · ${vodEsc(vodResolution(row.resolution))} · ${vodEsc(vodLanguage(row, vodSeries))}</div></div>
-      <button class="btn" type="button" ${row.extension ? '' : 'disabled'} data-episode="${vodEsc(row.episode_id)}" onclick="stageDownload('episode', this.dataset.episode, this)">Download episode</button>
-    </article>`).join('') || '<p class="vod-muted">No episodes saved for this series.</p>';
-  } catch (error) { vodStatus('vod-episodes-status',error.message,true); }
+    document.getElementById('vod-download-show').disabled = !data.episodes.length;
+    const seasons = new Map();
+    for (const row of data.episodes) {
+      if (!seasons.has(row.season)) seasons.set(row.season, []);
+      seasons.get(row.season).push(row);
+    }
+    document.getElementById('vod-episodes').innerHTML = [...seasons].map(([season,rows]) => `
+      <div class="vod-season-heading"><h3>${season === 0 ? 'Specials' : `Season ${season}`} · ${rows.length} episodes</h3>
+        <button class="btn btn-secondary" type="button" onclick="stageBatch('season',${season},this)">Download season</button></div>
+      ${rows.map(row => `<article class="vod-episode">
+        <div><strong>S${row.season} E${row.episode} · ${vodEsc(row.title)}</strong><div class="vod-muted">${vodEsc(row.extension || 'Format unavailable')} · ${vodEsc(vodSize(row.size_bytes))} · ${vodEsc(vodResolution(row.resolution))} · ${vodEsc(vodLanguage(row, vodSeries))}</div></div>
+        <button class="btn" type="button" ${row.extension ? '' : 'disabled'} data-episode="${vodEsc(row.episode_id)}" onclick="stageDownload('episode', this.dataset.episode, this)">Download episode</button>
+      </article>`).join('')}`).join('') || '<p class="vod-muted">No episodes saved for this series.</p>';
+  } catch (error) { if (vodSeries === series) vodStatus('vod-episodes-status',error.message,true); }
 }
 async function refreshEpisodes() {
   if (!vodSeries) return;
@@ -188,6 +204,20 @@ async function stageDownload(kind, item, button) {
   } catch (error) {vodStatus('vod-download-status',error.message,true);}
   finally {button.disabled = false;button.textContent = label;}
 }
+async function stageBatch(kind, season, button) {
+  if (!vodSeries || button.disabled) return;
+  const label = button.textContent;
+  button.disabled = true; button.textContent = 'Adding…';
+  try {
+    const payload = {kind,item_id:vodSeries.item_id};
+    if (kind === 'season') payload.season = season;
+    const data = await vodRequest('/api/xtream/vod/downloads/stage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    await loadDownloads(true);
+    vodStatus('vod-download-status',data.state === 'staged' ? 'Added as one NAS download. Choose TV Shows and press Start.' : 'This group is already in NAS downloads.');
+    document.getElementById('vod-downloads-panel').scrollIntoView({behavior:'smooth',block:'start'});
+  } catch (error) {vodStatus('vod-episodes-status',error.message,true);}
+  finally {button.disabled = false;button.textContent = label;}
+}
 async function startDownload(id, button) {
   if (vodStarting.has(id)) return;
   const select = button.closest('.vod-job').querySelector('select[data-job-id]');
@@ -208,6 +238,13 @@ async function cancelDownload(id, button) {
   try {await vodRequest(`/api/xtream/vod/downloads/${id}`,{method:'DELETE'});await loadDownloads(true);}
   catch (error) {vodStatus('vod-download-status',error.message,true);button.disabled = false;button.textContent = original;}
 }
+async function retryBatch(id, button) {
+  button.disabled = true; button.textContent = 'Retrying…';
+  try {
+    await vodRequest(`/api/xtream/vod/downloads/${id}/retry`,{method:'POST'});
+    await loadDownloads(true);
+  } catch (error) {vodStatus('vod-download-status',error.message,true);button.disabled = false;button.textContent = 'Retry failed';}
+}
 async function loadDownloads(force=false) {
   if (vodLoading) {if (force) vodReload = true; return;}
   vodLoading = true;
@@ -220,15 +257,19 @@ async function loadDownloads(force=false) {
     const active = data.jobs.filter(job => ['pending','running','cancelling'].includes(job.state)).length;
     vodStatus('vod-download-status',staged || active ? `${staged} ready to start · ${active} active or waiting` : 'No active downloads.');
     document.getElementById('vod-jobs').innerHTML = data.jobs.map(job => {
+      const group = job.kind === 'season' || job.kind === 'show';
       const percent = job.bytes_total ? Math.min(100,Math.floor(job.bytes_done*100/job.bytes_total)) : null;
       const amount = `${(job.bytes_done/1048576).toFixed(1)} MiB` + (job.bytes_total ? ` / ${(job.bytes_total/1048576).toFixed(1)} MiB` : '');
       const folder = job.folder === 'movies' ? 'Movies' : job.folder === 'tv' ? 'TV Shows' : 'Original folder';
       const selected = selectedFolders.get(job.id) || (job.folder === 'tv' ? 'tv' : 'movies');
       const preparing = vodStarting.has(job.id);
-      return `<article class="vod-job" id="vod-job-${job.id}"><div><strong>${vodEsc(job.title)}</strong><div class="vod-muted">${job.state === 'staged' ? 'Ready to start' : vodEsc(folder)+' · '+vodEsc(job.state)}${job.state === 'running' ? ' · '+amount : ''}${job.error ? ' · '+vodEsc(job.error) : ''}${job.filename ? ' · '+vodEsc(job.filename) : ''}</div>
-      ${job.state === 'running' && percent !== null ? `<progress class="vod-progress" max="100" value="${percent}">${percent}%</progress>` : ''}</div>
-      ${job.state === 'staged' ? `<div class="vod-actions"><label class="vod-folder-choice">Save to <select data-job-id="${job.id}" ${preparing ? 'disabled' : ''}><option value="movies" ${selected === 'movies' ? 'selected' : ''}>Movies</option><option value="tv" ${selected === 'tv' ? 'selected' : ''}>TV Shows</option></select></label><button class="btn" type="button" onclick="startDownload(${job.id},this)" ${preparing ? 'disabled' : ''}>${preparing ? 'Starting…' : 'Start'}</button><button class="btn btn-secondary" type="button" onclick="cancelDownload(${job.id},this)">Remove</button></div>` : ''}
-      ${['pending','running'].includes(job.state) ? `<button class="btn btn-secondary" type="button" onclick="cancelDownload(${job.id},this)">Cancel</button>` : ''}</article>`;
+      const groupStatus = group ? ` · ${job.items_completed}/${job.items_total} episodes complete${job.items_failed ? ` · ${job.items_failed} failed` : ''}${job.current_episode ? ` · ${vodEsc(job.current_episode)} downloading` : ''}${job.failed_episodes?.length ? ` · ${vodEsc(job.failed_episodes.join(', '))}` : ''}` : '';
+      return `<article class="vod-job" id="vod-job-${job.id}"><div><strong>${vodEsc(job.title)}</strong><div class="vod-muted">${job.state === 'staged' ? 'Ready to start' : vodEsc(folder)+' · '+vodEsc(job.state)}${groupStatus}${!group && job.state === 'running' ? ' · '+amount : ''}${job.error ? ' · '+vodEsc(job.error) : ''}${job.filename ? ' · '+vodEsc(job.filename) : ''}</div>
+      ${group && job.items_total ? `<progress class="vod-progress" max="${job.items_total}" value="${job.items_completed}">${job.items_completed}/${job.items_total}</progress>` : ''}
+      ${!group && job.state === 'running' && percent !== null ? `<progress class="vod-progress" max="100" value="${percent}">${percent}%</progress>` : ''}</div>
+      ${job.state === 'staged' ? `<div class="vod-actions"><label class="vod-folder-choice">Save to <select data-job-id="${job.id}" ${preparing ? 'disabled' : ''}>${group ? '<option value="tv" selected>TV Shows</option>' : `<option value="movies" ${selected === 'movies' ? 'selected' : ''}>Movies</option><option value="tv" ${selected === 'tv' ? 'selected' : ''}>TV Shows</option>`}</select></label><button class="btn" type="button" onclick="startDownload(${job.id},this)" ${preparing ? 'disabled' : ''}>${preparing ? 'Starting…' : 'Start'}</button><button class="btn btn-secondary" type="button" onclick="cancelDownload(${job.id},this)">Remove</button></div>` : ''}
+      ${['pending','running'].includes(job.state) ? `<button class="btn btn-secondary" type="button" onclick="cancelDownload(${job.id},this)">Cancel</button>` : ''}
+      ${group && job.state === 'failed' ? `<button class="btn" type="button" onclick="retryBatch(${job.id},this)">Retry failed</button>` : ''}</article>`;
     }).join('') || '<p class="vod-muted">No downloads yet.</p>';
   } catch (error) {vodStatus('vod-download-status',error.message,true);}
   finally {vodLoading = false;if (vodReload) {vodReload = false;void loadDownloads();}}

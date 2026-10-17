@@ -104,6 +104,9 @@ def ensure_schema(conn):
         if name not in columns:
             # Earlier episode jobs retain their original flat file destination.
             conn.execute(f"ALTER TABLE xtream_vod_jobs ADD COLUMN {name} {kind}")
+    if "parent_id" not in columns:
+        conn.execute("ALTER TABLE xtream_vod_jobs ADD COLUMN parent_id INTEGER")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_xtream_vod_jobs_parent ON xtream_vod_jobs(parent_id)")
     for table in ("xtream_vod_items", "xtream_vod_episodes"):
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         for name, kind in (("size_bytes", "INTEGER"), ("resolution", "TEXT"),
@@ -618,7 +621,115 @@ def _idle_timeout():
 def list_jobs(conn):
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='xtream_vod_jobs'").fetchone():
         return []
-    return [dict(r) for r in conn.execute("SELECT * FROM xtream_vod_jobs ORDER BY CASE WHEN state='staged' THEN 0 ELSE 1 END,id DESC LIMIT 100")]
+    if "parent_id" not in {row[1] for row in conn.execute("PRAGMA table_info(xtream_vod_jobs)")}:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM xtream_vod_jobs ORDER BY CASE WHEN state='staged' THEN 0 ELSE 1 END,id DESC LIMIT 100")]
+    jobs = [dict(r) for r in conn.execute(
+        "SELECT * FROM xtream_vod_jobs WHERE parent_id IS NULL "
+        "ORDER BY CASE WHEN state='staged' THEN 0 ELSE 1 END,id DESC LIMIT 100")]
+    return [_batch_summary(conn, job) if job["kind"] in {"season", "show"} else job for job in jobs]
+
+
+def _batch_summary(conn, parent):
+    children = [dict(row) for row in conn.execute(
+        "SELECT state,season,episode,bytes_done,bytes_total,error FROM xtream_vod_jobs WHERE parent_id=? ORDER BY season,episode,id",
+        (parent["id"],))]
+    result = dict(parent)
+    result["items_total"] = len(children)
+    result["items_completed"] = sum(child["state"] == "completed" for child in children)
+    result["items_failed"] = sum(child["state"] == "failed" for child in children)
+    result["items_cancelled"] = sum(child["state"] in {"cancelled", "cancelling"} for child in children)
+    result["bytes_done"] = sum(child["bytes_done"] or 0 for child in children)
+    result["bytes_total"] = (sum(child["bytes_total"] or child["bytes_done"] or 0 for child in children)
+                             if children and all(child["bytes_total"] or child["state"] == "completed" for child in children)
+                             else None)
+    active = next((child for child in children if child["state"] == "running"), None)
+    result["current_episode"] = (f"S{active['season']:02d}E{active['episode']:02d}" if active else None)
+    result["failed_episodes"] = [f"S{child['season']:02d}E{child['episode']:02d}"
+                                 for child in children if child["state"] == "failed"]
+    return result
+
+
+def _sync_batch(conn, parent_id):
+    if not parent_id:
+        return
+    parent = conn.execute("SELECT state FROM xtream_vod_jobs WHERE id=? AND kind IN ('season','show')", (parent_id,)).fetchone()
+    if not parent or parent["state"] == "staged":
+        return
+    states = [row[0] for row in conn.execute("SELECT state FROM xtream_vod_jobs WHERE parent_id=?", (parent_id,))]
+    if not states:
+        return
+    if parent["state"] in {"cancelling", "cancelled"}:
+        state = "cancelling" if any(value in {"running", "cancelling"} for value in states) else "cancelled"
+    elif all(value == "completed" for value in states):
+        state = "completed"
+    elif any(value in {"pending", "running", "cancelling"} for value in states):
+        state = "running" if any(value in {"running", "completed", "failed"} for value in states) else "pending"
+    elif any(value == "failed" for value in states):
+        state = "failed"
+    else:
+        state = "cancelled"
+    failed = states.count("failed")
+    error = f"{failed} of {len(states)} episodes failed. Retry failed episodes." if state == "failed" else None
+    conn.execute("UPDATE xtream_vod_jobs SET state=?,error=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                 (state, error, parent_id))
+
+
+def stage_batch(conn, series_id, season=None):
+    series_id = _valid_id(series_id)
+    if season is not None and (not isinstance(season, int) or isinstance(season, bool) or season < 0):
+        raise ValueError("Choose a valid season")
+    ensure_schema(conn)
+    series = conn.execute("SELECT title FROM xtream_vod_items WHERE kind='series' AND item_id=?", (series_id,)).fetchone()
+    if not series:
+        raise KeyError("Show not found in saved catalog")
+    if not _media_component(series["title"]):
+        raise ValueError("Show title cannot be used as a folder name")
+    rows = conn.execute("SELECT episode_id,season,episode,title,extension FROM xtream_vod_episodes "
+                        "WHERE series_id=? AND (? IS NULL OR season=?) ORDER BY season,episode,episode_id",
+                        (series_id, season, season)).fetchall()
+    if not rows:
+        raise ValueError("Load Episodes before downloading this show or season")
+    if any(not row["extension"] for row in rows):
+        raise ValueError("Some episodes have no supported direct-file format; download those episodes individually")
+    numbers = [(row["season"], row["episode"]) for row in rows]
+    if len(numbers) != len(set(numbers)):
+        raise ValueError("Multiple provider files share an episode number; download those episodes individually")
+    kind = "show" if season is None else "season"
+    title = f"{series['title']} — {'Full show' if season is None else f'Season {season:02d}'}"
+    current_episodes = {(row["episode_id"], row["season"], row["episode"], row["extension"]) for row in rows}
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute("SELECT id,state FROM xtream_vod_jobs WHERE kind=? AND item_id=? AND season IS ? "
+                                "AND parent_id IS NULL AND state IN ('staged','pending','running','failed','completed') "
+                                "ORDER BY id DESC LIMIT 1", (kind, series_id, season)).fetchone()
+        if existing:
+            saved_episodes = {tuple(row) for row in conn.execute(
+                "SELECT item_id,season,episode,extension FROM xtream_vod_jobs WHERE parent_id=?", (existing["id"],))}
+            if saved_episodes == current_episodes and (existing["state"] != "completed" or all(
+                row[0] and Path(row[0]).is_file() for row in conn.execute(
+                    "SELECT filename FROM xtream_vod_jobs WHERE parent_id=?", (existing["id"],)))):
+                return existing["id"]
+            if existing["state"] == "staged":
+                parent_id = existing["id"]
+                conn.execute("DELETE FROM xtream_vod_jobs WHERE parent_id=?", (parent_id,))
+                conn.execute("UPDATE xtream_vod_jobs SET title=?,series_title=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                             (title, series["title"], parent_id))
+            else:
+                parent_id = None
+        else:
+            parent_id = None
+        if parent_id is None:
+            parent_id = conn.execute(
+                "INSERT INTO xtream_vod_jobs(kind,item_id,series_id,title,extension,series_title,season,folder,state) "
+                "VALUES (?,?,?,?,?,?,?,'tv','staged')",
+                (kind, series_id, series_id, title, "", series["title"], season)).lastrowid
+        conn.executemany(
+            "INSERT INTO xtream_vod_jobs(kind,item_id,series_id,title,extension,series_title,season,episode,folder,state,parent_id) "
+            "VALUES ('episode',?,?,?,?,?,?,?,'tv','staged',?)",
+            [(row["episode_id"], series_id, row["title"], row["extension"], series["title"],
+              row["season"], row["episode"], parent_id) for row in rows])
+        return parent_id
 
 
 def _saved_download(conn, kind, item_id):
@@ -648,9 +759,9 @@ def stage_download(conn, kind, item_id):
     folder = "movies" if kind == "movie" else "tv"
     with conn:
         conn.execute("BEGIN IMMEDIATE")
-        existing = conn.execute("SELECT id FROM xtream_vod_jobs WHERE kind=? AND item_id=? AND state IN ('staged','pending','running') ORDER BY CASE WHEN state='staged' THEN 0 ELSE 1 END,id DESC LIMIT 1", (kind, item_id)).fetchone()
+        existing = conn.execute("SELECT id,parent_id FROM xtream_vod_jobs WHERE kind=? AND item_id=? AND state IN ('staged','pending','running') ORDER BY CASE WHEN state='staged' THEN 0 ELSE 1 END,id DESC LIMIT 1", (kind, item_id)).fetchone()
         if existing:
-            return existing["id"]
+            return existing["parent_id"] or existing["id"]
         return conn.execute("INSERT INTO xtream_vod_jobs(kind,item_id,series_id,title,extension,series_title,season,episode,folder,state) VALUES (?,?,?,?,?,?,?,?,?,'staged')",
                             (kind, item_id, series_id, row["title"], row["extension"], row["series_title"], row["season"], row["episode"], folder)).lastrowid
 
@@ -660,9 +771,13 @@ def start_staged_download(conn, job_id, folder):
         raise ValueError("Choose Movies or TV Shows")
     folder_dir(folder)
     ensure_schema(conn)
-    staged = conn.execute("SELECT kind,item_id,series_title,season,episode FROM xtream_vod_jobs WHERE id=? AND state='staged'", (job_id,)).fetchone()
+    staged = conn.execute("SELECT kind,item_id,series_id,parent_id,series_title,season,episode FROM xtream_vod_jobs WHERE id=? AND state='staged'", (job_id,)).fetchone()
     if not staged:
         return False
+    if staged["parent_id"] is not None:
+        raise ValueError("Start the season or show item instead")
+    if staged["kind"] in {"show", "season"}:
+        return start_staged_batch(conn, job_id, folder)
     # Staged episodes from an earlier release need the show metadata before Start.
     if staged["kind"] == "episode" and (not staged["series_title"] or staged["season"] is None or staged["episode"] is None):
         try:
@@ -673,6 +788,12 @@ def start_staged_download(conn, job_id, folder):
     else:
         details = None
     with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if staged["kind"] == "episode" and conn.execute(
+            "SELECT 1 FROM xtream_vod_jobs WHERE kind='episode' AND item_id=? AND series_id=? AND folder=? AND id<>? "
+            "AND state IN ('pending','running','cancelling') LIMIT 1",
+            (staged["item_id"], staged["series_id"], folder, job_id)).fetchone():
+            raise ValueError("This episode is already downloading; finish it before starting another copy")
         if details:
             result = conn.execute("UPDATE xtream_vod_jobs SET series_title=?,season=?,episode=?,folder=?,state='pending',updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='staged'",
                                   (*details, folder, job_id))
@@ -680,6 +801,42 @@ def start_staged_download(conn, job_id, folder):
             result = conn.execute("UPDATE xtream_vod_jobs SET folder=?,state='pending',updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='staged'",
                                   (folder, job_id))
     return result.rowcount > 0
+
+
+def start_staged_batch(conn, job_id, folder):
+    if folder != "tv":
+        raise ValueError("Shows and seasons must save to TV Shows")
+    folder_dir(folder)
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        parent = conn.execute("SELECT id FROM xtream_vod_jobs WHERE id=? AND kind IN ('show','season') AND state='staged'",
+                              (job_id,)).fetchone()
+        if not parent:
+            return False
+        children = conn.execute("SELECT id,item_id,series_id FROM xtream_vod_jobs WHERE parent_id=? AND state='staged' ORDER BY id",
+                                (job_id,)).fetchall()
+        if not children:
+            raise ValueError("This group has no saved episodes")
+        for child in children:
+            active = conn.execute("SELECT id FROM xtream_vod_jobs WHERE kind='episode' AND item_id=? AND series_id=? "
+                                  "AND folder='tv' AND id<>? AND state IN ('pending','running','cancelling') LIMIT 1",
+                                  (child["item_id"], child["series_id"], child["id"])).fetchone()
+            if active:
+                raise ValueError("An episode in this group is already downloading; finish it before starting this group")
+            previous = conn.execute("SELECT filename,bytes_done,bytes_total FROM xtream_vod_jobs "
+                                    "WHERE kind='episode' AND item_id=? AND series_id=? AND folder='tv' AND state='completed' "
+                                    "ORDER BY id DESC", (child["item_id"], child["series_id"])).fetchall()
+            saved = next((row for row in previous if row["filename"] and Path(row["filename"]).is_file()), None)
+            if saved:
+                conn.execute("UPDATE xtream_vod_jobs SET state='completed',folder='tv',filename=?,bytes_done=?,bytes_total=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                             (saved["filename"], saved["bytes_done"], saved["bytes_total"], child["id"]))
+            else:
+                conn.execute("UPDATE xtream_vod_jobs SET state='pending',folder='tv',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                             (child["id"],))
+        conn.execute("UPDATE xtream_vod_jobs SET state='pending',folder='tv',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                     (job_id,))
+        _sync_batch(conn, job_id)
+    return True
 
 
 def queue_download(conn, kind, item_id, folder=None):
@@ -690,9 +847,9 @@ def queue_download(conn, kind, item_id, folder=None):
     folder_dir(folder)
     with conn:
         conn.execute("BEGIN IMMEDIATE")
-        existing = conn.execute("SELECT id,state,filename FROM xtream_vod_jobs WHERE kind=? AND item_id=? AND folder=? AND state IN ('pending','running','cancelling','completed') ORDER BY id DESC LIMIT 1", (kind, item_id, folder)).fetchone()
+        existing = conn.execute("SELECT id,parent_id,state,filename FROM xtream_vod_jobs WHERE kind=? AND item_id=? AND folder=? AND state IN ('pending','running','cancelling','completed') ORDER BY id DESC LIMIT 1", (kind, item_id, folder)).fetchone()
         if existing and (existing["state"] != "completed" or (existing["filename"] and Path(existing["filename"]).is_file())):
-            return existing["id"]
+            return existing["parent_id"] or existing["id"]
         return conn.execute("INSERT INTO xtream_vod_jobs(kind,item_id,series_id,title,extension,series_title,season,episode,folder,state) VALUES (?,?,?,?,?,?,?,?,?,'pending')",
                             (kind, item_id, series_id, row["title"], row["extension"], row["series_title"], row["season"], row["episode"], folder)).lastrowid
 
@@ -700,12 +857,51 @@ def queue_download(conn, kind, item_id, folder=None):
 def cancel_job(conn, job_id):
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='xtream_vod_jobs'").fetchone():
         return False
+    ensure_schema(conn)
     with conn:
+        job = conn.execute("SELECT kind,parent_id,state FROM xtream_vod_jobs WHERE id=?", (job_id,)).fetchone()
+        if not job:
+            return False
+        if job["kind"] in {"show", "season"}:
+            if job["state"] == "staged":
+                conn.execute("DELETE FROM xtream_vod_jobs WHERE parent_id=?", (job_id,))
+                conn.execute("DELETE FROM xtream_vod_jobs WHERE id=?", (job_id,))
+                return True
+            if job["state"] not in {"pending", "running"}:
+                return False
+            conn.execute("UPDATE xtream_vod_jobs SET state='cancelling',updated_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,))
+            conn.execute("UPDATE xtream_vod_jobs SET state='cancelled',updated_at=CURRENT_TIMESTAMP "
+                         "WHERE parent_id=? AND state IN ('staged','pending')", (job_id,))
+            conn.execute("UPDATE xtream_vod_jobs SET state='cancelling',updated_at=CURRENT_TIMESTAMP "
+                         "WHERE parent_id=? AND state='running'", (job_id,))
+            _sync_batch(conn, job_id)
+            return True
         removed = conn.execute("DELETE FROM xtream_vod_jobs WHERE id=? AND state='staged'", (job_id,))
         if removed.rowcount:
+            _sync_batch(conn, job["parent_id"])
             return True
         result = conn.execute("UPDATE xtream_vod_jobs SET state=CASE WHEN state='running' THEN 'cancelling' ELSE 'cancelled' END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND state IN ('pending','running')", (job_id,))
+        if result.rowcount:
+            _sync_batch(conn, job["parent_id"])
     return result.rowcount > 0
+
+
+def retry_batch(conn, job_id):
+    ensure_schema(conn)
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        parent = conn.execute("SELECT id FROM xtream_vod_jobs WHERE id=? AND kind IN ('season','show') AND state='failed'",
+                              (job_id,)).fetchone()
+        if not parent:
+            return False
+        result = conn.execute("UPDATE xtream_vod_jobs SET state='pending',bytes_done=0,bytes_total=NULL,filename=NULL,error=NULL,updated_at=CURRENT_TIMESTAMP "
+                              "WHERE parent_id=? AND state='failed'", (job_id,))
+        if not result.rowcount:
+            return False
+        conn.execute("UPDATE xtream_vod_jobs SET state='pending',error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                     (job_id,))
+        _sync_batch(conn, job_id)
+        return True
 
 
 def _filename(job):
@@ -746,6 +942,10 @@ def _set_job(db_path, job_id, *, expected=None, **fields):
         result = conn.execute("UPDATE xtream_vod_jobs SET " + ",".join(f"{key}=?" for key in fields)
                      + ",updated_at=CURRENT_TIMESTAMP WHERE id=?" + (" AND state=?" if expected else ""),
                      (*fields.values(), job_id, *((expected,) if expected else ())))
+        if result.rowcount and "state" in fields:
+            parent = conn.execute("SELECT parent_id FROM xtream_vod_jobs WHERE id=?", (job_id,)).fetchone()
+            if parent:
+                _sync_batch(conn, parent[0])
         return result.rowcount > 0
 
 
@@ -841,6 +1041,7 @@ def _run_job(db_path, job, pool):
                         os.replace(partial, final)
                     conn.execute("UPDATE xtream_vod_jobs SET state='completed',bytes_done=?,filename=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                                  (done, str(final), job["id"]))
+                    _sync_batch(conn, job.get("parent_id"))
                 record_host_success(lease.gate_fd, host_index)
                 outcome = "upstream_eof"
                 return
@@ -886,19 +1087,25 @@ def run_worker(db_path=None, *, stop_event=None):
             return
         with get_conn(db_path) as conn, conn:
             ensure_schema(conn)
-            abandoned = [dict(row) for row in conn.execute("SELECT * FROM xtream_vod_jobs WHERE state='cancelling'")]
+            abandoned = [dict(row) for row in conn.execute(
+                "SELECT * FROM xtream_vod_jobs WHERE state='cancelling' AND kind IN ('movie','episode')")]
             for job in abandoned:
                 try:
                     (_job_download_dir(job) / (_filename(job) + ".part")).unlink(missing_ok=True)
                 except (OSError, ValueError):
                     # Do not guess which ambiguous show directory owns the partial file.
                     pass
-            conn.execute("UPDATE xtream_vod_jobs SET state='cancelled' WHERE state='cancelling'")
-            conn.execute("UPDATE xtream_vod_jobs SET state='pending',bytes_done=0,bytes_total=NULL,error=NULL WHERE state='running'")
+            conn.execute("UPDATE xtream_vod_jobs SET state='cancelled' WHERE state='cancelling' AND kind IN ('movie','episode')")
+            conn.execute("UPDATE xtream_vod_jobs SET state='pending',bytes_done=0,bytes_total=NULL,error=NULL "
+                         "WHERE state='running' AND kind IN ('movie','episode')")
+            parents = [row[0] for row in conn.execute(
+                "SELECT id FROM xtream_vod_jobs WHERE kind IN ('season','show') AND state!='staged'")]
+            for parent_id in parents:
+                _sync_batch(conn, parent_id)
         while stop_event is None or not stop_event.is_set():
             try:
                 with get_conn(db_path) as conn:
-                    job = conn.execute("SELECT * FROM xtream_vod_jobs WHERE state='pending' ORDER BY id LIMIT 1").fetchone()
+                    job = conn.execute("SELECT * FROM xtream_vod_jobs WHERE state='pending' AND kind IN ('movie','episode') ORDER BY id LIMIT 1").fetchone()
                     job = dict(job) if job else None
                 if job:
                     try:
