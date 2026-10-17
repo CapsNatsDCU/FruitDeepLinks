@@ -243,6 +243,21 @@ class TrueNASUpdaterTests(unittest.TestCase):
             self.updater.handle({"action": "install", "revision": self.new, "requested_at": time.time()})
         self.assertEqual(0, result.exception.code)
 
+    def test_scheduled_install_waits_for_truenas_app_and_then_reloads_helper(self):
+        self.mailbox = True
+        self.busy = True
+        self.updater.handle({"action": "install_when_idle", "revision": self.new,
+                             "requested_at": time.time()})
+        self.assertEqual("waiting_for_idle", read_json(self.updater.control / "status.json")["phase"])
+        self.updater.process_deferred()
+        self.assertFalse(any(call[0] == "app.update" for call in self.calls))
+        self.busy = False
+        with self.assertRaises(SystemExit) as result:
+            self.updater.process_deferred()
+        self.assertEqual(0, result.exception.code)
+        self.assertEqual(self.new, self.running)
+        self.assertEqual(1, sum(call[0] == "app.update" for call in self.calls))
+
     def test_checkout_cannot_be_reused_for_another_truenas_app(self):
         self.updater.private_config("truenas-target.json", {"app": "xsort"})
         with self.assertRaisesRegex(UpdateError, "different TrueNAS app"):

@@ -2,7 +2,7 @@
 
 Settings → **App Updates** can check the installation's current Git branch,
 show its pending commit summaries, and install a revision you explicitly approve.
-Updates are never installed on a timer. The default remote is `origin`, so this
+Updates require a reviewed revision and an explicit install request. The default remote is `origin`, so this
 fork continues to update from your fork rather than the upstream project.
 After setup, updates do not require editing YAML, changing a commit hash, or
 running a rebuild command. The buttons perform the check, build and restart.
@@ -19,7 +19,7 @@ and [startup task API](https://api.truenas.com/v25.04.1/api_methods_initshutdown
 Run the following **once in the TrueNAS shell**, after this code has been
 published to your branch. Use an unused checkout directory on your persistent
 Apps dataset. This example uses the existing app name `xsort`; adjust the name
-if yours differs. Finish any recordings and refresh before running setup.
+if yours differs. Finish any recordings, downloads, and refresh before running setup.
 
 ```bash
 sudo git clone --branch codex/xtream-ingestion --single-branch \
@@ -47,8 +47,16 @@ under a transient systemd service with restart enabled. No TrueNAS OS packages
 or API keys need to be installed. After each successful update, the helper
 restarts itself so its own updated code is loaded too.
 
-Open **Settings → App Updates**. From now on, use **Check for updates**, review
-the changes, then **Install update**. The helper follows the configured branch,
+Open **Settings → App Updates**. From now on, use **Check for updates** and review
+the changes. Choose **Install update** while idle, or **Install when system is idle**
+while a refresh, stream, provider request, or started NAS download is active.
+The latter pins the reviewed revision and waits on the host, including across
+helper restarts. It checks activity about every five seconds and installs as
+soon as the app is idle. **Cancel scheduled install** removes that request.
+Staged downloads do not block installation; pending, running, and cancelling
+downloads do. A persistent stream may keep the installation waiting until it
+disconnects. If the branch changes before installation, the request stops and
+requires another check and review. The helper follows the configured branch,
 builds the exact reviewed revision, and asks TrueNAS to restart this app. It
 waits for the image's health check and verifies the running revision. You do
 not replace `build.context` or paste commit hashes for subsequent updates.

@@ -16,7 +16,7 @@ import threading
 import time
 from pathlib import Path
 
-from update_protocol import BUSY_PHASES, mailbox_lock, read_json, write_json
+from update_protocol import BUSY_PHASES, WAITING_PHASE, mailbox_lock, read_json, write_json
 
 SERVICE = "fruitdeeplinks"
 REVISION = re.compile(r"[0-9a-f]{40}")
@@ -24,6 +24,29 @@ REVISION = re.compile(r"[0-9a-f]{40}")
 
 class UpdateError(Exception):
     pass
+
+
+class UpdateBusy(UpdateError):
+    """The running app has work that must finish before it can restart."""
+
+
+def activity_probe_code():
+    """Run inside the app container; report all started downloads, including hidden group children."""
+    return "\n".join((
+        "import json, os, pathlib, sqlite3, urllib.request",
+        "get = lambda path: json.load(urllib.request.urlopen('http://127.0.0.1:6655' + path, timeout=10))",
+        "status = get('/api/status')",
+        "pool = get('/api/xtream/pool')",
+        "refresh = bool(status['refresh']['running'])",
+        "streams = int(pool['active'])",
+        "gate_busy = any(bool(account['busy']) for account in pool['accounts'])",
+        "db = pathlib.Path(os.getenv('FRUIT_DB_PATH') or os.getenv('PEACOCK_DB_PATH') or '/app/data/fruit_events.db').resolve()",
+        "conn = sqlite3.connect(db.as_uri() + '?mode=ro', uri=True, timeout=10)",
+        "has_jobs = conn.execute(\"SELECT 1 FROM sqlite_master WHERE type='table' AND name='xtream_vod_jobs'\").fetchone()",
+        "downloads = conn.execute(\"SELECT COUNT(*) FROM xtream_vod_jobs WHERE state IN ('pending','running','cancelling')\").fetchone()[0] if has_jobs else 0",
+        "conn.close()",
+        "print(json.dumps({'busy': bool(refresh or streams or gate_busy or downloads), 'refresh': refresh, 'streams': streams, 'gate_busy': gate_busy, 'downloads': downloads}))",
+    ))
 
 
 class Updater:
@@ -135,13 +158,13 @@ class Updater:
                          if available else "You are up to date.")
 
     def app_idle(self, container_id):
-        code = ("import json,urllib.request; "
-                "s=json.load(urllib.request.urlopen('http://127.0.0.1:6655/api/updates',timeout=10)); "
-                "print(json.dumps({'busy':bool(s['refresh_running'])}))")
-        result = json.loads(self.run(["docker", "exec", container_id, "python3", "-c", code],
+        result = json.loads(self.run(["docker", "exec", container_id, "python3", "-c", activity_probe_code()],
                                     error="Could not verify that the app is ready for an update."))
         if result.get("busy", True):
-            raise UpdateError("A refresh is running. Wait for it to finish, then check and install again.")
+            reasons = [label for key, label in (("refresh", "refresh"), ("streams", "streams"),
+                                                ("gate_busy", "provider request"), ("downloads", "downloads"))
+                       if result.get(key)]
+            raise UpdateBusy("Waiting for " + (", ".join(reasons) if reasons else "app activity") + " to finish.")
 
     def write_config(self, path, config):
         # `compose config` has already interpolated environment values. Escape
@@ -209,6 +232,7 @@ class Updater:
         # SQLite's online backup also handles WAL databases without copying an
         # inconsistent DB/WAL pair. Store it alongside the persisted database.
         backup_name = self.backup_database(old["Id"], expected)
+        self.app_idle(old["Id"])
         self.save(phase="restarting", database_backup=backup_name,
                   message="Restarting the app and checking its health. Reconnecting shortly.")
         up = ["up", "-d", "--no-deps", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "120", SERVICE]
@@ -227,7 +251,52 @@ class Updater:
                 raise UpdateError("Update and automatic image recovery failed. Follow the host recovery instructions.") from exc
             raise UpdateError("Update failed its health check; the previous image is running. Database backup was retained.")
         self.save(phase="success", can_install=False, installed_revision=expected,
-                  message="Update installed and healthy.", finished_at=time.time())
+                  deferred_revision=None, message="Update installed and healthy.", finished_at=time.time())
+
+    def defer_install(self, expected):
+        state = self.check(for_install=True)
+        if expected != state.get("available_revision") or expected == state.get("installed_revision"):
+            raise UpdateError("The available revision changed. Review a new check before scheduling installation.")
+        self.save(phase=WAITING_PHASE, can_install=False, deferred_revision=expected,
+                  cancel_requested=False,
+                  message="Waiting for downloads, streams, and refreshes to finish before installing.")
+
+    def cancel_waiting(self):
+        state = read_json(self.control / "status.json")
+        if state.get("phase") != WAITING_PHASE or not REVISION.fullmatch(str(state.get("deferred_revision", ""))):
+            raise UpdateError("No scheduled installation is waiting.")
+        self.save(phase="available", can_install=True, deferred_revision=None, cancel_requested=False,
+                  message="Scheduled installation cancelled. Review the update before installing later.")
+
+    def process_deferred(self):
+        state = read_json(self.control / "status.json")
+        if state.get("phase") != WAITING_PHASE or state.get("cancel_requested"):
+            return
+        revision = state.get("deferred_revision")
+        if not REVISION.fullmatch(str(revision or "")) or revision != state.get("available_revision"):
+            self.save(phase="error", can_install=False, deferred_revision=None,
+                      message="Scheduled revision is invalid. Check for updates again.")
+            return
+        try:
+            _, container, _ = self.deployment()
+            self.app_idle(container["Id"])
+        except UpdateBusy as exc:
+            self.save(message=str(exc) + " Installation is scheduled and will retry automatically.")
+            return
+        except UpdateError:
+            self.save(message="Could not verify that the app is idle. Installation remains scheduled and will retry.")
+            return
+        with mailbox_lock(self.control):
+            current = read_json(self.control / "status.json")
+            if (current.get("phase") != WAITING_PHASE or current.get("cancel_requested")
+                    or current.get("deferred_revision") != revision
+                    or (self.control / "request.json").exists()):
+                return
+            write_json(self.control / "status.json", {
+                **current, "phase": "installing", "can_install": False,
+                "message": "The app is idle. Starting the scheduled installation.",
+            })
+        self.handle({"action": "auto_install", "revision": revision, "requested_at": time.time()})
 
     def handle(self, request):
         try:
@@ -235,15 +304,48 @@ class Updater:
                 raise UpdateError("The queued request expired. Check for updates again.")
             if request.get("action") == "check":
                 self.check()
-            elif request.get("action") == "install" and REVISION.fullmatch(str(request.get("revision", ""))):
+            elif request.get("action") == "install_when_idle" and REVISION.fullmatch(str(request.get("revision", ""))):
+                self.defer_install(request["revision"])
+            elif request.get("action") == "cancel_waiting":
+                self.cancel_waiting()
+            elif request.get("action") in {"install", "auto_install"} and REVISION.fullmatch(str(request.get("revision", ""))):
                 self.install(request["revision"])
             else:
                 raise UpdateError("Invalid updater request.")
+        except UpdateBusy as exc:
+            if request.get("action") == "auto_install":
+                self.save(phase=WAITING_PHASE, can_install=False, deferred_revision=request["revision"],
+                          message=str(exc) + " Installation is scheduled and will retry automatically.")
+            else:
+                self.save(phase="error", can_install=False, deferred_revision=None, message=str(exc))
         except UpdateError as exc:
-            self.save(phase="error", can_install=False, message=str(exc))
+            self.save(phase="error", can_install=False, deferred_revision=None, message=str(exc))
         except Exception:
-            self.save(phase="error", can_install=False,
+            self.save(phase="error", can_install=False, deferred_revision=None,
                       message="The host updater encountered an error. Check host configuration and retry.")
+
+    def initialize_mailbox(self):
+        with mailbox_lock(self.control):
+            # A waiting request is durable; an interrupted build or restart is
+            # never replayed without a new operator action.
+            state = read_json(self.control / "status.json")
+            waiting = (state.get("phase") == WAITING_PHASE
+                       and REVISION.fullmatch(str(state.get("deferred_revision", "")))
+                       and state.get("deferred_revision") == state.get("available_revision"))
+            pending = read_json(self.control / "request.json")
+            cancelled = waiting and (state.get("cancel_requested") or pending.get("action") == "cancel_waiting")
+            interrupted = state.get("phase") in BUSY_PHASES and not waiting
+            (self.control / "request.json").unlink(missing_ok=True)
+            write_json(self.control / "status.json", {
+                **state, "phase": "available" if cancelled else WAITING_PHASE if waiting else "error" if interrupted else "idle",
+                "can_install": bool(cancelled), "deferred_revision": state.get("deferred_revision") if waiting and not cancelled else None,
+                "cancel_requested": False,
+                "branch": self.branch, "remote": self.remote,
+                "message": ("Scheduled installation cancelled." if cancelled else
+                            "Waiting for the app to become idle before installing." if waiting else
+                            "The previous operation was interrupted. Check the running app before retrying."
+                            if interrupted else "Ready. Check for updates to compare with the current branch."),
+            })
 
     def serve(self):
         lock = (self.directory / "helper.lock").open("w")
@@ -260,26 +362,20 @@ class Updater:
                 stop.wait(2)
 
         try:
-            with mailbox_lock(self.control):
-                # Never replay an installation after a helper/host crash.
-                state = read_json(self.control / "status.json")
-                interrupted = state.get("phase") in BUSY_PHASES
-                (self.control / "request.json").unlink(missing_ok=True)
-                write_json(self.control / "status.json", {
-                    **state, "phase": "error" if interrupted else "idle", "can_install": False,
-                    "branch": self.branch, "remote": self.remote,
-                    "message": "The previous operation was interrupted. Check the running app before retrying."
-                    if interrupted else "Ready. Check for updates to compare with the current branch.",
-                })
+            self.initialize_mailbox()
             pulse = threading.Thread(target=heartbeat, daemon=True)
             pulse.start()
             print(f"Updater ready for {self.remote}/{self.branch}", flush=True)
+            last_idle_check = 0.0
             while True:
                 with mailbox_lock(self.control):
                     request = read_json(self.control / "request.json")
                     (self.control / "request.json").unlink(missing_ok=True)
                 if request:
                     self.handle(request)
+                if time.monotonic() - last_idle_check >= 5:
+                    self.process_deferred()
+                    last_idle_check = time.monotonic()
                 time.sleep(1)
         finally:
             stop.set()

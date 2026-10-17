@@ -12,7 +12,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-BUSY_PHASES = {"queued", "checking", "installing", "building", "restarting", "rolling_back"}
+WAITING_PHASE = "waiting_for_idle"
+BUSY_PHASES = {"queued", "checking", "installing", "building", "restarting", "rolling_back", WAITING_PHASE}
 INSTALL_PHASES = {"installing", "building", "restarting", "rolling_back"}
 
 

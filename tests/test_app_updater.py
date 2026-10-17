@@ -1,4 +1,6 @@
 import copy
+import contextlib
+import io
 import json
 import os
 import sqlite3
@@ -8,6 +10,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
@@ -15,7 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 from server.app import create_app
 from server import refresh
 from update_protocol import read_json, write_json
-from xsort_updater import Updater, UpdateError
+from xsort_updater import Updater, UpdateError, activity_probe_code
+from xtream_gate import AccountBusy
 
 
 class UpdaterRouteTests(unittest.TestCase):
@@ -74,6 +78,32 @@ class UpdaterRouteTests(unittest.TestCase):
         refresh.refresh_status["running"] = False
         self.assertEqual(202, self.post("install", {"revision": "a" * 40}).status_code)
         self.assertEqual("a" * 40, read_json(self.root / "request.json")["revision"])
+
+    def test_install_when_idle_accepts_busy_downloads_and_can_be_cancelled(self):
+        with sqlite3.connect(self.database) as conn:
+            conn.execute("CREATE TABLE xtream_vod_jobs (state TEXT)")
+            conn.execute("INSERT INTO xtream_vod_jobs VALUES ('pending')")
+        self.assertIn("downloads", self.client.get("/api/updates").json["idle_blockers"])
+        self.assertEqual(409, self.post("install", {"revision": "a" * 40}).status_code)
+        self.assertEqual(202, self.post("install_when_idle", {"revision": "a" * 40}).status_code)
+        self.assertEqual("install_when_idle", read_json(self.root / "request.json")["action"])
+        (self.root / "request.json").unlink()
+        self.state(phase="waiting_for_idle", deferred_revision="a" * 40,
+                   available_revision="a" * 40, can_install=False)
+        self.assertEqual(202, self.post("cancel_waiting").status_code)
+        self.assertEqual("cancel_waiting", read_json(self.root / "request.json")["action"])
+        self.assertTrue(read_json(self.root / "status.json")["cancel_requested"])
+        (self.root / "request.json").unlink()
+        self.assertEqual(409, self.post("cancel_waiting").status_code)
+
+    def test_install_when_idle_still_requires_reviewed_revision(self):
+        self.assertEqual(409, self.post("install_when_idle", {"revision": "b" * 40}).status_code)
+        self.assertEqual(409, self.post("cancel_waiting").status_code)
+
+    def test_provider_request_offers_scheduled_install(self):
+        with patch("xtream_accounts.load_accounts", return_value=[SimpleNamespace(config=object())]), \
+             patch("xtream_gate.AccountGate.acquire", side_effect=AccountBusy()):
+            self.assertIn("provider request", self.client.get("/api/updates").json["idle_blockers"])
 
     def test_invalid_action_and_body_rejected(self):
         self.assertEqual(400, self.post("shell").status_code)
@@ -138,6 +168,7 @@ class HostUpdaterTests(unittest.TestCase):
         self.fail_rollback = False
         self.fail_backup = False
         self.busy = False
+        self.busy_after_backup = False
         self.real_run = self.updater.run
         self.patcher = patch.object(self.updater, "run", side_effect=self.fake_run)
         self.patcher.start()
@@ -164,6 +195,8 @@ class HostUpdaterTests(unittest.TestCase):
             if "s.backup(t)" in args[-1]:
                 if self.fail_backup:
                     raise UpdateError("Database backup failed. The app has not been restarted.")
+                if self.busy_after_backup:
+                    self.busy = True
                 return ""
             return json.dumps({"busy": self.busy})
         if "build" in args and self.fail_build:
@@ -272,8 +305,85 @@ class HostUpdaterTests(unittest.TestCase):
 
     def test_busy_app_blocks_before_git_merge(self):
         self.busy = True
-        self.assertIn("refresh is running", self.request()["message"])
+        self.assertIn("app activity", self.request()["message"])
         self.assertEqual(self.old, self.command(self.repo, "rev-parse", "HEAD"))
+
+    def test_scheduled_install_waits_then_installs_exact_revision(self):
+        self.busy = True
+        state = self.request("install_when_idle")
+        self.assertEqual("waiting_for_idle", state["phase"])
+        self.assertEqual(self.new, state["deferred_revision"])
+        self.updater.process_deferred()
+        self.assertEqual("waiting_for_idle", read_json(self.updater.control / "status.json")["phase"])
+        self.assertEqual(self.old, self.running)
+        self.assertFalse(any("up" in cmd for cmd in self.commands))
+        self.updater.initialize_mailbox()
+        self.assertEqual("waiting_for_idle", read_json(self.updater.control / "status.json")["phase"])
+        self.busy = False
+        self.updater.process_deferred()
+        self.assertEqual("success", read_json(self.updater.control / "status.json")["phase"])
+        self.assertEqual(self.new, self.running)
+
+    def test_scheduled_install_waits_if_activity_starts_during_backup(self):
+        self.request("install_when_idle")
+        self.busy_after_backup = True
+        self.updater.process_deferred()
+        self.assertEqual("waiting_for_idle", read_json(self.updater.control / "status.json")["phase"])
+        self.assertEqual(self.old, self.running)
+        self.assertFalse(any("up" in cmd for cmd in self.commands))
+
+    def test_scheduled_install_stops_if_revision_changes_or_is_cancelled(self):
+        self.request("install_when_idle")
+        self.updater.handle({"action": "cancel_waiting", "requested_at": time.time()})
+        state = read_json(self.updater.control / "status.json")
+        self.assertEqual("available", state["phase"])
+        self.assertIsNone(state["deferred_revision"])
+        self.updater.process_deferred()
+        self.assertEqual(self.old, self.running)
+        self.request("install_when_idle")
+        (self.remote / "app.txt").write_text("newer app")
+        self.command(self.remote, "commit", "-am", "Newer app")
+        self.updater.process_deferred()
+        state = read_json(self.updater.control / "status.json")
+        self.assertEqual("error", state["phase"])
+        self.assertIn("revision changed", state["message"])
+        self.assertEqual(self.old, self.running)
+
+    def test_interrupted_install_is_not_resumed_on_helper_restart(self):
+        self.updater.save(phase="building", deferred_revision=self.new)
+        self.updater.initialize_mailbox()
+        state = read_json(self.updater.control / "status.json")
+        self.assertEqual("error", state["phase"])
+        self.assertIsNone(state["deferred_revision"])
+        self.assertEqual(self.old, self.running)
+
+    def test_accepted_cancellation_survives_helper_restart(self):
+        self.request("install_when_idle")
+        self.updater.save(cancel_requested=True)
+        write_json(self.updater.control / "request.json",
+                   {"action": "cancel_waiting", "requested_at": time.time()})
+        self.updater.initialize_mailbox()
+        state = read_json(self.updater.control / "status.json")
+        self.assertEqual("available", state["phase"])
+        self.assertIsNone(state["deferred_revision"])
+        self.updater.process_deferred()
+        self.assertEqual(self.old, self.running)
+
+    def test_activity_probe_counts_hidden_download_jobs(self):
+        with sqlite3.connect(self.root / "activity.db") as conn:
+            conn.execute("CREATE TABLE xtream_vod_jobs (state TEXT)")
+            conn.execute("INSERT INTO xtream_vod_jobs VALUES ('pending')")
+        def urlopen(url, timeout):
+            payload = ({"refresh": {"running": False}} if url.endswith("/api/status") else
+                       {"active": 0, "accounts": [{"busy": False}]})
+            return io.BytesIO(json.dumps(payload).encode())
+        output = io.StringIO()
+        with patch.dict(os.environ, {"FRUIT_DB_PATH": str(self.root / "activity.db")}), \
+             patch("urllib.request.urlopen", side_effect=urlopen), contextlib.redirect_stdout(output):
+            exec(activity_probe_code(), {})
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["busy"])
+        self.assertEqual(1, result["downloads"])
 
     def test_development_and_nonpersistent_installs_are_blocked(self):
         original = copy.deepcopy(self.config)

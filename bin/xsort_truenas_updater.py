@@ -102,17 +102,7 @@ class TrueNASUpdater(Updater):
         return config, old, running
 
     def app_idle(self, container_id):
-        # This endpoint also exists on the old app, before the updater UI.
-        code = (
-            "import json,urllib.request; "
-            "get=lambda p: json.load(urllib.request.urlopen('http://127.0.0.1:6655'+p,timeout=10)); "
-            "s=get('/api/status'); p=get('/api/xtream/pool'); "
-            "print(json.dumps({'busy':bool(s['refresh']['running'] or p['active'])}))"
-        )
-        result = json.loads(self.run(["docker", "exec", container_id, "python3", "-c", code],
-                                    error="Could not confirm the app is idle."))
-        if result.get("busy", True):
-            raise UpdateError("A refresh or stream is running. Wait for it to finish before updating.")
+        super().app_idle(container_id)
 
     def private_config(self, name, config):
         path = self.private / name
@@ -180,6 +170,7 @@ class TrueNASUpdater(Updater):
         self.private_config("truenas-original.json", config)
         self.private_config("truenas-candidate.json", candidate)
         self.private_config("truenas-rollback.json", rollback)
+        self.app_idle(old["Id"])
         self.save(phase="restarting", database_backup=backup, previous_image=backup_image,
                   message="TrueNAS is restarting Fruit. Reconnecting shortly.")
         try:
@@ -197,7 +188,8 @@ class TrueNASUpdater(Updater):
                 raise UpdateError("Update and image recovery failed. Use the saved TrueNAS recovery configuration on the host.") from None
             raise UpdateError("Update failed; the previous image is healthy. The database backup was retained.") from None
         self.save(phase="success", can_install=False, installed_revision=expected,
-                  message="Update installed and healthy. Future updates use these same buttons.", finished_at=time.time())
+                  deferred_revision=None, message="Update installed and healthy. Future updates use these same buttons.",
+                  finished_at=time.time())
 
     @contextmanager
     def setup_lock(self):
