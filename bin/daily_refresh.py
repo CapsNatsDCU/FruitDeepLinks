@@ -1225,26 +1225,13 @@ def main(argv=None):
         print("Forcing Channels DVR refresh.")
         print("=" * 60)
 
-        try:
-            # M3U refresh
-            subprocess.run([
-                "curl", "-s", "-X", "POST",
-                f"http://{channels_ip}:8089/providers/m3u/sources/{channels_source_name}/refresh",
-                "-o", "/dev/null",
-            ], check=False)
-            print("  [OK] M3U playlist refreshed")
-
-            time.sleep(2)
-
-            # XMLTV refresh
-            subprocess.run([
-                "curl", "-s", "-X", "PUT",
-                f"http://{channels_ip}:8089/dvr/lineups/XMLTV-{channels_source_name}",
-                "-o", "/dev/null",
-            ], check=False)
-            print("  [OK] XMLTV guide refreshed")
-        except Exception as e:
-            print(f"  ⚠ Channels DVR refresh failed: {e}")
+        from server.services.channels_dvr_sync import refresh_source
+        results = refresh_source(str(channels_ip), str(channels_source_name))
+        for label, description in (("playlist", "M3U playlist"), ("guide", "XMLTV guide")):
+            if results[label] is None:
+                print(f"  [OK] {description} refreshed")
+            else:
+                print(f"  [WARNING] {description} refresh failed ({results[label]})")
     elif channels_ip and not channels_source_name:
         print("\n" + "=" * 60)
         print("Skipping Channels DVR refresh: CHANNELS_SOURCE_NAME not set.")
