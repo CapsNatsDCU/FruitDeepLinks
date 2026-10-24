@@ -39,7 +39,7 @@ class QualityQueueTests(unittest.TestCase):
         with self.pool.connection() as conn:
             self.assertEqual('437220', _next_channel(conn, 100000)['stream_id'])
 
-    def test_new_additions_follow_manual_requests_then_leave_first_check_priority(self):
+    def test_new_additions_follow_manual_requests_without_reprobing_cached_quality(self):
         manual = self.enqueue()
         with self.pool.connection() as conn:
             first = create_channel(conn, {'stream_id':'437221','name':'First new station'}, category_id='sports', category_name='Sports', channel_number='9')
@@ -50,13 +50,12 @@ class QualityQueueTests(unittest.TestCase):
             queue.cancel(conn, manual['id'])
         # Read on a new connection: priority survives a restarted worker.
         with self.pool.connection() as conn:
-            self.assertEqual(newest['id'], _next_channel(conn, 100000)['id'])
-            conn.execute('INSERT INTO xtream_background_quality_channels VALUES (?,?)', (newest['id'], 98000))
             self.assertEqual(first['id'], _next_channel(conn, 100000)['id'])
             conn.execute('INSERT INTO xtream_background_quality_channels VALUES (?,?)', (first['id'], 98000))
             self.assertEqual(7, _next_channel(conn, 100000)['id'])
+            self.assertNotIn(newest['id'], [item['id'] for item in automatic_candidates(conn, 100000)])
 
-    def test_missing_resolution_blocks_rechecks_even_during_retry_wait(self):
+    def test_missing_resolution_retries_after_interval_but_measured_channels_do_not(self):
         with self.pool.connection() as conn:
             save_stream_quality(conn, 'sports', '437219', {'width':1920,'height':1080})
             _next_channel(conn, 100000)  # Create durable attempt state.
@@ -72,19 +71,19 @@ class QualityQueueTests(unittest.TestCase):
             self.assertEqual([8], [item['id'] for item in due])
             self.assertTrue(due[0]['needs_resolution'])
             self.assertFalse(due[0]['first_check'])
-            # Once the last unknown channel is measured, repeat checks resume.
+            # Once the last unknown channel is measured, automatic media stops.
             save_stream_quality(conn, 'sports', '437220', {'width':1280,'height':720})
-            self.assertEqual([7], [item['id'] for item in automatic_candidates(conn, 100000)])
+            self.assertEqual([], automatic_candidates(conn, 100000))
 
-    def test_new_channel_with_cached_quality_blocks_rechecks_until_first_attempt(self):
+    def test_cached_quality_from_playback_skips_the_first_automatic_probe(self):
         with self.pool.connection() as conn:
             for stream in ('437219', '437220'):
                 save_stream_quality(conn, 'sports', stream, {'width':1920,'height':1080})
             _next_channel(conn, 100000)
             conn.execute('INSERT INTO xtream_background_quality_channels VALUES (7,98000)')
-            self.assertEqual([8], [item['id'] for item in automatic_candidates(conn, 100000)])
+            self.assertEqual([], automatic_candidates(conn, 100000))
 
-    def test_disabled_or_unavailable_unknown_channels_do_not_block_rechecks(self):
+    def test_disabled_or_unavailable_unknown_channels_do_not_trigger_checks(self):
         for column, value in [('enabled', 0), ('availability_status', 'unavailable')]:
             with self.subTest(column=column), self.pool.connection() as conn:
                 conn.execute("UPDATE xtream_persistent_channels SET enabled=1,availability_status='available' WHERE id=8")
@@ -92,7 +91,7 @@ class QualityQueueTests(unittest.TestCase):
                 _next_channel(conn, 100000)
                 conn.execute('INSERT OR REPLACE INTO xtream_background_quality_channels VALUES (7,98000)')
                 conn.execute(f'UPDATE xtream_persistent_channels SET {column}=? WHERE id=8', (value,))
-                self.assertEqual([7], [item['id'] for item in automatic_candidates(conn, 100000)])
+                self.assertEqual([], automatic_candidates(conn, 100000))
 
     def test_queued_measurement_completes_and_saves_actual_quality(self):
         self.enqueue()

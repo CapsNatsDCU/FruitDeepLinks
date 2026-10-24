@@ -53,31 +53,25 @@ def _next_channel(conn, now):
 def automatic_candidates(conn, now, *, limit=25):
     ensure_schema(conn)
     _ensure_state(conn)
-    # Keep repeat checks idle until every available channel has an initial
-    # measurement. Pending initial checks still block repeats during retry waits.
+    # A valid cached measurement remains useful until a normal playback or an
+    # explicit queued test replaces it. Reopening every measured stream every
+    # ten minutes creates avoidable provider traffic and can evict playback
+    # history without adding information needed to serve the channel.
     cursor = conn.execute("""
-        WITH channels AS (
-            SELECT c.id, c.category_id, c.stream_id, c.stream_extension, c.display_name,
-                   c.created_at, attempted.last_attempt, q.measured_at,
-                   (attempted.last_attempt IS NULL) AS first_check,
-                   (q.measured_at IS NULL) AS needs_resolution
-            FROM xtream_persistent_channels AS c
-            LEFT JOIN xtream_stream_quality AS q
-              ON q.category_id=c.category_id AND q.stream_id=c.stream_id
-            LEFT JOIN xtream_background_quality_channels AS attempted ON attempted.channel_id=c.id
-            WHERE c.enabled=1 AND c.availability_status='available'
-        )
-        SELECT id, category_id, stream_id, stream_extension, display_name,
-               first_check, needs_resolution
-        FROM channels
-        WHERE (last_attempt IS NULL OR last_attempt<=?)
-          AND (first_check OR needs_resolution OR NOT EXISTS (
-              SELECT 1 FROM channels WHERE first_check OR needs_resolution
-          ))
-        ORDER BY (NOT first_check),
-                 CASE WHEN first_check THEN created_at END DESC,
-                 CASE WHEN first_check THEN id END DESC,
-                 COALESCE(last_attempt,0), measured_at, id
+        SELECT c.id, c.category_id, c.stream_id, c.stream_extension, c.display_name,
+               (attempted.last_attempt IS NULL) AS first_check,
+               1 AS needs_resolution
+        FROM xtream_persistent_channels AS c
+        LEFT JOIN xtream_stream_quality AS q
+          ON q.category_id=c.category_id AND q.stream_id=c.stream_id
+        LEFT JOIN xtream_background_quality_channels AS attempted ON attempted.channel_id=c.id
+        WHERE c.enabled=1 AND c.availability_status='available'
+          AND q.measured_at IS NULL
+          AND (attempted.last_attempt IS NULL OR attempted.last_attempt<=?)
+        ORDER BY (attempted.last_attempt IS NOT NULL),
+                 CASE WHEN attempted.last_attempt IS NULL THEN c.created_at END DESC,
+                 CASE WHEN attempted.last_attempt IS NULL THEN c.id END DESC,
+                 COALESCE(attempted.last_attempt,0), c.id
         LIMIT ?
     """, (now - CHANNEL_INTERVAL_SECONDS, limit))
     columns = [item[0] for item in cursor.description]
