@@ -142,6 +142,7 @@ class PersistentChannelServiceTest(unittest.TestCase):
         m3u = render_m3u(self.conn, "http://fruit.local:6655")
         xml = render_xmltv(self.conn).decode("utf-8")
         self.assertIn('tvg-id="mlb.nationals"', m3u)
+        self.assertIn('tvc-stream-timestamps="rewrite"', m3u)
         self.assertIn('tvg-chno="22"', m3u)
         self.assertIn("http://fruit.local:6655/xtream/channel/1/stream", m3u)
         self.assertIn("Washington Nationals", xml)

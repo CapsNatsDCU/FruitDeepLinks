@@ -301,6 +301,7 @@ class EpgLineupTests(unittest.TestCase):
         self.refresh_xml()
         self.add_lane()
         m3u = channels_lineup.m3u(self.conn, 'http://fruit.example:6655')
+        self.assertEqual(1, m3u.count('tvc-stream-timestamps="rewrite"'))
         xml = channels_lineup.xmltv(self.conn)
         numbers = re.findall(r'channel-number="([^"]+)"', m3u)
         self.assertEqual(len(numbers), len(set(numbers)))

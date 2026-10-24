@@ -596,6 +596,7 @@ def render_m3u(conn: sqlite3.Connection, server_url: str, *, channels=None) -> s
     for channel in public_metadata(channels if channels is not None else list_channels(conn, enabled_only=True), conn):
         attrs = [
             f'channel-id="xtream.persistent.{channel["id"]}"',
+            'tvc-stream-timestamps="rewrite"',
             f'tvg-id="{_attribute(channel["effective_guide_id"])}"',
             f'tvg-name="{_attribute(channel["display_name"])}"',
             f'tvg-chno="{_attribute(channel["channel_number"])}"',
