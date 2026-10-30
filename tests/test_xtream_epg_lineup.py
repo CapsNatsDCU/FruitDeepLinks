@@ -48,6 +48,7 @@ class EpgLineupTests(unittest.TestCase):
         self.client = Mock()
         self.client.config = self.accounts[0].config
         self.client.request_gate = None
+        self.client.get_epg.return_value = []
 
     def response(self, xml):
         response = Mock()
@@ -91,7 +92,7 @@ class EpgLineupTests(unittest.TestCase):
     def test_full_provider_metadata_explicit_identity_and_escaping(self):
         result = self.refresh_xml()
         self.assertEqual(1, result['programmes'])
-        self.client.get_epg.assert_not_called()
+        self.client.get_epg.assert_called_once_with('437219')
         xml = render_xmltv(self.conn)
         tree = ET.fromstring(xml)
         programme = tree.find('programme')
@@ -107,6 +108,67 @@ class EpgLineupTests(unittest.TestCase):
         self.assertEqual(self.start, xml_time(programme.get('start')))
         self.assertTrue(self.client.session.get.call_args.kwargs['stream'])
         self.client.session.get.return_value.close.assert_called_once()
+
+    def test_short_xmltv_keeps_metadata_and_adds_longer_stream_epg(self):
+        later_start = self.now + timedelta(days=7)
+        later_stop = later_start + timedelta(hours=1)
+        self.client.get_epg.return_value = [
+            {'title': 'Duplicate without XMLTV metadata', 'channel_id': 'ESPN.us',
+             'start': self.start.isoformat(), 'end': self.stop.isoformat()},
+            {'title': 'Future Game', 'channel_id': 'ESPN.us',
+             'start': later_start.isoformat(), 'end': later_stop.isoformat()},
+        ]
+        result = self.refresh_xml()
+        self.assertEqual(2, result['programmes'])
+        programmes = ET.fromstring(render_xmltv(self.conn)).findall('programme')
+        self.assertEqual(['Sports & News', 'Future Game'], [p.findtext('title') for p in programmes])
+        self.assertEqual('Live & local', programmes[0].findtext('sub-title'))
+        self.assertEqual(later_stop, xml_time(programmes[1].get('stop')))
+
+    def test_stream_epg_failure_keeps_usable_xmltv(self):
+        self.client.get_epg.side_effect = XtreamError('provider unavailable')
+        result = self.refresh_xml()
+        self.assertEqual(0, result['failed'])
+        self.assertEqual(1, result['programmes'])
+        self.assertEqual('Sports & News', ET.fromstring(render_xmltv(self.conn)).findtext('programme/title'))
+
+    def test_short_stream_epg_cannot_replace_later_xmltv(self):
+        later_start = self.now + timedelta(days=7)
+        later_stop = later_start + timedelta(hours=1)
+        self.client.get_epg.return_value = [
+            {'title': 'Today', 'channel_id': 'ESPN.us',
+             'start': self.start.isoformat(), 'end': self.stop.isoformat()},
+        ]
+        self.response('<tv><programme channel="ESPN.us" start="'
+                      + later_start.strftime('%Y%m%d%H%M%S +0000')
+                      + '" stop="' + later_stop.strftime('%Y%m%d%H%M%S +0000')
+                      + '"><title>Next Week</title></programme></tv>')
+        result = refresh_epg(self.conn, self.client, self.accounts)
+        self.assertEqual(2, result['programmes'])
+        programmes = ET.fromstring(render_xmltv(self.conn)).findall('programme')
+        self.assertEqual(['Today', 'Next Week'], [p.findtext('title') for p in programmes])
+        self.assertEqual(later_stop, xml_time(programmes[-1].get('stop')))
+
+    def test_stream_epg_with_wrong_identity_cannot_extend_xmltv(self):
+        later = self.now + timedelta(days=7)
+        self.client.get_epg.return_value = [
+            {'title': 'Other Channel', 'channel_id': 'OTHER.us',
+             'start': later.isoformat(), 'end': (later + timedelta(hours=1)).isoformat()},
+        ]
+        result = self.refresh_xml()
+        self.assertEqual(1, result['programmes'])
+        self.assertNotIn(b'Other Channel', render_xmltv(self.conn))
+
+    def test_selected_provider_link_accepts_matching_stream_epg_identity(self):
+        update_channel(self.conn, self.channel['id'], {'epg_source_id': 'ESPN.us'})
+        later = self.now + timedelta(days=7)
+        self.client.get_epg.return_value = [
+            {'title': 'Future Game', 'channel_id': 'ESPN.us',
+             'start': later.isoformat(), 'end': (later + timedelta(hours=1)).isoformat()},
+        ]
+        result = self.refresh_xml()
+        self.assertEqual(2, result['programmes'])
+        self.assertIn(b'Future Game', render_xmltv(self.conn))
 
     def test_xmltv_guide_link_index_suggests_without_assigning(self):
         self.refresh_xml()
@@ -218,11 +280,23 @@ class EpgLineupTests(unittest.TestCase):
         changed = get_channel(self.conn, self.channel['id'])
         self.assertEqual(original['epg_channel_id'], changed['epg_channel_id'])
         self.assertEqual(original['effective_guide_id'], changed['effective_guide_id'])
+        self.client.get_epg.reset_mock()
+        later = self.now + timedelta(days=7)
+        self.client.get_epg.return_value = [
+            {'title': 'Original station', 'channel_id': 'ESPN.us',
+             'start': later.isoformat(), 'end': (later + timedelta(hours=1)).isoformat()},
+            {'title': 'Alternative future', 'channel_id': 'ESPN.alternate',
+             'start': (later + timedelta(hours=1)).isoformat(),
+             'end': (later + timedelta(hours=2)).isoformat()},
+        ]
         self.response('<tv>' + self.programme(guide='ESPN.alternate', title='Alternative schedule') + '</tv>')
         refresh_epg(self.conn, self.client, self.accounts)
         self.assertEqual('Alternative schedule', ET.fromstring(render_xmltv(self.conn)).findtext('programme/title'))
-        self.client.get_epg.assert_not_called()
+        self.assertIn(b'Alternative future', render_xmltv(self.conn))
+        self.assertNotIn(b'Original station', render_xmltv(self.conn))
+        self.client.get_epg.assert_called_once_with('437219')
         # An unavailable alternative must not silently use the original stream's guide.
+        self.client.get_epg.reset_mock()
         self.response('<tv/>')
         refresh_epg(self.conn, self.client, self.accounts)
         self.client.get_epg.assert_not_called()

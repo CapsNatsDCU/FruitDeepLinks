@@ -1,7 +1,7 @@
 """Provider-backed persistent-channel EPG cache, keyed by explicit identities.
 
-Prefer provider XMLTV (preserves rich metadata); fall back to the existing
-per-stream Xtream EPG API. Export reads this cache and never contacts providers.
+Prefer provider XMLTV metadata and add nonoverlapping per-stream airings when
+they extend its coverage. Export reads this cache and never contacts providers.
 """
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import copy
 import re
 import sqlite3
 import requests
+from bisect import bisect_left
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree as ET
 
@@ -54,11 +55,13 @@ def text(value, *, encoded=True):
     return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]", "", value)
 
 
-def api_programme(row, channel, zone):
+def api_programme(row, channel, zone, *, require_source_identity=False):
     # A per-stream endpoint is independent evidence of the stream identity.
     # If the payload also supplies a channel identity, it must agree.
     explicit = row.get("epg_channel_id") or row.get("channel_id")
-    source_id = channel.get("epg_channel_id") or channel.get("guide_id")
+    source_id = provider_guide_id(channel)
+    if require_source_identity and str(explicit) != str(source_id):
+        return None
     if explicit and str(explicit) not in {str(source_id), str(channel["stream_id"])}:
         return None
     start = xml_time(row.get("start_timestamp") or row.get("start") or row.get("start_time"), zone)
@@ -203,6 +206,27 @@ def provider_guide_id(channel):
     return channel.get("epg_source_id") or channel.get("epg_channel_id") or channel.get("guide_id")
 
 
+def _extend_programmes(primary, additional):
+    """Keep XMLTV's metadata and fill only times it does not already cover."""
+    result = sorted(primary, key=lambda p: p.get("start", ""))
+    intervals = []
+    for programme in result:
+        start, stop = programme.get("start", ""), programme.get("stop", "")
+        if intervals and start < intervals[-1][1]:
+            intervals[-1] = (intervals[-1][0], max(stop, intervals[-1][1]))
+        else:
+            intervals.append((start, stop))
+    for programme in sorted(additional, key=lambda p: p.get("start", "")):
+        start, stop = programme.get("start", ""), programme.get("stop", "")
+        index = bisect_left(intervals, (start, stop))
+        if ((index and intervals[index - 1][1] > start)
+                or (index < len(intervals) and intervals[index][0] < stop)):
+            continue
+        result.append(programme)
+        intervals.insert(index, (start, stop))
+    return sorted(result, key=lambda p: p.get("start", ""))
+
+
 def refresh_epg(conn, client, accounts=()):
     from server.services.xtream_persistent import list_channels
     ensure_schema(conn)
@@ -241,26 +265,35 @@ def refresh_epg(conn, client, accounts=()):
     totals = {"channels": len(channels) + len(external_channels) + len(team_channels), "programmes": external_count + team_count,
               "failed": team_failed + sum(not cached_programmes(conn, c) for c in external_channels)}
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    account_list = list(accounts)
     for channel in channels:
         source_id = str(provider_guide_id(channel) or "")
-        programmes = xml.get(source_id, [])
+        cleaned = [p for programme in xml.get(source_id, [])
+                   if (p := clean_programme(programme, channel, account_list, client.config.timezone_name)) is not None]
         error = None
-        if not programmes and channel.get("epg_source_id"):
+        native_id = channel.get("epg_channel_id") or channel.get("guide_id")
+        selected_id = channel.get("epg_source_id")
+        # A deliberately different guide link can only be extended by rows
+        # that explicitly name the selected station.
+        require_source_identity = bool(selected_id and native_id and selected_id != native_id)
+        if not cleaned and selected_id:
             error = "Selected EPG link has no usable programmes; retained unexpired cached programmes"
-        elif not programmes:
+        else:
             try:
                 get_epg = getattr(client, "get_epg", None) or client.get_short_epg
                 rows = get_epg(channel["stream_id"])
                 if not isinstance(rows, list):
                     raise ValueError()
-                programmes = [p for row in rows if isinstance(row, dict)
-                              if (p := api_programme(row, channel, client.config.timezone_name)) is not None]
-                if rows and not programmes:
+                api_programmes = [p for row in rows if isinstance(row, dict)
+                                  if (p := api_programme(row, channel, client.config.timezone_name,
+                                                         require_source_identity=require_source_identity)) is not None
+                                  if (p := clean_programme(p, channel, account_list, client.config.timezone_name)) is not None]
+                if rows and not api_programmes and not cleaned:
                     error = "EPG rows had no valid matching programme times/title"
+                cleaned = _extend_programmes(cleaned, api_programmes)
             except Exception:
-                error = "Provider EPG unavailable; retained unexpired cached programmes"
-        cleaned = [p for programme in programmes
-                   if (p := clean_programme(programme, channel, list(accounts), client.config.timezone_name)) is not None]
+                if not cleaned:
+                    error = "Provider EPG unavailable; retained unexpired cached programmes"
         with conn:
             if not error:
                 conn.execute("DELETE FROM xtream_epg_programmes WHERE persistent_id=?", (channel["id"],))
