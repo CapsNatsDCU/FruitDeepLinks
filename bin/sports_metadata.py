@@ -620,6 +620,25 @@ def _title_participants(title: Any) -> list[dict[str, Any]]:
     # A provider prefix/date may precede the actual fixture; use the final
     # pipe segment to avoid treating a category label as a team.
     text = text.rsplit("|", 1)[-1].strip()
+    # Football fixtures carry a sport label, a repeated short matchup,
+    # and a timestamp.  Remove only those exact wrappers before applying the
+    # normal team-name gate; arbitrary colon labels remain untrusted.
+    if re.match(r"^(?:NCAA\s+)?football\s*:", text, re.IGNORECASE):
+        text = re.sub(r"^(?:NCAA\s+)?football\s*:\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+\(20\d{2}-\d{2}-\d{2}\s+\d{1,2}:\d{2}:\d{2}\)$", "", text)
+        if text.endswith(")"):
+            depth = 0
+            opening = None
+            for index in range(len(text) - 1, -1, -1):
+                if text[index] == ")":
+                    depth += 1
+                elif text[index] == "(":
+                    depth -= 1
+                    if depth == 0:
+                        opening = index
+                        break
+            if opening is not None and re.search(r"\s(?:vs\.?|v\.?|at|@)\s", text[opening + 1:-1], re.IGNORECASE):
+                text = text[:opening].rstrip()
     match = re.search(r"(?P<away>.+?)\s+(?:at|vs\.?|v\.?|x|@)\s+(?P<home>.+)$", text, re.IGNORECASE)
     if not match:
         return []

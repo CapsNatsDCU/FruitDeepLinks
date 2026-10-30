@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
-from sports_metadata import ensure_schema, resolve_source_event
+from sports_metadata import _title_participants, ensure_schema, resolve_source_event, sync_legacy_events
 from local_ai_event_parser import LocalAIConfig
 from sports_catalog import apply_catalog_records
 from catalog_workbench import delete_classification_mapping, save_classification_mapping
@@ -82,6 +82,38 @@ class SportsInterpretationSafetyTests(unittest.TestCase):
         self.assertTrue(mlb["scheduling_eligible"])
         self.assertEqual({("Washington Nationals", "away"), ("Philadelphia Phillies", "home")}, self.members(mlb))
         self.assertEqual(("baseball", "MLB"), tuple(self.event_row(mlb)[key] for key in ("sport", "league")))
+
+    def test_explicit_football_listing_with_provider_wrappers(self):
+        title = "(FLSP 733) | football: Bridgewater College (VA) vs Roanoke (Bridgewater (VA) vs Roanoke) (2026-10-31 14:00:55)"
+        participants = _title_participants(title)
+        self.assertEqual([("Bridgewater College (VA)", "away"), ("Roanoke", "home")],
+                         [(item["name"], item["role"]) for item in participants])
+        game = self.resolve("flo-football", title, "US| FLO VIP PPV", competitors=participants)
+        self.assertTrue(game["scheduling_eligible"])
+        self.assertEqual("validated two-team american_football matchup", game["validation_reason"])
+        ncaa = "US (ESPN+ 500) | NCAA Football: Villanova vs. Lafayette (Villanova vs. Lafayette) (2026-10-31 12:30:00)"
+        college = self.resolve("espn-football", ncaa, "US| ESPN+ PPV",
+                               competitors=_title_participants(ncaa))
+        self.assertTrue(college["scheduling_eligible"])
+        composite = "US (ESPN+ 483) | NCAA Football: BC vs. DUKE • CAL vs. NCSU (BC vs. DUKE ) (2026-10-31 12:01:55)"
+        self.assertEqual([], _title_participants(composite))
+        # The wrapper cannot make a mixed-category or stale generic title
+        # into an independently identified football event.
+        generic = "US (ESPN+ 490) | ESPN+: Old Dominion vs. Louisiana Tech (Old Dominion vs. Louisiana Tech) (2026-10-31 12:02:30)"
+        self.assertEqual([], _title_participants(generic))
+        self.assertFalse(self.resolve("generic", generic, "US| ESPN+ PPV")["scheduling_eligible"])
+        self.assertEqual([], _title_participants("Soccer: Radford vs. Old Dominion"))
+
+    def test_legacy_refresh_promotes_wrapped_football_fixture(self):
+        self.conn.execute("CREATE TABLE events(id TEXT PRIMARY KEY,title TEXT,start_utc TEXT,end_utc TEXT,raw_attributes_json TEXT,classification_json TEXT)")
+        title = "US (ESPN+ 500) | NCAA Football: Villanova vs. Lafayette (Villanova vs. Lafayette) (2026-10-31 12:30:00)"
+        self.conn.execute("INSERT INTO events VALUES(?,?,?,?,?,?)", (
+            "xtream:fixture", title, "2026-10-31T16:30:00Z", "2026-10-31T20:30:00Z",
+            json.dumps({"provider": "xtream", "category_name": "US| ESPN+ PPV"}), "[]"))
+        sync_legacy_events(self.conn, ai_mode="disabled")
+        metadata = json.loads(self.conn.execute("SELECT metadata_json FROM canonical_events").fetchone()[0])
+        self.assertTrue(metadata["scheduling_eligible"])
+        self.assertEqual(2, metadata["provenance"]["independent_participant_count"])
 
     def test_global_category_mapping_does_not_promote_and_title_conflict_wins(self):
         apply_catalog_records(self.conn, [
