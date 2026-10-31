@@ -417,6 +417,28 @@ def _participant_match(reference: list[str], canonical: list[str]) -> bool:
     return matches >= min(2, len(ref))
 
 
+def _nhl_short_participant_match(reference: list[str], canonical: list[str]) -> bool:
+    """Corroborate NHL imports that state hockey and two distinctive team nicknames.
+
+    This is audit-only.  It cannot assign a league to the canonical event or
+    make it eligible for scheduling.
+    """
+    if len(reference) != 2 or len(canonical) != 2:
+        return False
+    markers = []
+    for name in reference:
+        words = [word for word in _normalize(name).split()
+                 if len(word) >= 4 and word not in _GENERIC_TEAM_WORDS]
+        if not words:
+            return False
+        markers.append(words[-1])
+    if len(set(markers)) != 2:
+        return False
+    observed = [f" {_normalize(name)} " for name in canonical]
+    return (all(f" {marker} " in name for marker, name in zip(markers, observed))
+            or all(f" {marker} " in name for marker, name in zip(reversed(markers), observed)))
+
+
 def _scope_conflicts(title: str, category: str, spec: LeagueSpec) -> bool:
     for field in (title, category):
         observed_sport, observed_league = _context_from_text(field)
@@ -610,9 +632,14 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
         reference_participants = json.loads(reference.get("participants_json") or "[]")
         candidates = []
         for event in canonical:
-            if _normalize(event.get("league_name")) not in _league_aliases(spec):
-                continue
             if event.get("sport_name") and normalize_sport(event["sport_name"]) != normalize_sport(spec.sport):
+                continue
+            league_matches = _normalize(event.get("league_name")) in _league_aliases(spec)
+            nickname_match = (spec.key == "nhl" and not event.get("league_name")
+                              and normalize_sport(event.get("sport_name")) == "ice_hockey"
+                              and _nhl_short_participant_match(
+                                  reference_participants, participants.get(event["id"], [])))
+            if not league_matches and not nickname_match:
                 continue
             canonical_start = _parse_utc(event.get("start_utc"))
             if not reference_start or not canonical_start or abs((canonical_start - reference_start).total_seconds()) > 7200:

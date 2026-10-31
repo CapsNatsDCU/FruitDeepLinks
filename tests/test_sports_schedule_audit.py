@@ -284,6 +284,34 @@ class SportsScheduleAuditTests(unittest.TestCase):
             "2026-10-01T17:00:00Z", "US| MLS PPV"))
         self.assertEqual("missing_from_ingestion", snapshot(self.conn, days=14, now=NOW)["events"][0]["coverage_state"])
 
+    def test_snapshot_corrobates_nhl_hockey_with_two_short_team_names(self):
+        now_text = "2026-09-30T12:00:00Z"
+        self.conn.execute("""
+          INSERT INTO sports_schedule_reference_events(
+            source,league_key,source_event_id,title,start_utc,participants_json,first_seen_utc,last_seen_utc
+          ) VALUES(?,?,?,?,?,?,?,?)
+        """, ("espn", "nhl", "short-nhl", "Chicago Blackhawks at Boston Bruins",
+              "2026-10-01T17:00:00Z", json.dumps(["Chicago Blackhawks", "Boston Bruins"]),
+              now_text, now_text))
+        resolved = resolve_source_event(self.conn, source="xtream", source_event_id="short-nhl", data={
+            "title": "Hockey: Blackhawks vs Bruins", "sport_name": "Ice hockey",
+            "start_utc": "2026-10-01T17:00:00Z",
+            "competitors": [{"name": "Blackhawks"}, {"name": "Bruins"}],
+        })
+        self.assertTrue(resolved["resolved"])
+        self.conn.executescript("""
+          CREATE TABLE playables(event_id TEXT,playable_id TEXT);
+          CREATE TABLE lane_events(lane_id INTEGER,event_id TEXT,is_placeholder INTEGER DEFAULT 0);
+          INSERT INTO playables VALUES('short-nhl','playable');
+          INSERT INTO lane_events VALUES(81,'short-nhl',0);
+        """)
+        item = snapshot(self.conn, days=14, now=NOW)["events"][0]
+        self.assertEqual("scheduled", item["coverage_state"])
+        self.assertEqual(resolved["canonical_event_id"], item["canonical_event_id"])
+
+        self.conn.execute("DELETE FROM lane_events")
+        self.assertEqual("playable_found", snapshot(self.conn, days=14, now=NOW)["events"][0]["coverage_state"])
+
 
 if __name__ == "__main__":
     unittest.main()
