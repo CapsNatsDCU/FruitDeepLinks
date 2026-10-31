@@ -211,6 +211,18 @@ class SportsInterpretationSafetyTests(unittest.TestCase):
         self.assertTrue(eligibility["xtream:hockey-fixture"])
         self.assertFalse(eligibility["xtream:hockey-pregame"])
 
+    def test_nba_pass_pipe_fixture_keeps_teams_and_is_eligible(self):
+        title = ("NEXT | UTA - JAZZ VS POR - TRAIL BLAZERS | Sat 31 Oct 14:00 EDT (US) "
+                 "| 8K EXCLUSIVE | US: NBA PASS PPV 1")
+        self.assertEqual(["JAZZ", "TRAIL BLAZERS"],
+                         [p["name"] for p in _title_participants(title)])
+        result = self.resolve("nba-pass", title, "US| NBA PASS PPV ⁸ᴷ")
+        self.assertTrue(result["resolved"])
+        self.assertTrue(result["scheduling_eligible"])
+        self.assertEqual({("JAZZ", "away"), ("TRAIL BLAZERS", "home")},
+                         self.members(result))
+        self.assertEqual([], _title_participants(title.replace("NBA PASS PPV", "SOCCER PPV")))
+
     def test_legacy_refresh_promotes_wrapped_football_fixture(self):
         self.conn.execute("CREATE TABLE events(id TEXT PRIMARY KEY,title TEXT,start_utc TEXT,end_utc TEXT,raw_attributes_json TEXT,classification_json TEXT)")
         title = "US (ESPN+ 500) | NCAA Football: Villanova vs. Lafayette (Villanova vs. Lafayette) (2026-10-31 12:30:00)"

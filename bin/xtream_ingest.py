@@ -1037,6 +1037,22 @@ def parse_start_from_name(
     text = str(name or "")
     zone = _configured_zone(timezone_name)
     reference = _reference_in_zone(now, zone)
+    # Some PPV slots publish an explicit weekday/day/month clock in its own
+    # pipe segment. Reuse the bounded year inference and accept only known
+    # timezone abbreviations; the displayed EDT/EST may differ from the
+    # account's configured timezone.
+    for segment in text.split("|"):
+        dated = _MOTORSPORT_DATE_RE.fullmatch(segment.strip())
+        if dated:
+            dated_zone = _SAFE_TIMEZONE_ABBREVIATIONS.get(dated.group("timezone").upper())
+            if dated_zone is None:
+                return None
+            return _infer_yearless_datetime(
+                _MOTORSPORT_MONTHS[dated.group("month").upper()],
+                int(dated.group("day")), int(dated.group("hour")),
+                int(dated.group("minute")), 0, dated_zone, now,
+                event_window_days,
+            )
     for date_kind, pattern in _NAME_TIME_PATTERNS:
         match = pattern.search(text)
         if not match:

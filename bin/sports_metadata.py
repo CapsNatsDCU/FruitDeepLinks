@@ -637,9 +637,20 @@ def _title_participants(title: Any) -> list[dict[str, Any]]:
     if re.match(r"^\(Apple\)\s+\(MLS\)\s+\d{1,3}\s*\|", text, re.IGNORECASE):
         text = re.sub(r"\s+\(20\d{2}-\d{2}-\d{2}\s+\d{1,2}:\d{2}:\d{2}\)\s*$", "", text)
         text = re.sub(r"\s+\((?:Spanish|French)\)\s*$", "", text, flags=re.IGNORECASE)
+    nba_pass_segments = [segment.strip() for segment in text.split("|")]
+    nba_pass_fixture = bool(
+        len(nba_pass_segments) == 5
+        and nba_pass_segments[0].casefold() == "next"
+        and re.fullmatch(r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{1,2}\s+"
+                         r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+"
+                         r"(?:[01]?\d|2[0-3]):[0-5]\d\s+(?:EDT|EST)\s+\(US\)",
+                         nba_pass_segments[2], re.IGNORECASE)
+        and nba_pass_segments[3].casefold() == "8k exclusive"
+        and re.fullmatch(r"US:\s*NBA PASS PPV\s+\d{1,3}", nba_pass_segments[4], re.IGNORECASE)
+    )
     # A provider prefix/date may precede the actual fixture; use the final
     # pipe segment to avoid treating a category label as a team.
-    text = text.rsplit("|", 1)[-1].strip()
+    text = nba_pass_segments[1] if nba_pass_fixture else text.rsplit("|", 1)[-1].strip()
     if peacock_fixture or espn_hockey_fixture:
         text = re.sub(r"\s+\(20\d{2}-\d{2}-\d{2}\s+\d{1,2}:\d{2}:\d{2}\)\s*$", "", text)
     if espn_hockey_fixture:

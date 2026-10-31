@@ -712,6 +712,23 @@ class XtreamParsingTest(unittest.TestCase):
                     datetime(*expected, tzinfo=timezone.utc),
                 )
 
+    def test_nba_pass_pipe_date_uses_explicit_edt_and_bounded_window(self):
+        name = ("NEXT | UTA - JAZZ VS POR - TRAIL BLAZERS | Sat 31 Oct 14:00 EDT (US) "
+                "| 8K EXCLUSIVE | US: NBA PASS PPV 1")
+        now = datetime(2026, 10, 31, 8, tzinfo=timezone.utc)
+        expected = datetime(2026, 10, 31, 18, tzinfo=timezone.utc)
+        self.assertEqual(expected, parse_start_from_name(
+            name, "UTC", now=now, event_window_days=7))
+        normalized = normalize_stream({"stream_id": "nba-pass-1", "name": name},
+                                      "2094", "US| NBA PASS PPV ⁸ᴷ", config(), now=now)
+        self.assertIsNotNone(normalized)
+        self.assertEqual("2026-10-31T18:00:00Z", normalized["event"]["start_utc"])
+        self.assertIsNone(parse_start_from_name(
+            name, "UTC", now=datetime(2026, 11, 20, tzinfo=timezone.utc),
+            event_window_days=7))
+        self.assertIsNone(parse_start_from_name(
+            name.replace("EDT", "XYZ"), "UTC", now=now, event_window_days=7))
+
     def test_yearless_dates_choose_previous_or_next_year_at_boundary(self):
         previous = parse_start_from_name(
             "NHL | 12/31 11pm Capitals at Rangers",
