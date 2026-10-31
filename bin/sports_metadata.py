@@ -379,6 +379,12 @@ def _source_input_fingerprint(data: Mapping[str, Any], raw: Mapping[str, Any]) -
         "venue": data.get("venue"), "status": data.get("status"),
         "raw": raw,
     }
+    title = str(data.get("title") or "")
+    if (title.lstrip().upper().startswith("NEXT |") and
+            re.search(r"\|\s*US:\s*NBA PASS PPV\s+\d{1,3}\s*$", title, re.IGNORECASE)):
+        # Re-resolve prior NBA Pass observations after correcting the
+        # provider's home-first matchup order, even from cached event rows.
+        material["title_parser_version"] = "nba-pass-home-first-v2"
     encoded = json.dumps(material, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 

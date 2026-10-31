@@ -223,6 +223,19 @@ class SportsInterpretationSafetyTests(unittest.TestCase):
                          self.members(result))
         self.assertEqual([], _title_participants(title.replace("NBA PASS PPV", "SOCCER PPV")))
 
+    def test_nba_pass_parser_update_reconsiders_cached_wrong_roles(self):
+        title = ("NEXT | UTA - JAZZ VS POR - TRAIL BLAZERS | Sat 31 Oct 14:00 EDT (US) "
+                 "| 8K EXCLUSIVE | US: NBA PASS PPV 1")
+        with (patch("sports_metadata._source_input_fingerprint", return_value="old-parser"),
+              patch("sports_metadata._title_participants", return_value=[
+                  {"name": "JAZZ", "role": "away"},
+                  {"name": "TRAIL BLAZERS", "role": "home"}])):
+            old = self.resolve("nba-pass-reused", title, "US| NBA PASS PPV ⁸ᴷ")
+        self.assertEqual({("JAZZ", "away"), ("TRAIL BLAZERS", "home")}, self.members(old))
+        updated = self.resolve("nba-pass-reused", title, "US| NBA PASS PPV ⁸ᴷ")
+        self.assertEqual({("TRAIL BLAZERS", "away"), ("JAZZ", "home")}, self.members(updated))
+        self.assertEqual("TRAIL BLAZERS at JAZZ", self.event_row(updated)["title"])
+
     def test_legacy_refresh_promotes_wrapped_football_fixture(self):
         self.conn.execute("CREATE TABLE events(id TEXT PRIMARY KEY,title TEXT,start_utc TEXT,end_utc TEXT,raw_attributes_json TEXT,classification_json TEXT)")
         title = "US (ESPN+ 500) | NCAA Football: Villanova vs. Lafayette (Villanova vs. Lafayette) (2026-10-31 12:30:00)"

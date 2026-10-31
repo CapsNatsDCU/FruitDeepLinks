@@ -1186,11 +1186,6 @@ def normalize_stream(stream: Mapping[str, Any], category_id: str,
             else "default_duration" if duration_inferred else "provider"
         ),
     }
-    if (original_name.lstrip().upper().startswith("NEXT |") and
-            re.search(r"\|\s*US:\s*NBA PASS PPV\s+\d{1,3}\s*$", original_name, re.IGNORECASE)):
-        # A corrected home/away parser must invalidate already-resolved
-        # source mappings even when the provider reuses the same stream name.
-        metadata["name_parser_version"] = "nba-pass-home-first-v2"
     if motorsport:
         metadata.update({
             "sport": "motorsports",
