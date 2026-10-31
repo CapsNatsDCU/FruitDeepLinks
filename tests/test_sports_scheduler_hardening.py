@@ -11,7 +11,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
 
 from fruit_build_lanes import (Event, build_lanes_with_placeholders, create_lanes,
-                               ensure_lane_schema, load_future_events)
+                               ensure_lane_schema, load_future_events,
+                               published_lane_assignments)
 from fruit_export_lanes import build_lanes_xmltv
 from fruit_import_appletv import (ensure_events_schema, iso_to_ms, map_apple_to_fruit,
                                   ms_to_iso, upsert_event)
@@ -95,6 +96,60 @@ class SportsSchedulerHardeningTests(unittest.TestCase):
         build_lanes_with_placeholders(self.conn, [later, winner, victim, earlier], 1)
         self.assertEqual({"earlier", "winner", "later"}, self._scheduled_ids())
         self._assert_lane_intervals_do_not_overlap()
+
+    def test_refresh_keeps_published_game_on_its_lane_when_earlier_game_arrives(self):
+        self._reset_lanes(3)
+        start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=3)
+        first = self._event("first", start, start + timedelta(hours=2))
+        published = self._event("published", start, start + timedelta(hours=2), canonical="ce-published")
+        build_lanes_with_placeholders(self.conn, [first, published], 3)
+        self.assertEqual(2, self.conn.execute(
+            "SELECT lane_id FROM lane_events WHERE event_id='published' AND is_placeholder=0"
+        ).fetchone()[0])
+
+        assignments = published_lane_assignments(self.conn, 3)
+        self._reset_lanes(3)
+        newly_discovered = self._event("new", start - timedelta(hours=1), start + timedelta(hours=2))
+        build_lanes_with_placeholders(self.conn, [newly_discovered, first, published], 3, assignments)
+        lanes = dict(self.conn.execute(
+            "SELECT event_id,lane_id FROM lane_events WHERE is_placeholder=0"
+        ).fetchall())
+        self.assertEqual(2, lanes["published"])
+        self.assertEqual(1, lanes["first"])
+        self.assertEqual(3, lanes["new"])
+        self._assert_lane_intervals_do_not_overlap()
+
+    def test_published_game_survives_later_higher_priority_conflict(self):
+        self._reset_lanes(1)
+        start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+        published = self._event("published", start, start + timedelta(hours=2))
+        build_lanes_with_placeholders(self.conn, [published], 1)
+        assignments = published_lane_assignments(self.conn, 1)
+        self._reset_lanes(1)
+        later = self._event("later", start + timedelta(minutes=30), start + timedelta(hours=1),
+                            priority=10000, rule="ALWAYS_SCHEDULE")
+        build_lanes_with_placeholders(self.conn, [published, later], 1, assignments)
+        self.assertEqual({"published"}, self._scheduled_ids())
+
+    def test_published_lane_allows_current_playable_choice_to_change(self):
+        self._reset_lanes(1)
+        start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+        published = self._event("published", start, start + timedelta(hours=2))
+        selected = {"playable_id": "old", "provider": "xtream"}
+
+        def ranked(_conn, event_id, *_args, **_kwargs):
+            return [{"event_id": event_id, **selected}]
+
+        with patch("fruit_build_lanes.get_filtered_playables", side_effect=ranked):
+            build_lanes_with_placeholders(self.conn, [published], 1)
+            assignments = published_lane_assignments(self.conn, 1)
+            self._reset_lanes(1)
+            selected["playable_id"] = "corrected"
+            build_lanes_with_placeholders(self.conn, [published], 1, assignments)
+        row = self.conn.execute(
+            "SELECT lane_id,chosen_playable_id FROM lane_events WHERE event_id='published' AND is_placeholder=0"
+        ).fetchone()
+        self.assertEqual((1, "corrected"), tuple(row))
 
     def test_partial_overlap_chain_and_fifty_lane_saturation_are_deterministic(self):
         start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)

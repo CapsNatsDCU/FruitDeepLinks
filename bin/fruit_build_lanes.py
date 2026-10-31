@@ -406,6 +406,21 @@ def reset_lanes(conn: sqlite3.Connection):
     conn.commit()
 
 
+def published_lane_assignments(conn: sqlite3.Connection, lane_count: int) -> Dict[str, int]:
+    """Remember unexpired real programmes before a refresh rebuilds the lanes."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lane_events'").fetchone():
+        return {}
+    rows = conn.execute(
+        """SELECT event_id, lane_id FROM lane_events
+           WHERE COALESCE(is_placeholder, 0) = 0
+             AND lane_id BETWEEN 1 AND ?
+             AND datetime(end_utc) > datetime('now')
+           ORDER BY datetime(start_utc), event_id""",
+        (lane_count,),
+    )
+    return {str(event_id): int(lane_id) for event_id, lane_id in rows}
+
+
 def create_lanes(conn: sqlite3.Connection, lane_count: int):
     cur = conn.cursor()
     # DB setting wins, then env var, then default (get_setting handles the fallback chain).
@@ -423,7 +438,8 @@ def create_lanes(conn: sqlite3.Connection, lane_count: int):
 
 
 def build_lanes_with_placeholders(
-    conn: sqlite3.Connection, events: List[Event], lane_count: int
+    conn: sqlite3.Connection, events: List[Event], lane_count: int,
+    previous_assignments: Optional[Dict[str, int]] = None,
 ):
     cur = conn.cursor()
     # Public callers (including the dry-run) share the exact production
@@ -576,7 +592,6 @@ def build_lanes_with_placeholders(
     print(f"[DEBUG] span={span_hours:.1f}h block={PLACEHOLDER_BLOCK_MINUTES}min, estimated max placeholders={estimated_placeholders:,}")
 
 
-    lane_ends = [placeholder_start_global for _ in range(lane_count)]
     lane_events: List[List[Event]] = [[] for _ in range(lane_count)]
     dropped: List[Event] = []
     table_names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -592,6 +607,7 @@ def build_lanes_with_placeholders(
     # Reserving capacity here hides otherwise valid games from the guide.
     scheduled: List[Tuple[Event, int, Dict[str, Any]]] = []
     selected_playables: Dict[str, Dict[str, Any]] = {}
+    pinned_lanes: Dict[str, int] = {}
 
     def _provider(playable: Dict[str, Any]) -> str:
         try:
@@ -626,7 +642,41 @@ def build_lanes_with_placeholders(
                 return playable
         return None
 
+    def _lane_is_free(lane: int, event: Event, ignored: Optional[Event] = None) -> bool:
+        return all(other is ignored or other.end_padded <= event.start or other.start >= event.end_padded
+                   for other in lane_events[lane])
+
+    # Reserve published slots first. A newly discovered earlier programme must
+    # not take a channel already advertised for a later game. Keep only current
+    # candidates and valid lanes; provider filtering and playable ranking still
+    # decide whether the game can be scheduled and which feed it uses.
+    previous_assignments = previous_assignments or {}
     for ev in events:
+        previous_lane = next((previous_assignments[source_id]
+                              for source_id in (ev.event_id, *ev.legacy_event_ids)
+                              if source_id in previous_assignments), None)
+        if previous_lane is None or not 1 <= previous_lane <= lane_count:
+            continue
+        lane = previous_lane - 1
+        if not _lane_is_free(lane, ev):
+            continue
+        best = _select_playable(ev)
+        if not best and playable_cache.get(ev.event_id):
+            continue
+        lane_events[lane].append(ev)
+        scheduled.append((ev, lane, best or {}))
+        selected_playables[ev.event_id] = best or {}
+        pinned_lanes[ev.event_id] = previous_lane
+
+    for ev in events:
+        if ev.event_id in pinned_lanes:
+            if ev.canonical_event_id:
+                best = selected_playables[ev.event_id]
+                decision_rows.append((ev.canonical_event_id, "scheduled", ev.sports_priority,
+                                      json.dumps({"rule": ev.sports_rule, "provider": _provider(best),
+                                                  "published_lane_preserved": True}),
+                                      pinned_lanes[ev.event_id]))
+            continue
         best = _select_playable(ev)
         if not best and playable_cache.get(ev.event_id):
             dropped.append(ev)
@@ -637,9 +687,12 @@ def build_lanes_with_placeholders(
                                                   "limits": {name: provider_capacities.get(name) for name in attempted}}), None))
             continue
 
-        free_lane = next((index for index, end in enumerate(lane_ends) if end <= ev.start), None)
+        free_lane = next((index for index in range(lane_count) if _lane_is_free(index, ev)), None)
         if free_lane is None:
-            active = [(entry, lane, selected) for entry, lane, selected in scheduled if entry.end_padded > ev.start]
+            active = [(entry, lane, selected) for entry, lane, selected in scheduled
+                      if entry.event_id not in pinned_lanes
+                      and entry.start < ev.end_padded and entry.end_padded > ev.start
+                      and _lane_is_free(lane, ev, ignored=entry)]
             # All entries were added chronologically, so active entries are the
             # only real competitors.  Replace exactly one lower-priority event;
             # later non-overlapping events are never considered or displaced.
@@ -674,7 +727,6 @@ def build_lanes_with_placeholders(
 
         lane_events[free_lane].append(ev)
         lane_events[free_lane].sort(key=lambda item: (item.start, item.event_id))
-        lane_ends[free_lane] = max((item.end_padded for item in lane_events[free_lane]), default=placeholder_start_global)
         scheduled.append((ev, free_lane, best or {}))
         selected_playables[ev.event_id] = best or {}
         if ev.canonical_event_id:
@@ -820,6 +872,7 @@ def main():
     args = ap.parse_args()
     conn = sqlite3.connect(args.db)
     ensure_lane_schema(conn)
+    previous_assignments = published_lane_assignments(conn, args.lanes)
     reset_lanes(conn)
     create_lanes(conn, args.lanes)
 
@@ -835,7 +888,7 @@ def main():
     events = load_future_events(conn, args.days_ahead, canonical_ai_mode=args.canonical_ai_mode,
                                 ai_budget_remaining=ai_budget_remaining)
     print(f"Loaded {len(events)} future events (after sports/league filtering)")
-    build_lanes_with_placeholders(conn, events, args.lanes)
+    build_lanes_with_placeholders(conn, events, args.lanes, previous_assignments)
 
     conn.close()
     print("Lane planning complete")
