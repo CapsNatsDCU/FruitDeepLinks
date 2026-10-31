@@ -617,6 +617,7 @@ def _clean_participants(participants: Iterable[Mapping[str, Any]]) -> list[dict[
 def _title_participants(title: Any) -> list[dict[str, Any]]:
     """Conservative fallback for provider names that omit competitor objects."""
     text = str(title or "").strip()
+    peacock_fixture = bool(re.match(r"^US\s*\(Peacock\s+\d{1,3}\)\s*\|", text, re.IGNORECASE))
     # Event streams arrive with the fixture followed by a provider clock and
     # slot number.  Remove only these observed, league-labelled wrappers;
     # clean_team_name must still reject an arbitrary time or channel label.
@@ -637,6 +638,8 @@ def _title_participants(title: Any) -> list[dict[str, Any]]:
     # A provider prefix/date may precede the actual fixture; use the final
     # pipe segment to avoid treating a category label as a team.
     text = text.rsplit("|", 1)[-1].strip()
+    if peacock_fixture:
+        text = re.sub(r"\s+\(20\d{2}-\d{2}-\d{2}\s+\d{1,2}:\d{2}:\d{2}\)\s*$", "", text)
     # Football fixtures carry a sport label, a repeated short matchup,
     # and a timestamp.  Remove only those exact wrappers before applying the
     # normal team-name gate; arbitrary colon labels remain untrusted.

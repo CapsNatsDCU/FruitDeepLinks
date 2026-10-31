@@ -435,6 +435,36 @@ def _raw_title_match(reference_title: str, reference_participants: list[str],
     return len(names) >= 2 and len(set(names)) >= 2 and all(f" {name} " in observed for name in names[:2])
 
 
+_GENERIC_TEAM_WORDS = frozenset({"afc", "cf", "city", "club", "fc", "football", "new",
+                                 "real", "saint", "san", "sc", "st", "united", "york"})
+
+
+def _possible_import(reference_participants: list[str], title: str, category: str,
+                     spec: LeagueSpec) -> bool:
+    """Offer a review hint, never a match or scheduling decision."""
+    if len(reference_participants) < 2 or not re.search(
+            r"\s(?:vs\.?|v\.?|at|@)\s", title, re.IGNORECASE):
+        return False
+    if re.search(r"\b(?:pregame|postgame|replay|highlights?|wrap.?up|preview|recap)\b", title, re.IGNORECASE):
+        return False
+    from sports_metadata import _context_from_text, normalize_sport
+    for field in (title, category):
+        observed_sport, observed_league = _context_from_text(field)
+        if observed_league and _normalize(observed_league) not in _league_aliases(spec):
+            return False
+        if observed_sport and normalize_sport(observed_sport) != normalize_sport(spec.sport):
+            return False
+    markers = []
+    for participant in reference_participants[:2]:
+        words = [word for word in _normalize(participant).split()
+                 if len(word) >= 4 and word not in _GENERIC_TEAM_WORDS]
+        if not words:
+            return False
+        markers.append(words[-1])
+    observed = f" {_normalize(title)} "
+    return len(set(markers)) == 2 and all(f" {marker} " in observed for marker in markers)
+
+
 def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetime | None = None) -> dict[str, Any]:
     """Read-only external-vs-canonical coverage snapshot for the UI/API."""
     current = now or datetime.now(timezone.utc)
@@ -571,12 +601,19 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
             last = bisect.bisect_right(imported_starts, reference_start + timedelta(hours=2))
         else:
             first = last = 0
+        corroborated_ids = {item[0] for item in candidates}
         for source_start, event in imported_by_start[first:last]:
             if not _raw_title_match(reference["title"], reference_participants,
                                     event.get("title") or "", spec):
                 continue
             source_id = str(event["id"])
-            candidates.append((source_canonical_ids.get(source_id), source_id, "import_title",
+            mapped_id = source_canonical_ids.get(source_id)
+            # A source record can point at a stale/unrelated unresolved event.
+            # Only show its canonical inspector link if that record independently
+            # matched this reference's league, participants, and time.
+            if mapped_id not in corroborated_ids:
+                mapped_id = None
+            candidates.append((mapped_id, source_id, "import_title",
                                source_lane_ids.get(source_id), source_playable_counts.get(source_id, 0),
                                abs((source_start - reference_start).total_seconds()), event.get("channel_name")))
         # Prefer observed scheduling, then a real playable, then the closest
@@ -594,6 +631,22 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
             state = "playable_found"
         else:
             state = "no_playable"
+        possible_imports = []
+        if state == "missing_from_ingestion" and reference_start:
+            for source_start, event in imported_by_start[first:last]:
+                if not _possible_import(reference_participants, event.get("title") or "",
+                                        event.get("channel_name") or "", spec):
+                    continue
+                source_id = str(event["id"])
+                possible_imports.append({
+                    "event_id": source_id, "title": event.get("title") or "",
+                    "category": event.get("channel_name"),
+                    "start_utc": event.get("start_utc"),
+                    "playable_count": source_playable_counts.get(source_id, 0),
+                    "lane_id": source_lane_ids.get(source_id),
+                })
+            possible_imports.sort(key=lambda item: abs((_parse_utc(item["start_utc"]) - reference_start).total_seconds()))
+            possible_imports = possible_imports[:3]
         items.append({
             "source": reference["source"], "league_key": spec.key, "league": spec.name,
             "source_event_id": reference["source_event_id"], "title": reference["title"],
@@ -602,6 +655,7 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
             "matched_event_id": source_id, "match_kind": match_kind,
             "matched_category": category,
             "playable_count": playable_count, "lane_id": lane_id,
+            "possible_imports": possible_imports,
         })
     summary = {"expected": len(items), "scheduled": 0, "playable_found": 0,
                "no_playable": 0, "missing_from_ingestion": 0}
@@ -625,6 +679,7 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
         league_summary["expected"] += 1
         league_summary[state] += 1
     return {"leagues": leagues, "events": items, "summary": summary,
+            "possible_import_count": sum(bool(item["possible_imports"]) for item in items),
             "by_window": by_window, "by_league": by_league, "last_run": last_run}
 
 

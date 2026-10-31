@@ -153,6 +153,43 @@ class SportsInterpretationSafetyTests(unittest.TestCase):
                 self.assertTrue(result["scheduling_eligible"])
                 self.assertEqual(f"validated two-team {league} matchup", result["validation_reason"])
 
+    def test_peacock_wrapper_preserves_fixture_names_without_granting_context(self):
+        peacock = "US (Peacock 018) | Aston Villa v. Fulham (2026-10-31 15:30:05)"
+        self.assertEqual(["Aston Villa", "Fulham"],
+                         [item["name"] for item in _title_participants(peacock)])
+        result = self.resolve("peacock-epl", peacock, "US| PEACOCK PPV")
+        self.assertFalse(result["scheduling_eligible"])
+        self.assertEqual("ambiguous participants without league context", result["validation_reason"])
+
+        self.assertEqual([], _title_participants("US (Peacock 018) | Aston Villa v. Fulham Pregame (2026-10-31 15:30:05)"))
+
+    def test_peacock_fixture_reprocesses_away_from_unrelated_unknown_event(self):
+        self.conn.execute("CREATE TABLE events(id TEXT PRIMARY KEY,title TEXT,start_utc TEXT,end_utc TEXT,raw_attributes_json TEXT,classification_json TEXT)")
+        start = "2026-10-31T19:30:05Z"
+        self.conn.executemany("INSERT INTO events VALUES(?,?,?,?,?,?)", (
+            (source_id, title, start, "2026-10-31T23:30:05Z",
+             json.dumps({"provider": "xtream", "category_name": category}), "[]")
+            for source_id, title, category in (
+                ("xtream:other", "College Sports Channel", "US| FLO PPV"),
+                ("xtream:peacock", "US (Peacock 018) | Aston Villa v. Fulham (2026-10-31 15:30:05)",
+                 "US| PEACOCK PPV"),
+            )
+        ))
+        with patch("sports_metadata._title_participants", return_value=[]):
+            sync_legacy_events(self.conn, ai_mode="disabled")
+        def canonical_id(source_id):
+            return self.conn.execute(
+                "SELECT canonical_event_id FROM source_event_records WHERE source_event_id=?", (source_id,)
+            ).fetchone()[0]
+        self.assertEqual(canonical_id("xtream:other"), canonical_id("xtream:peacock"))
+
+        sync_legacy_events(self.conn, ai_mode="disabled")
+        self.assertNotEqual(canonical_id("xtream:other"), canonical_id("xtream:peacock"))
+        metadata = json.loads(self.conn.execute(
+            "SELECT metadata_json FROM canonical_events WHERE id=?", (canonical_id("xtream:peacock"),)
+        ).fetchone()[0])
+        self.assertFalse(metadata["scheduling_eligible"])
+
     def test_legacy_refresh_promotes_wrapped_football_fixture(self):
         self.conn.execute("CREATE TABLE events(id TEXT PRIMARY KEY,title TEXT,start_utc TEXT,end_utc TEXT,raw_attributes_json TEXT,classification_json TEXT)")
         title = "US (ESPN+ 500) | NCAA Football: Villanova vs. Lafayette (Villanova vs. Lafayette) (2026-10-31 12:30:00)"

@@ -178,6 +178,11 @@ class SportsScheduleAuditTests(unittest.TestCase):
             "start_utc": "2026-10-04T23:00:00Z",
             "competitors": [{"name": "Winnipeg Jets"}, {"name": "Florida Panthers"}],
         })
+        unrelated = resolve_source_event(self.conn, source="xtream", source_event_id="other", data={
+            "title": "Dallas Stars at Colorado Avalanche", "sport_name": "Hockey", "league_name": "NHL",
+            "start_utc": "2026-10-04T22:30:00Z",
+            "competitors": [{"name": "Dallas Stars"}, {"name": "Colorado Avalanche"}],
+        })
         self.conn.executescript("""
           CREATE TABLE events(id TEXT PRIMARY KEY,title TEXT,start_utc TEXT,channel_name TEXT);
           CREATE TABLE playables(event_id TEXT, playable_id TEXT);
@@ -189,6 +194,11 @@ class SportsScheduleAuditTests(unittest.TestCase):
             "2026-10-04T22:30:00Z", "US| NHL PPV"))
         self.conn.execute("INSERT INTO playables VALUES('scheduled-source','live-playable')")
         self.conn.execute("INSERT INTO lane_events VALUES(60,'scheduled-source',0)")
+        self.conn.execute(
+            "INSERT INTO source_event_records(source,source_event_id,canonical_event_id,confidence,resolution_kind,last_seen_utc) "
+            "VALUES('xtream','scheduled-source',?,1,'source_mapping',?)",
+            (unrelated["canonical_event_id"], now_text),
+        )
         self.conn.commit()
 
         result = snapshot(self.conn, days=14, now=NOW)
@@ -198,7 +208,7 @@ class SportsScheduleAuditTests(unittest.TestCase):
         self.assertEqual("import_title", item["match_kind"])
         self.assertEqual("US| NHL PPV", item["matched_category"])
         self.assertEqual(60, item["lane_id"])
-        self.assertNotEqual(unplaced["canonical_event_id"], item["canonical_event_id"])
+        self.assertIsNone(item["canonical_event_id"])
 
     def test_snapshot_does_not_match_one_team_or_distant_stream(self):
         now_text = "2026-09-30T12:00:00Z"
@@ -214,6 +224,31 @@ class SportsScheduleAuditTests(unittest.TestCase):
         self.conn.execute("INSERT INTO events VALUES('distant','Boston Celtics vs Chicago Bulls','2026-10-05T03:01:00Z')")
         self.conn.commit()
         self.assertEqual("missing_from_ingestion", snapshot(self.conn, days=14, now=NOW)["events"][0]["coverage_state"])
+
+    def test_snapshot_suggests_short_team_titles_without_counting_them_as_coverage(self):
+        now_text = "2026-09-30T12:00:00Z"
+        self.conn.execute("""
+          INSERT INTO sports_schedule_reference_events(
+            source,league_key,source_event_id,title,start_utc,participants_json,first_seen_utc,last_seen_utc
+          ) VALUES(?,?,?,?,?,?,?,?)
+        """, ("espn", "nhl", "short-names", "Chicago Blackhawks at Boston Bruins",
+              "2026-10-01T17:00:00Z", json.dumps(["Chicago Blackhawks", "Boston Bruins"]),
+              now_text, now_text))
+        self.conn.execute("CREATE TABLE events(id TEXT PRIMARY KEY,title TEXT,start_utc TEXT,channel_name TEXT)")
+        self.conn.execute("CREATE TABLE playables(event_id TEXT,playable_id TEXT)")
+        self.conn.execute("INSERT INTO events VALUES(?,?,?,?)", (
+            "likely", "US (ESPN+ 337) | Hockey: Blackhawks vs. Bruins (Blackhawks Broadcast)",
+            "2026-10-01T16:30:00Z", "US| ESPN+ PPV"))
+        self.conn.execute("INSERT INTO playables VALUES('likely','stream')")
+        self.conn.execute("INSERT INTO events VALUES(?,?,?,?)", (
+            "wrong-league", "(Apple) (MLS) 001 | Blackhawks vs. Bruins",
+            "2026-10-01T17:00:00Z", "US| MLS PPV"))
+        self.conn.commit()
+        result = snapshot(self.conn, days=14, now=NOW)
+        item = result["events"][0]
+        self.assertEqual("missing_from_ingestion", item["coverage_state"])
+        self.assertEqual(1, result["possible_import_count"])
+        self.assertEqual(["likely"], [candidate["event_id"] for candidate in item["possible_imports"]])
 
 
 if __name__ == "__main__":
