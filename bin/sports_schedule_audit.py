@@ -570,6 +570,26 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
                                 if (start := _parse_utc(event.get("start_utc"))) is not None),
                                key=lambda item: item[0])
     imported_starts = [start for start, _ in imported_by_start]
+    import_horizons: dict[str, dict[str, Any]] = {}
+    for start, event in imported_by_start:
+        if start < current or start > end:
+            continue
+        category = str(event.get("channel_name") or "").strip()
+        if not category:
+            continue
+        horizon = import_horizons.setdefault(category, {
+            "category": category, "events": 0, "with_playable": 0,
+            "next_48h": 0, "days_3_to_7": 0, "later": 0, "latest_start_utc": None,
+        })
+        horizon["events"] += 1
+        horizon["with_playable"] += int(source_playable_counts.get(str(event["id"]), 0) > 0)
+        offset = start - current
+        bucket = ("next_48h" if offset < timedelta(hours=48) else
+                  "days_3_to_7" if offset < timedelta(days=7) else "later")
+        horizon[bucket] += 1
+        latest = horizon["latest_start_utc"]
+        if latest is None or start > _parse_utc(latest):
+            horizon["latest_start_utc"] = utc_now(start)
 
     items = []
     for reference in references:
@@ -680,7 +700,9 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
         league_summary[state] += 1
     return {"leagues": leagues, "events": items, "summary": summary,
             "possible_import_count": sum(bool(item["possible_imports"]) for item in items),
-            "by_window": by_window, "by_league": by_league, "last_run": last_run}
+            "by_window": by_window, "by_league": by_league,
+            "import_horizons": sorted(import_horizons.values(), key=lambda item: (-item["events"], item["category"].casefold())),
+            "last_run": last_run}
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -190,6 +190,27 @@ class SportsInterpretationSafetyTests(unittest.TestCase):
         ).fetchone()[0])
         self.assertFalse(metadata["scheduling_eligible"])
 
+    def test_espn_hockey_broadcast_fixture_is_eligible_but_pregame_is_not(self):
+        self.conn.execute("CREATE TABLE events(id TEXT PRIMARY KEY,title TEXT,start_utc TEXT,end_utc TEXT,raw_attributes_json TEXT,classification_json TEXT)")
+        fixture = "US (ESPN+ 337) | Hockey: Blackhawks vs. Bruins (Blackhawks Broadcast) (2026-10-31 12:30:20)"
+        pregame = "US (ESPN+ 338) | Hockey: Blackhawks vs. Bruins Pregame (Bruins Broadcast) (2026-10-31 12:30:25)"
+        self.assertEqual(["Blackhawks", "Bruins"], [p["name"] for p in _title_participants(fixture)])
+        self.assertEqual([], _title_participants(pregame))
+        for source_id, title in (("xtream:hockey-fixture", fixture), ("xtream:hockey-pregame", pregame)):
+            self.conn.execute("INSERT INTO events VALUES(?,?,?,?,?,?)", (
+                source_id, title, "2026-10-31T16:30:20Z", "2026-10-31T20:30:20Z",
+                json.dumps({"provider": "xtream", "category_name": "US| ESPN+ PPV"}), "[]"))
+        sync_legacy_events(self.conn, ai_mode="disabled")
+        eligibility = {}
+        for source_id in ("xtream:hockey-fixture", "xtream:hockey-pregame"):
+            metadata = self.conn.execute(
+                "SELECT ce.metadata_json FROM source_event_records ser JOIN canonical_events ce "
+                "ON ce.id=ser.canonical_event_id WHERE ser.source_event_id=?", (source_id,),
+            ).fetchone()[0]
+            eligibility[source_id] = json.loads(metadata)["scheduling_eligible"]
+        self.assertTrue(eligibility["xtream:hockey-fixture"])
+        self.assertFalse(eligibility["xtream:hockey-pregame"])
+
     def test_legacy_refresh_promotes_wrapped_football_fixture(self):
         self.conn.execute("CREATE TABLE events(id TEXT PRIMARY KEY,title TEXT,start_utc TEXT,end_utc TEXT,raw_attributes_json TEXT,classification_json TEXT)")
         title = "US (ESPN+ 500) | NCAA Football: Villanova vs. Lafayette (Villanova vs. Lafayette) (2026-10-31 12:30:00)"

@@ -209,6 +209,8 @@ class SportsScheduleAuditTests(unittest.TestCase):
         self.assertEqual("US| NHL PPV", item["matched_category"])
         self.assertEqual(60, item["lane_id"])
         self.assertIsNone(item["canonical_event_id"])
+        self.assertEqual((1, 1, 1), tuple(result["import_horizons"][0][key]
+                                          for key in ("events", "with_playable", "days_3_to_7")))
 
     def test_snapshot_does_not_match_one_team_or_distant_stream(self):
         now_text = "2026-09-30T12:00:00Z"
