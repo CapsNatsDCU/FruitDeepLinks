@@ -50,6 +50,19 @@ class EventNamingTest(unittest.TestCase):
             programming_name(event),
         )
 
+    def test_nba_pass_home_first_wrapper_renders_road_at_home(self):
+        event = {
+            "title": ("NEXT | UTA - JAZZ VS POR - TRAIL BLAZERS | Sat 31 Oct 14:00 EDT (US) "
+                      "| 8K EXCLUSIVE | US: NBA PASS PPV 1"),
+            "channel_name": "US| NBA PASS PPV ⁸ᴷ",
+        }
+        self.assertEqual("[NBA] TRAIL BLAZERS @ JAZZ (US| NBA PASS PPV ⁸ᴷ)",
+                         programming_name(event))
+        self.assertEqual("[NBA] TRAIL BLAZERS @ JAZZ (US| NBA PASS PPV ⁸ᴷ)",
+                         build_enhanced_title(event))
+        event["title"] = event["title"].replace("NBA PASS PPV", "SOCCER PPV")
+        self.assertNotIn("[NBA] TRAIL BLAZERS @ JAZZ", programming_name(event))
+
     def test_saved_name_is_fallback_and_does_not_get_broadcast_suffix(self):
         event = {
             "normalized_name": "Game title chosen by operator",

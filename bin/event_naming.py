@@ -256,6 +256,25 @@ def build_normalized_name(event: Dict[str, Any], broadcast_name: Optional[str] =
     Explicit home/away metadata is rendered in the conventional road-at-home
     order.  Untyped competitor/title order is preserved rather than guessed.
     """
+    title = str(event.get("title") or "")
+    segments = [segment.strip() for segment in title.split("|")]
+    if (len(segments) == 5 and segments[0].casefold() == "next"
+            and re.fullmatch(r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{1,2}\s+"
+                             r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+"
+                             r"(?:[01]?\d|2[0-3]):[0-5]\d\s+(?:EDT|EST)\s+\(US\)",
+                             segments[2], re.IGNORECASE)
+            and segments[3].casefold() == "8k exclusive"
+            and re.fullmatch(r"US:\s*NBA PASS PPV\s+\d{1,3}", segments[4], re.IGNORECASE)):
+        fixture = re.fullmatch(
+            r"[A-Z]{2,4}\s+-\s+(?P<home>.+?)\s+VS\s+[A-Z]{2,4}\s+-\s+(?P<away>.+)",
+            segments[1], re.IGNORECASE,
+        )
+        if fixture:
+            home, away = _text(fixture.group("home")), _text(fixture.group("away"))
+            if home and away and home.casefold() != away.casefold():
+                name = f"[NBA] {away} @ {home}"
+                broadcast = _text(broadcast_name) or _broadcast_label(event)
+                return f"{name} ({broadcast})" if broadcast else name
     home, away, explicit_roles = _team_pair_from_metadata(event)
     title_left, title_right, title_league = _title_matchup(event.get("title") or event.get("title_brief"))
     if not home and title_left:
