@@ -141,6 +141,18 @@ class SportsInterpretationSafetyTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertTrue(json.loads(current)["scheduling_eligible"])
 
+    def test_numbered_nba_and_sportsnet_nhl_fixtures(self):
+        cases = (
+            ("Boston Celtics vs Chicago Bulls @ Oct 30 7:30 PM :NBA  02", "NBA"),
+            ("NHL: Winnipeg vs Florida @ Oct 30 7:00 PM :Sportsnet+  11", "NHL"),
+        )
+        for index, (title, league) in enumerate(cases):
+            with self.subTest(title=title):
+                self.assertEqual(2, len(_title_participants(title)))
+                result = self.resolve(f"numbered-{index}", title)
+                self.assertTrue(result["scheduling_eligible"])
+                self.assertEqual(f"validated two-team {league} matchup", result["validation_reason"])
+
     def test_legacy_refresh_promotes_wrapped_football_fixture(self):
         self.conn.execute("CREATE TABLE events(id TEXT PRIMARY KEY,title TEXT,start_utc TEXT,end_utc TEXT,raw_attributes_json TEXT,classification_json TEXT)")
         title = "US (ESPN+ 500) | NCAA Football: Villanova vs. Lafayette (Villanova vs. Lafayette) (2026-10-31 12:30:00)"

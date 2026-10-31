@@ -9,8 +9,10 @@ which expected events are missing from Fruit's observed provider pipeline?
 from __future__ import annotations
 
 import argparse
+import bisect
 import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -414,6 +416,25 @@ def _participant_match(reference: list[str], canonical: list[str]) -> bool:
     return matches >= min(2, len(ref))
 
 
+def _raw_title_match(reference_title: str, reference_participants: list[str],
+                     title: str, spec: LeagueSpec) -> bool:
+    """Recognize only full, distinct team names in an imported stream title.
+
+    Short provider names need reviewed league-scoped aliases.  This fallback
+    deliberately cannot infer those aliases or grant scheduling eligibility.
+    """
+    observed = f" {_normalize(title)} "
+    if spec.sport == "Motorsport":
+        expected = _normalize(reference_title)
+        return bool(expected and f" {expected} " in observed)
+    if re.search(r"\b(?:pregame|postgame|replay|highlights?|wrap.?up|preview|recap)\b", title, re.IGNORECASE):
+        return False
+    if not re.search(r"\s(?:vs\.?|v\.?|at|@)\s", title, re.IGNORECASE):
+        return False
+    names = [_normalize(name) for name in reference_participants]
+    return len(names) >= 2 and len(set(names)) >= 2 and all(f" {name} " in observed for name in names[:2])
+
+
 def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetime | None = None) -> dict[str, Any]:
     """Read-only external-vs-canonical coverage snapshot for the UI/API."""
     current = now or datetime.now(timezone.utc)
@@ -475,6 +496,51 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
         ):
             lane_ids[str(row[0])] = int(row[1])
 
+    # Final lanes can contain a legacy provider event whose canonical record
+    # was rejected or whose source mapping points to a different duplicate.
+    # Inspect those source rows directly before calling a reference missing.
+    imported: list[dict[str, Any]] = []
+    source_playable_counts: dict[str, int] = {}
+    source_lane_ids: dict[str, int] = {}
+    source_canonical_ids: dict[str, str] = {}
+    window_start = utc_now(current - timedelta(days=1, hours=2))
+    window_end = utc_now(end + timedelta(hours=2))
+    if "events" in tables:
+        event_columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+        category_select = "channel_name" if "channel_name" in event_columns else "NULL AS channel_name"
+        imported = [dict(row) for row in conn.execute(
+            f"SELECT id,title,start_utc,{category_select} FROM events WHERE start_utc IS NOT NULL "
+            "AND datetime(start_utc) BETWEEN datetime(?) AND datetime(?)",
+            (window_start, window_end),
+        )]
+        if "playables" in tables:
+            for row in conn.execute(
+                "SELECT p.event_id,COUNT(p.playable_id) FROM playables p JOIN events e ON e.id=p.event_id "
+                "WHERE datetime(e.start_utc) BETWEEN datetime(?) AND datetime(?) GROUP BY p.event_id",
+                (window_start, window_end),
+            ):
+                source_playable_counts[str(row[0])] = int(row[1])
+        if "lane_events" in tables:
+            for row in conn.execute(
+                "SELECT le.event_id,MIN(le.lane_id) FROM lane_events le JOIN events e ON e.id=le.event_id "
+                "WHERE datetime(e.start_utc) BETWEEN datetime(?) AND datetime(?) "
+                "AND COALESCE(le.is_placeholder,0)=0 GROUP BY le.event_id",
+                (window_start, window_end),
+            ):
+                source_lane_ids[str(row[0])] = int(row[1])
+        if "source_event_records" in tables:
+            for row in conn.execute(
+                "SELECT ser.source_event_id,ser.canonical_event_id FROM source_event_records ser "
+                "JOIN events e ON e.id=ser.source_event_id "
+                "WHERE datetime(e.start_utc) BETWEEN datetime(?) AND datetime(?)",
+                (window_start, window_end),
+            ):
+                source_canonical_ids[str(row[0])] = str(row[1])
+    imported_by_start = sorted(((start, event) for event in imported
+                                if (start := _parse_utc(event.get("start_utc"))) is not None),
+                               key=lambda item: item[0])
+    imported_starts = [start for start, _ in imported_by_start]
+
     items = []
     for reference in references:
         spec = LEAGUE_BY_KEY.get(reference["league_key"])
@@ -482,7 +548,7 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
             continue
         reference_start = _parse_utc(reference["start_utc"])
         reference_participants = json.loads(reference.get("participants_json") or "[]")
-        match = None
+        candidates = []
         for event in canonical:
             if _normalize(event.get("league_name")) not in _league_aliases(spec):
                 continue
@@ -496,14 +562,35 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
                     continue
             elif not _participant_match(reference_participants, participants.get(event["id"], [])):
                 continue
-            match = event
-            break
-        canonical_id = str(match["id"]) if match else None
-        if not canonical_id:
+            canonical_id = str(event["id"])
+            candidates.append((canonical_id, None, "canonical", lane_ids.get(canonical_id),
+                               playable_counts.get(canonical_id, 0),
+                               abs((canonical_start - reference_start).total_seconds()), None))
+        if reference_start:
+            first = bisect.bisect_left(imported_starts, reference_start - timedelta(hours=2))
+            last = bisect.bisect_right(imported_starts, reference_start + timedelta(hours=2))
+        else:
+            first = last = 0
+        for source_start, event in imported_by_start[first:last]:
+            if not _raw_title_match(reference["title"], reference_participants,
+                                    event.get("title") or "", spec):
+                continue
+            source_id = str(event["id"])
+            candidates.append((source_canonical_ids.get(source_id), source_id, "import_title",
+                               source_lane_ids.get(source_id), source_playable_counts.get(source_id, 0),
+                               abs((source_start - reference_start).total_seconds()), event.get("channel_name")))
+        # Prefer observed scheduling, then a real playable, then the closest
+        # match.  Database row order must never decide a reference's status.
+        candidates.sort(key=lambda item: (item[3] is not None, item[4] > 0,
+                                           item[2] == "canonical", -item[5]), reverse=True)
+        match = candidates[0] if candidates else None
+        canonical_id, source_id, match_kind, lane_id, playable_count, _, category = (
+            match if match else (None, None, None, None, 0, 0, None))
+        if not match:
             state = "missing_from_ingestion"
-        elif canonical_id in lane_ids:
+        elif lane_id is not None:
             state = "scheduled"
-        elif playable_counts.get(canonical_id, 0):
+        elif playable_count:
             state = "playable_found"
         else:
             state = "no_playable"
@@ -512,14 +599,33 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
             "source_event_id": reference["source_event_id"], "title": reference["title"],
             "start_utc": reference["start_utc"], "participants": reference_participants,
             "canonical_event_id": canonical_id, "coverage_state": state,
-            "playable_count": playable_counts.get(canonical_id, 0) if canonical_id else 0,
-            "lane_id": lane_ids.get(canonical_id) if canonical_id else None,
+            "matched_event_id": source_id, "match_kind": match_kind,
+            "matched_category": category,
+            "playable_count": playable_count, "lane_id": lane_id,
         })
     summary = {"expected": len(items), "scheduled": 0, "playable_found": 0,
                "no_playable": 0, "missing_from_ingestion": 0}
+    by_window = {key: {"expected": 0, "scheduled": 0, "playable_found": 0,
+                       "no_playable": 0, "missing_from_ingestion": 0}
+                 for key in ("recent_24h", "next_48h", "days_3_to_7", "later")}
+    by_league: dict[str, dict[str, int]] = {}
     for item in items:
-        summary[item["coverage_state"]] += 1
-    return {"leagues": leagues, "events": items, "summary": summary, "last_run": last_run}
+        state = item["coverage_state"]
+        summary[state] += 1
+        start = _parse_utc(item["start_utc"])
+        offset = start - current if start else timedelta(days=90)
+        window = ("recent_24h" if offset < timedelta(0) else
+                  "next_48h" if offset < timedelta(hours=48) else
+                  "days_3_to_7" if offset < timedelta(days=7) else "later")
+        by_window[window]["expected"] += 1
+        by_window[window][state] += 1
+        league_summary = by_league.setdefault(item["league_key"], {
+            "expected": 0, "scheduled": 0, "playable_found": 0,
+            "no_playable": 0, "missing_from_ingestion": 0})
+        league_summary["expected"] += 1
+        league_summary[state] += 1
+    return {"leagues": leagues, "events": items, "summary": summary,
+            "by_window": by_window, "by_league": by_league, "last_run": last_run}
 
 
 def main(argv: list[str] | None = None) -> int:

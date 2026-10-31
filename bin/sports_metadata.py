@@ -617,14 +617,20 @@ def _clean_participants(participants: Iterable[Mapping[str, Any]]) -> list[dict[
 def _title_participants(title: Any) -> list[dict[str, Any]]:
     """Conservative fallback for provider names that omit competitor objects."""
     text = str(title or "").strip()
-    # MLS event streams arrive with the fixture followed by a provider clock
-    # and slot number.  Remove only these observed, league-labelled wrappers;
+    # Event streams arrive with the fixture followed by a provider clock and
+    # slot number.  Remove only these observed, league-labelled wrappers;
     # clean_team_name must still reject an arbitrary time or channel label.
     text = re.sub(
         r"\s+@\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}"
-        r"\s+\d{1,2}:\d{2}\s*[AP]M\s*:MLS\s+\d{1,3}\s*$",
+        r"\s+\d{1,2}:\d{2}\s*[AP]M\s*:(?:MLS|NBA)\s+\d{1,3}\s*$",
         "", text, flags=re.IGNORECASE,
     )
+    if re.match(r"^NHL\s*:", text, re.IGNORECASE):
+        text = re.sub(
+            r"\s+@\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}"
+            r"\s+\d{1,2}:\d{2}\s*[AP]M\s*:Sportsnet\+\s+\d{1,3}\s*$",
+            "", text, flags=re.IGNORECASE,
+        )
     if re.match(r"^\(Apple\)\s+\(MLS\)\s+\d{1,3}\s*\|", text, re.IGNORECASE):
         text = re.sub(r"\s+\(20\d{2}-\d{2}-\d{2}\s+\d{1,2}:\d{2}:\d{2}\)\s*$", "", text)
         text = re.sub(r"\s+\((?:Spanish|French)\)\s*$", "", text, flags=re.IGNORECASE)
