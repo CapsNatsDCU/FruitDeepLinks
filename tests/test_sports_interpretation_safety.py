@@ -2,6 +2,7 @@ import json
 import sqlite3
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
@@ -103,6 +104,42 @@ class SportsInterpretationSafetyTests(unittest.TestCase):
         self.assertEqual([], _title_participants(generic))
         self.assertFalse(self.resolve("generic", generic, "US| ESPN+ PPV")["scheduling_eligible"])
         self.assertEqual([], _title_participants("Soccer: Radford vs. Old Dominion"))
+
+    def test_mls_fixture_titles_keep_teams_without_provider_clock(self):
+        titles = (
+            "Charlotte FC vs Orlando City @ Oct 31 1:00 PM :MLS  01",
+            "(Apple) (MLS) 001 |  Charlotte vs. Orlando  (2026-10-31 12:55:00)",
+            "(Apple) (MLS) 002 |  Charlotte vs. Orlando (Spanish) (2026-10-31 12:55:05)",
+        )
+        for index, title in enumerate(titles):
+            with self.subTest(title=title):
+                participants = _title_participants(title)
+                self.assertEqual(["away", "home"], [item["role"] for item in participants])
+                result = self.resolve(f"mls-fixture-{index}", title, "US| MLS PPV")
+                self.assertTrue(result["scheduling_eligible"])
+                self.assertEqual("validated two-team MLS matchup", result["validation_reason"])
+        self.assertEqual([], _title_participants(
+            "(Apple) (MLS) 032 | MLS Wrap_Up  (2026-11-02 00:10:00)"))
+        self.assertFalse(self.resolve("unscoped", "WASHINGTON @ NEW YORK")["scheduling_eligible"])
+
+    def test_mls_title_parser_change_reprocesses_existing_source(self):
+        self.conn.execute("CREATE TABLE events(id TEXT PRIMARY KEY,title TEXT,start_utc TEXT,end_utc TEXT,raw_attributes_json TEXT,classification_json TEXT)")
+        title = "Charlotte FC vs Orlando City @ Oct 31 1:00 PM :MLS  01"
+        self.conn.execute("INSERT INTO events VALUES(?,?,?,?,?,?)", (
+            "xtream:mls-existing", title, "2026-10-31T17:00:00Z", "2026-10-31T21:00:00Z",
+            json.dumps({"provider": "xtream", "category_name": "US| MLS PPV"}), "[]"))
+        with patch("sports_metadata._title_participants", return_value=[]):
+            sync_legacy_events(self.conn, ai_mode="disabled")
+        before = self.conn.execute("SELECT metadata_json FROM canonical_events").fetchone()[0]
+        self.assertFalse(json.loads(before)["scheduling_eligible"])
+
+        result = sync_legacy_events(self.conn, ai_mode="disabled")
+        self.assertEqual(1, result["resolved"])
+        current = self.conn.execute(
+            "SELECT ce.metadata_json FROM source_event_records ser JOIN canonical_events ce "
+            "ON ce.id=ser.canonical_event_id WHERE ser.source_event_id='xtream:mls-existing'"
+        ).fetchone()[0]
+        self.assertTrue(json.loads(current)["scheduling_eligible"])
 
     def test_legacy_refresh_promotes_wrapped_football_fixture(self):
         self.conn.execute("CREATE TABLE events(id TEXT PRIMARY KEY,title TEXT,start_utc TEXT,end_utc TEXT,raw_attributes_json TEXT,classification_json TEXT)")
