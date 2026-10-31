@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping
 
 import requests
+from sports_metadata import _context_from_text, normalize_sport
 
 
 ESPN_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/scoreboard"
@@ -416,13 +417,25 @@ def _participant_match(reference: list[str], canonical: list[str]) -> bool:
     return matches >= min(2, len(ref))
 
 
+def _scope_conflicts(title: str, category: str, spec: LeagueSpec) -> bool:
+    for field in (title, category):
+        observed_sport, observed_league = _context_from_text(field)
+        if observed_league and _normalize(observed_league) not in _league_aliases(spec):
+            return True
+        if observed_sport and normalize_sport(observed_sport) != normalize_sport(spec.sport):
+            return True
+    return False
+
+
 def _raw_title_match(reference_title: str, reference_participants: list[str],
-                     title: str, spec: LeagueSpec) -> bool:
+                     title: str, spec: LeagueSpec, category: str = "") -> bool:
     """Recognize only full, distinct team names in an imported stream title.
 
     Short provider names need reviewed league-scoped aliases.  This fallback
     deliberately cannot infer those aliases or grant scheduling eligibility.
     """
+    if _scope_conflicts(title, category, spec):
+        return False
     observed = f" {_normalize(title)} "
     if spec.sport == "Motorsport":
         expected = _normalize(reference_title)
@@ -447,13 +460,8 @@ def _possible_import(reference_participants: list[str], title: str, category: st
         return False
     if re.search(r"\b(?:pregame|postgame|replay|highlights?|wrap.?up|preview|recap)\b", title, re.IGNORECASE):
         return False
-    from sports_metadata import _context_from_text, normalize_sport
-    for field in (title, category):
-        observed_sport, observed_league = _context_from_text(field)
-        if observed_league and _normalize(observed_league) not in _league_aliases(spec):
-            return False
-        if observed_sport and normalize_sport(observed_sport) != normalize_sport(spec.sport):
-            return False
+    if _scope_conflicts(title, category, spec):
+        return False
     markers = []
     for participant in reference_participants[:2]:
         words = [word for word in _normalize(participant).split()
@@ -491,8 +499,10 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
     canonical: list[dict[str, Any]] = []
     if "canonical_events" in tables:
         canonical = [dict(row) for row in conn.execute("""
-          SELECT ce.id,ce.title,ce.start_utc,ce.league_id,l.name AS league_name
+          SELECT ce.id,ce.title,ce.start_utc,ce.league_id,l.name AS league_name,
+                 s.name AS sport_name
           FROM canonical_events ce LEFT JOIN leagues l ON l.id=ce.league_id
+          LEFT JOIN sports s ON s.id=ce.sport_id
           WHERE COALESCE(ce.status,'')!='superseded'
             AND datetime(ce.start_utc) BETWEEN datetime(?) AND datetime(?)
         """, (utc_now(current - timedelta(days=1)), utc_now(end)))]
@@ -602,6 +612,8 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
         for event in canonical:
             if _normalize(event.get("league_name")) not in _league_aliases(spec):
                 continue
+            if event.get("sport_name") and normalize_sport(event["sport_name"]) != normalize_sport(spec.sport):
+                continue
             canonical_start = _parse_utc(event.get("start_utc"))
             if not reference_start or not canonical_start or abs((canonical_start - reference_start).total_seconds()) > 7200:
                 continue
@@ -624,7 +636,8 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
         corroborated_ids = {item[0] for item in candidates}
         for source_start, event in imported_by_start[first:last]:
             if not _raw_title_match(reference["title"], reference_participants,
-                                    event.get("title") or "", spec):
+                                    event.get("title") or "", spec,
+                                    event.get("channel_name") or ""):
                 continue
             source_id = str(event["id"])
             mapped_id = source_canonical_ids.get(source_id)

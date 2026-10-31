@@ -252,6 +252,38 @@ class SportsScheduleAuditTests(unittest.TestCase):
         self.assertEqual(1, result["possible_import_count"])
         self.assertEqual(["likely"], [candidate["event_id"] for candidate in item["possible_imports"]])
 
+    def test_snapshot_rejects_league_name_under_wrong_sport(self):
+        now_text = "2026-09-30T12:00:00Z"
+        self.conn.execute("""
+          INSERT INTO sports_schedule_reference_events(
+            source,league_key,source_event_id,title,start_utc,participants_json,first_seen_utc,last_seen_utc
+          ) VALUES(?,?,?,?,?,?,?,?)
+        """, ("espn", "nhl", "wrong-parent", "Chicago Blackhawks at Boston Bruins",
+              "2026-10-01T17:00:00Z", json.dumps(["Chicago Blackhawks", "Boston Bruins"]),
+              now_text, now_text))
+        resolved = resolve_source_event(self.conn, source="xtream", source_event_id="wrong-sport", data={
+            "title": "Chicago Blackhawks at Boston Bruins", "sport_name": "Soccer",
+            "league_name": "NHL", "start_utc": "2026-10-01T17:00:00Z",
+            "competitors": [{"name": "Chicago Blackhawks"}, {"name": "Boston Bruins"}],
+        })
+        self.assertTrue(resolved["resolved"])
+        self.assertEqual("missing_from_ingestion", snapshot(self.conn, days=14, now=NOW)["events"][0]["coverage_state"])
+
+    def test_snapshot_rejects_full_title_from_conflicting_category(self):
+        now_text = "2026-09-30T12:00:00Z"
+        self.conn.execute("""
+          INSERT INTO sports_schedule_reference_events(
+            source,league_key,source_event_id,title,start_utc,participants_json,first_seen_utc,last_seen_utc
+          ) VALUES(?,?,?,?,?,?,?,?)
+        """, ("espn", "nhl", "wrong-category", "Chicago Blackhawks at Boston Bruins",
+              "2026-10-01T17:00:00Z", json.dumps(["Chicago Blackhawks", "Boston Bruins"]),
+              now_text, now_text))
+        self.conn.execute("CREATE TABLE events(id TEXT PRIMARY KEY,title TEXT,start_utc TEXT,channel_name TEXT)")
+        self.conn.execute("INSERT INTO events VALUES(?,?,?,?)", (
+            "wrong-category", "Chicago Blackhawks vs Boston Bruins",
+            "2026-10-01T17:00:00Z", "US| MLS PPV"))
+        self.assertEqual("missing_from_ingestion", snapshot(self.conn, days=14, now=NOW)["events"][0]["coverage_state"])
+
 
 if __name__ == "__main__":
     unittest.main()
