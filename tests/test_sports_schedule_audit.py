@@ -312,6 +312,55 @@ class SportsScheduleAuditTests(unittest.TestCase):
         self.conn.execute("DELETE FROM lane_events")
         self.assertEqual("playable_found", snapshot(self.conn, days=14, now=NOW)["events"][0]["coverage_state"])
 
+    def test_snapshot_prefers_eligible_duplicate_and_reports_last_decision(self):
+        now_text = "2026-09-30T12:00:00Z"
+        self.conn.execute("""
+          INSERT INTO sports_schedule_reference_events(
+            source,league_key,source_event_id,title,start_utc,participants_json,first_seen_utc,last_seen_utc
+          ) VALUES(?,?,?,?,?,?,?,?)
+        """, ("espn", "nhl", "ottawa", "Ottawa Senators at San Jose Sharks",
+              "2026-10-01T17:00:00Z", json.dumps(["Ottawa Senators", "San Jose Sharks"]),
+              now_text, now_text))
+        bad = resolve_source_event(self.conn, source="xtream", source_event_id="bad", data={
+            "title": "Ottawa Senators at San Jose Sharks", "sport_name": "Ice hockey",
+            "league_name": "NHL", "start_utc": "2026-10-01T17:00:00Z",
+            "competitors": [{"name": "Ottawa Senators", "role": "away"},
+                            {"name": "San Jose Sharks", "role": "home"}],
+        })["canonical_event_id"]
+        row = dict(self.conn.execute("SELECT * FROM canonical_events WHERE id=?", (bad,)).fetchone())
+        row.update(id="eligible", fingerprint="eligible-fingerprint",
+                   metadata_json=json.dumps({"scheduling_eligible": True}))
+        columns = list(row)
+        self.conn.execute(f"INSERT INTO canonical_events({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
+                          [row[column] for column in columns])
+        self.conn.execute("""
+          INSERT INTO canonical_event_participants(event_id,team_id,display_name,role,source_identifier)
+          SELECT 'eligible',team_id,display_name,role,source_identifier
+          FROM canonical_event_participants WHERE event_id=?
+        """, (bad,))
+        self.conn.execute("UPDATE canonical_events SET metadata_json=? WHERE id=?",
+                          (json.dumps({"scheduling_eligible": False, "validation_reason": "ambiguous"}), bad))
+        self.conn.execute("""
+          INSERT INTO source_event_records(source,source_event_id,canonical_event_id,confidence,resolution_kind,last_seen_utc)
+          VALUES('xtream','good','eligible',1,'source_mapping',?)
+        """, (now_text,))
+        self.conn.executescript("""
+          CREATE TABLE playables(event_id TEXT,playable_id TEXT);
+          CREATE TABLE lane_events(lane_id INTEGER,event_id TEXT,is_placeholder INTEGER DEFAULT 0);
+          INSERT INTO playables VALUES('bad','bad-playable');
+          INSERT INTO playables VALUES('good','good-playable');
+          INSERT INTO scheduling_decisions(canonical_event_id,generation_utc,decision)
+            VALUES('eligible','2026-09-30T11:45:00Z','lane_capacity_conflict');
+        """)
+        item = snapshot(self.conn, days=14, now=NOW)["events"][0]
+        self.assertEqual("eligible", item["canonical_event_id"])
+        self.assertEqual("playable_found", item["coverage_state"])
+        self.assertEqual("lane_capacity_conflict", item["last_scheduler_decision"])
+        self.assertEqual("2026-09-30T11:45:00Z", item["last_scheduler_decision_at"])
+
+        self.conn.execute("INSERT INTO lane_events VALUES(10,'bad',0)")
+        self.assertEqual("scheduled", snapshot(self.conn, days=14, now=NOW)["events"][0]["coverage_state"])
+
 
 if __name__ == "__main__":
     unittest.main()

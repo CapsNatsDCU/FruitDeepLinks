@@ -521,7 +521,7 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
     canonical: list[dict[str, Any]] = []
     if "canonical_events" in tables:
         canonical = [dict(row) for row in conn.execute("""
-          SELECT ce.id,ce.title,ce.start_utc,ce.league_id,l.name AS league_name,
+          SELECT ce.id,ce.title,ce.start_utc,ce.league_id,ce.metadata_json,l.name AS league_name,
                  s.name AS sport_name
           FROM canonical_events ce LEFT JOIN leagues l ON l.id=ce.league_id
           LEFT JOIN sports s ON s.id=ce.sport_id
@@ -529,6 +529,22 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
             AND datetime(ce.start_utc) BETWEEN datetime(?) AND datetime(?)
         """, (utc_now(current - timedelta(days=1)), utc_now(end)))]
     participants: dict[str, list[str]] = {}
+    canonical_metadata: dict[str, dict[str, Any]] = {}
+    for event in canonical:
+        try:
+            metadata = json.loads(event.get("metadata_json") or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        canonical_metadata[str(event["id"])] = metadata if isinstance(metadata, dict) else {}
+    decisions: dict[str, dict[str, Any]] = {}
+    if canonical and "scheduling_decisions" in tables:
+        ids = [row["id"] for row in canonical]
+        marks = ",".join("?" for _ in ids)
+        for row in conn.execute(
+            f"SELECT canonical_event_id,decision,generation_utc FROM scheduling_decisions "
+            f"WHERE canonical_event_id IN ({marks}) ORDER BY generation_utc DESC", ids,
+        ):
+            decisions.setdefault(str(row[0]), {"decision": row[1], "generation_utc": row[2]})
     if canonical and "canonical_event_participants" in tables:
         ids = [row["id"] for row in canonical]
         marks = ",".join("?" for _ in ids)
@@ -678,11 +694,15 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
                                abs((source_start - reference_start).total_seconds()), event.get("channel_name")))
         # Prefer observed scheduling, then a real playable, then the closest
         # match.  Database row order must never decide a reference's status.
-        candidates.sort(key=lambda item: (item[3] is not None, item[4] > 0,
-                                           item[2] == "canonical", -item[5]), reverse=True)
+        candidates.sort(key=lambda item: (
+            item[3] is not None, item[4] > 0,
+            canonical_metadata.get(str(item[0]), {}).get("scheduling_eligible") is True,
+            item[2] == "canonical", -item[5]), reverse=True)
         match = candidates[0] if candidates else None
         canonical_id, source_id, match_kind, lane_id, playable_count, _, category = (
             match if match else (None, None, None, None, 0, 0, None))
+        matched_metadata = canonical_metadata.get(str(canonical_id), {})
+        decision = decisions.get(str(canonical_id), {})
         if not match:
             state = "missing_from_ingestion"
         elif lane_id is not None:
@@ -715,6 +735,10 @@ def snapshot(conn: sqlite3.Connection, *, days: int = DEFAULT_DAYS, now: datetim
             "matched_event_id": source_id, "match_kind": match_kind,
             "matched_category": category,
             "playable_count": playable_count, "lane_id": lane_id,
+            "scheduling_eligible": matched_metadata.get("scheduling_eligible"),
+            "validation_reason": matched_metadata.get("validation_reason"),
+            "last_scheduler_decision": decision.get("decision"),
+            "last_scheduler_decision_at": decision.get("generation_utc"),
             "possible_imports": possible_imports,
         })
     summary = {"expected": len(items), "scheduled": 0, "playable_found": 0,
