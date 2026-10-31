@@ -214,12 +214,12 @@ class SportsInterpretationSafetyTests(unittest.TestCase):
     def test_nba_pass_pipe_fixture_keeps_teams_and_is_eligible(self):
         title = ("NEXT | UTA - JAZZ VS POR - TRAIL BLAZERS | Sat 31 Oct 14:00 EDT (US) "
                  "| 8K EXCLUSIVE | US: NBA PASS PPV 1")
-        self.assertEqual(["JAZZ", "TRAIL BLAZERS"],
+        self.assertEqual(["TRAIL BLAZERS", "JAZZ"],
                          [p["name"] for p in _title_participants(title)])
         result = self.resolve("nba-pass", title, "US| NBA PASS PPV ⁸ᴷ")
         self.assertTrue(result["resolved"])
         self.assertTrue(result["scheduling_eligible"])
-        self.assertEqual({("JAZZ", "away"), ("TRAIL BLAZERS", "home")},
+        self.assertEqual({("TRAIL BLAZERS", "away"), ("JAZZ", "home")},
                          self.members(result))
         self.assertEqual([], _title_participants(title.replace("NBA PASS PPV", "SOCCER PPV")))
 

@@ -686,6 +686,10 @@ def _title_participants(title: Any) -> list[dict[str, Any]]:
     away, home = clean_team_name(away), clean_team_name(home)
     if not away or not home or _norm(away) == _norm(home):
         return []
+    if nba_pass_fixture:
+        # This provider writes the home team first: its observed
+        # "JAZZ VS TRAIL BLAZERS" is Trail Blazers at Jazz.
+        away, home = home, away
     return [{"name": away, "role": "away"}, {"name": home, "role": "home"}]
 
 

@@ -723,6 +723,8 @@ class XtreamParsingTest(unittest.TestCase):
                                       "2094", "US| NBA PASS PPV ⁸ᴷ", config(), now=now)
         self.assertIsNotNone(normalized)
         self.assertEqual("2026-10-31T18:00:00Z", normalized["event"]["start_utc"])
+        self.assertEqual("nba-pass-home-first-v2", json.loads(
+            normalized["event"]["raw_attributes_json"])["name_parser_version"])
         self.assertIsNone(parse_start_from_name(
             name, "UTC", now=datetime(2026, 11, 20, tzinfo=timezone.utc),
             event_window_days=7))
